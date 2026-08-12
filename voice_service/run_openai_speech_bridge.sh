@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Lifecycle manager for the isolated Fish/SGLang-compatible candidate bridge.
+# Lifecycle manager for the isolated Fish/SGLang-compatible speech bridge.
 
 set -Eeuo pipefail
 set +x
@@ -185,7 +185,7 @@ start_bridge() {
   kill -TERM "${pid}" 2>/dev/null || true
   if wait_for_exit "${pid}" "${OPENAI_SPEECH_STOP_TIMEOUT_SEC}"; then
     rm -f -- "${PID_FILE}"
-    fail "startup timeout; candidate stopped; inspect ${LOG_FILE}"
+    fail "startup timeout; bridge stopped; inspect ${LOG_FILE}"
   fi
   fail "startup and graceful-stop timed out; PID file retained for safe recovery"
 }

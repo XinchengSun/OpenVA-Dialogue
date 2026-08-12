@@ -28,7 +28,16 @@ port="${FISH_HTTP_PORT:-8001}"
 patch_file="$repo_root/patches/sglang_omni_fish_cross_gpu_host_staging.patch"
 expected_sglang_commit="2e607bc005c1a33801d60ef8f48f2a29d8b18aa5"
 
-for required in "$config" "$patch_file" "$venv/bin/sgl-omni" "$model/config.json" "$reference_dir"; do
+for required in \
+  "$config" \
+  "$patch_file" \
+  "$venv/bin/sgl-omni" \
+  "$model/config.json" \
+  "$model/codec.pth" \
+  "$model/model.safetensors.index.json" \
+  "$model/model-00001-of-00002.safetensors" \
+  "$model/model-00002-of-00002.safetensors" \
+  "$reference_dir"; do
   if [[ ! -e "$required" ]]; then
     echo "missing required path: $required" >&2
     exit 1

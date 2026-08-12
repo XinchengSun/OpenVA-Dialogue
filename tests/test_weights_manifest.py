@@ -32,7 +32,18 @@ class WeightsManifestTests(unittest.TestCase):
         self.assertTrue(all(model["redistribution"] == "upstream-only" for model in dy_models))
         self.assertTrue(all("unknown" in model["license"] for model in dy_models))
         fish = next(model for model in manifest["models"] if model["id"] == "fish-audio-s2-pro")
+        self.assertTrue(fish["required"])
         self.assertEqual(fish["license"], "Fish Audio Research License")
+        self.assertEqual(fish["role"], "primary-tts")
+        self.assertEqual(
+            fish["revision"],
+            "1de9996b6be38b745688de084d87a5633f714e4e",
+        )
+        self.assertEqual(
+            fish["directory_target"],
+            "runtime/fish-s2-pro/models/fishaudio-s2-pro",
+        )
+        self.assertIn("codec.pth", fish["required_files"])
 
     def test_verify_checks_size_and_known_hash_but_allows_unknown_hash(self):
         payload = b"verified fixture"

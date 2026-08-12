@@ -20,7 +20,26 @@ from typing import Any
 from aiohttp import web
 from PIL import Image, ImageOps
 
-from pipecat_dystream.public_access import is_loopback_host
+
+
+def _host_without_port(value: str) -> str:
+    host = (value or "").strip().lower()
+    if host.startswith("["):
+        closing = host.find("]")
+        return host[1:closing] if closing > 0 else ""
+    if host.count(":") == 1:
+        host, _ = host.rsplit(":", 1)
+    return host.rstrip(".")
+
+
+def is_loopback_host(value: str) -> bool:
+    host = _host_without_port(value)
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -109,41 +128,65 @@ def _current_server_port() -> int:
     return int(os.getenv("PORT", "7860"))
 
 
-def _runtime_paths() -> dict[str, Path]:
+def _runtime_paths() -> dict[str, Any]:
+    provider = os.getenv("PIPECAT_TTS_PROVIDER", "").strip().lower()
+    configured_tts = os.getenv("PIPECAT_TTS_BRIDGE_ENV_FILE", "").strip()
     configured_vox = os.getenv("VOXCPM2_ENV_FILE", "").strip()
-    vox_env = Path(configured_vox).expanduser().resolve() if configured_vox else None
+    configured_fish = os.getenv("FISH_S2PRO_ENV_FILE", "").strip()
+    if not provider:
+        provider = "fish_s2pro" if configured_fish else "voxcpm2"
+    if provider not in {"fish_s2pro", "voxcpm2"}:
+        provider = "unsupported"
+    if not configured_tts and provider == "voxcpm2":
+        configured_tts = configured_vox
+    tts_env = Path(configured_tts).expanduser().resolve() if configured_tts else None
+    fish_env = Path(configured_fish).expanduser().resolve() if configured_fish else None
     configured_main = os.getenv("CUSTOMIZATION_MAIN_ENV_FILE", "").strip()
     if configured_main:
         main_env = Path(configured_main).expanduser().resolve()
-    elif vox_env is not None and (vox_env.parent / "custom_cascade.env").is_file():
-        main_env = (vox_env.parent / "custom_cascade.env").resolve()
+    elif tts_env is not None and (tts_env.parent / "custom_cascade.env").is_file():
+        main_env = (tts_env.parent / "custom_cascade.env").resolve()
     else:
         main_env = (REPO_ROOT / ".env").resolve()
-    if vox_env is None:
-        vox_env = (REPO_ROOT / "voice_service" / ".env.voxcpm2").resolve()
+    if tts_env is None:
+        fallback_name = (
+            ".env.openai_speech"
+            if provider == "fish_s2pro"
+            else ".env.voxcpm2"
+        )
+        tts_env = (REPO_ROOT / "voice_service" / fallback_name).resolve()
+    if fish_env is None:
+        fish_env = (REPO_ROOT / "scripts" / ".env.fish_s2pro").resolve()
     configured_root = os.getenv("CUSTOMIZATION_ROOT", "").strip()
     if configured_root:
         runtime_root = Path(configured_root).expanduser().resolve()
-    elif vox_env.parent.name == "config":
-        runtime_root = (vox_env.parent.parent / "customizations").resolve()
+    elif tts_env.parent.name == "config":
+        runtime_root = (tts_env.parent.parent / "customizations").resolve()
     else:
         runtime_root = (REPO_ROOT / "runtime" / "customizations").resolve()
     return {
+        "tts_provider": provider,
         "runtime_root": runtime_root,
         "main_env": main_env,
-        "vox_env": vox_env,
+        "tts_env": tts_env,
+        "fish_env": fish_env,
         "run_demo": (REPO_ROOT / "scripts" / "run_demo.sh").resolve(),
         "controller": (REPO_ROOT / "scripts" / "activate_customization.py").resolve(),
         "validator": (REPO_ROOT / "scripts" / "validate_custom_avatar.py").resolve(),
     }
 
 
-def _runtime_missing(paths: dict[str, Path]) -> list[str]:
-    return [
+def _runtime_missing(paths: dict[str, Any]) -> list[str]:
+    missing = [
         key
-        for key in ("main_env", "vox_env", "run_demo", "controller", "validator")
+        for key in ("main_env", "tts_env", "run_demo", "controller", "validator")
         if not paths[key].is_file()
     ]
+    if paths["tts_provider"] == "fish_s2pro" and not paths["fish_env"].is_file():
+        missing.append("fish_env")
+    if paths["tts_provider"] not in {"fish_s2pro", "voxcpm2"}:
+        missing.append("tts_provider")
+    return missing
 
 
 def _probe_media(path: Path) -> dict[str, Any]:
@@ -427,6 +470,8 @@ def register_customization_routes(app: web.Application) -> None:
             "status": "ok",
             "available": not missing and not runtime_root_error,
             "missing_components": missing,
+            "tts_provider": paths["tts_provider"],
+            "transcript_required": paths["tts_provider"] == "fish_s2pro",
             "active": active,
             "requirements": {
                 "image": "JPG/PNG/WebP，至少 512×512，单人正脸且清晰",
@@ -492,6 +537,10 @@ def register_customization_routes(app: web.Application) -> None:
                     await _save_part(part, media_source, MAX_MEDIA_BYTES)
             if image_source is None or media_source is None:
                 raise CustomizationInputError("必须同时上传一张照片和一段音频或视频")
+            if paths["tts_provider"] == "fish_s2pro" and not transcript.strip():
+                raise CustomizationInputError(
+                    "Fish Speech S2 Pro 需要与参考声音逐字一致的参考文本"
+                )
             _write_json(job_dir / "status.json", {
                 "job_id": job_id,
                 "state": "processing",
@@ -594,9 +643,12 @@ def register_customization_routes(app: web.Application) -> None:
             "--runtime-root", str(paths["runtime_root"]),
             "--repo-root", str(REPO_ROOT),
             "--main-env", str(paths["main_env"]),
-            "--vox-env", str(paths["vox_env"]),
+            "--tts-provider", str(paths["tts_provider"]),
+            "--tts-env", str(paths["tts_env"]),
             "--port", str(_current_server_port()),
         ]
+        if paths["tts_provider"] == "fish_s2pro":
+            command.extend(["--fish-env", str(paths["fish_env"])])
         try:
             with log_path.open("ab", buffering=0) as log_output:
                 subprocess.Popen(

@@ -2,7 +2,7 @@
 
 This module is imported only when ``PIPECAT_MSE_DIALOG_MODE=custom_cascade``.
 Keeping the import lazy is intentional: the verified native-S2S rollback path
-must not depend on FunASR, the local VoxCPM2 bridge, or custom credentials.
+must not depend on FunASR, the local TTS bridge, or custom credentials.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from .funasr_streaming import ParaformerStreamingSTTService
 from .realtime_search import normalize_realtime_search_mode
 from .resilient_llm import RecoveringOpenAILLMService
-from .voxcpm2_tts import VoxCPM2LocalTTSService
+from .voxcpm2_tts import LocalPCMTTSService
 
 
 DEFAULT_SYSTEM_INSTRUCTION = (
@@ -225,7 +225,7 @@ async def _warm_llm(llm: Any, model: str, extra: dict[str, Any]) -> None:
 class CustomCascadeComponents:
     stt: ParaformerStreamingSTTService
     llm: RecoveringOpenAILLMService
-    tts: VoxCPM2LocalTTSService
+    tts: LocalPCMTTSService
     user_aggregator: Any
     assistant_aggregator: Any
     llm_model: str
@@ -250,7 +250,7 @@ class CustomCascadeComponents:
                 timeout=remaining,
             )
         self._llm_ready = True
-        self.log("[CUSTOM CASCADE] ASR, LLM and VoxCPM2 bridge ready")
+        self.log("[CUSTOM CASCADE] ASR, LLM and TTS bridge ready")
 
     @property
     def ready(self) -> bool:
@@ -361,9 +361,7 @@ def create_custom_cascade_components(
         timeout=float(os.getenv("PIPECAT_LLM_TIMEOUT_SEC", "8.0")),
     )
 
-    tts = VoxCPM2LocalTTSService(
-        uri=os.getenv("VOXCPM2_BRIDGE_URI", "ws://127.0.0.1:8770")
-    )
+    tts = LocalPCMTTSService()
     context = LLMContext()
     aggregators = LLMContextAggregatorPair(
         context,

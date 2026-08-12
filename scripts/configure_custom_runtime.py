@@ -85,15 +85,24 @@ def _raw_first(values: dict[str, str], *keys: str) -> str:
 def _parser() -> argparse.ArgumentParser:
     default_repo = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(
-        description="Create isolated custom-cascade and VoxCPM2 env files."
+        description="Create isolated custom-cascade and TTS runtime env files."
     )
     parser.add_argument("--repo-root", type=Path, default=default_repo)
     parser.add_argument("--runtime-root", type=Path, default=DEFAULT_RUNTIME_ROOT)
     parser.add_argument("--source-env", type=Path)
+    parser.add_argument("--pipecat-python", type=Path)
     parser.add_argument("--prompt-wav", type=Path)
     parser.add_argument("--prompt-text-file", type=Path)
     parser.add_argument("--dystream-gpus")
-    parser.add_argument("--tts-gpu", default="4")
+    parser.add_argument(
+        "--tts-backend",
+        choices=("fish_s2pro", "voxcpm2"),
+        default="fish_s2pro",
+    )
+    parser.add_argument("--fish-gpus", default="2,3")
+    parser.add_argument("--fish-profile", choices=("balanced", "low_ttfa_gapless"), default="low_ttfa_gapless")
+    parser.add_argument("--fish-http-port", type=int, default=8001)
+    parser.add_argument("--tts-gpu", default="2", help="Physical GPU used only by the VoxCPM2 fallback.")
     parser.add_argument("--llm-model", default="qwen3.7-flash")
     parser.add_argument(
         "--realtime-search-mode",
@@ -110,7 +119,7 @@ def _parser() -> argparse.ArgumentParser:
         default="",
         help="Optional model used only for real-time search turns.",
     )
-    parser.add_argument("--bridge-uri", default="ws://127.0.0.1:8770")
+    parser.add_argument("--bridge-uri")
     return parser
 
 
@@ -142,33 +151,70 @@ def main() -> None:
     if not llm_key:
         raise SystemExit("source env contains no reusable LLM/DashScope API key")
 
-    bridge_env = runtime_root / "config" / "voxcpm2.env"
     custom_env = runtime_root / "config" / "custom_cascade.env"
     asr_cache = runtime_root / "cache" / "pipecat" / "modelscope"
-    model_path = runtime_root / "models" / "VoxCPM2"
-    voxcpm_python = runtime_root / "venvs" / "voxcpm2-nano-2.0.3" / "bin" / "python"
     dystream_gpus = args.dystream_gpus or _plain(values.get("CUDA_VISIBLE_DEVICES", "0,1"))
     gpu_items = [item.strip() for item in dystream_gpus.split(",") if item.strip()]
     if len(gpu_items) != 2 or gpu_items[0] == gpu_items[1]:
         raise SystemExit("DyStream requires exactly two distinct CUDA_VISIBLE_DEVICES")
-    if not args.tts_gpu.isdigit():
-        raise SystemExit("--tts-gpu must be one physical numeric GPU id")
-    if args.tts_gpu in gpu_items:
-        raise SystemExit("VoxCPM2 physical GPU must not overlap the two DyStream GPUs")
-    bridge_url = urlsplit(args.bridge_uri)
+    if not all(item.isdigit() for item in gpu_items):
+        raise SystemExit("--dystream-gpus must contain two physical numeric GPU ids")
+
+    if args.tts_backend == "fish_s2pro":
+        fish_gpu_items = [
+            item.strip() for item in args.fish_gpus.split(",") if item.strip()
+        ]
+        if (
+            len(fish_gpu_items) != 2
+            or fish_gpu_items[0] == fish_gpu_items[1]
+            or not all(item.isdigit() for item in fish_gpu_items)
+        ):
+            raise SystemExit("--fish-gpus must contain two distinct physical numeric GPU ids")
+        if set(fish_gpu_items) & set(gpu_items):
+            raise SystemExit("Fish physical GPUs must not overlap the two DyStream GPUs")
+        if prompt_text_file is None:
+            raise SystemExit("Fish S2 Pro requires --prompt-text-file")
+        prompt_text = prompt_text_file.read_text(encoding="utf-8").strip()
+        if not prompt_text:
+            raise SystemExit("Fish S2 Pro prompt transcript must not be empty")
+        if not 1 <= args.fish_http_port <= 65535:
+            raise SystemExit("--fish-http-port must be between 1 and 65535")
+        bridge_uri = args.bridge_uri or "ws://127.0.0.1:8771"
+        bridge_env = runtime_root / "config" / "fish_speech_bridge.env"
+        upstream_env = runtime_root / "config" / "fish_s2pro.env"
+    else:
+        fish_gpu_items = []
+        prompt_text = ""
+        if not args.tts_gpu.isdigit():
+            raise SystemExit("--tts-gpu must be one physical numeric GPU id")
+        if args.tts_gpu in gpu_items:
+            raise SystemExit("VoxCPM2 physical GPU must not overlap the two DyStream GPUs")
+        bridge_uri = args.bridge_uri or "ws://127.0.0.1:8770"
+        bridge_env = runtime_root / "config" / "voxcpm2.env"
+        upstream_env = None
+
+    bridge_url = urlsplit(bridge_uri)
     try:
         bridge_port = bridge_url.port
     except ValueError as exc:
         raise SystemExit(f"invalid local bridge URI: {exc}") from exc
     if (
         bridge_url.scheme != "ws"
-        or bridge_url.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or bridge_url.hostname != "127.0.0.1"
         or bridge_port is None
         or bridge_url.path not in {"", "/"}
         or bridge_url.query
         or bridge_url.fragment
     ):
-        raise SystemExit("--bridge-uri must be a local ws://host:port URI")
+        raise SystemExit("--bridge-uri must use ws://127.0.0.1:PORT")
+    if args.tts_backend == "fish_s2pro" and bridge_port == args.fish_http_port:
+        raise SystemExit("Fish HTTP port and PCM bridge port must be different")
+
+    pipecat_python = (
+        args.pipecat_python.resolve()
+        if args.pipecat_python
+        else runtime_root / "venvs" / "pipecat" / "bin" / "python"
+    )
 
     replacements = {
         "PIPECAT_MSE_DIALOG_MODE": "custom_cascade",
@@ -190,9 +236,17 @@ def main() -> None:
         "PIPECAT_ASR_DECODER_CHUNK_LOOK_BACK": "1",
         "PIPECAT_ASR_PRE_ROLL_SEC": "0.30",
         "MODELSCOPE_CACHE": shlex.quote(str(asr_cache)),
-        "VOXCPM2_BRIDGE_URI": args.bridge_uri,
+        "PIPECAT_TTS_PROVIDER": args.tts_backend,
+        "PIPECAT_TTS_BRIDGE_URI": bridge_uri,
+        "PIPECAT_TTS_MODEL": "fishaudio/s2-pro" if args.tts_backend == "fish_s2pro" else "VoxCPM2",
+        "PIPECAT_TTS_VOICE": "zero-shot-cloned" if args.tts_backend == "fish_s2pro" else "cloned",
+        "PIPECAT_TTS_CONNECT_TIMEOUT_SEC": "45",
+        "PIPECAT_TTS_BRIDGE_ENV_FILE": shlex.quote(str(bridge_env)),
+        "FISH_S2PRO_ENV_FILE": shlex.quote(str(upstream_env)) if upstream_env else "",
+        # Keep legacy keys for the provider-neutral adapter and older snapshots.
+        "VOXCPM2_BRIDGE_URI": bridge_uri,
         "VOXCPM2_CONNECT_TIMEOUT_SEC": "45",
-        "VOXCPM2_ENV_FILE": shlex.quote(str(bridge_env)),
+        "VOXCPM2_ENV_FILE": shlex.quote(str(bridge_env)) if args.tts_backend == "voxcpm2" else "",
         "CUDA_VISIBLE_DEVICES": ",".join(gpu_items),
         "MOTION_GPU": "0",
         "RENDER_GPU": "1",
@@ -201,36 +255,83 @@ def main() -> None:
     custom_lines = _upsert(source_lines, replacements)
     _write_private(custom_env, "\n".join(custom_lines))
 
-    bridge_values = {
-        "CUDA_VISIBLE_DEVICES": args.tts_gpu,
-        "VOXCPM2_DEVICES": "0",
-        "VOXCPM2_PYTHON": str(voxcpm_python),
-        "VOXCPM2_MODEL_PATH": str(model_path),
-        "VOXCPM2_PROMPT_WAV": str(prompt_wav),
-        "VOXCPM2_BRIDGE_HOST": "127.0.0.1",
-        "VOXCPM2_BRIDGE_PORT": "8770",
-        "VOXCPM2_INFERENCE_TIMESTEPS": "10",
-        "VOXCPM2_GPU_MEMORY_UTILIZATION": "0.90",
-        "VOXCPM2_MAX_BATCHED_TOKENS": "8192",
-        "VOXCPM2_MAX_NUM_SEQS": "16",
-        "VOXCPM2_WARMUP_TEXT": "\u4f60\u597d\u3002",
-        "VOXCPM2_WARMUP_TIMEOUT_SEC": "120",
-        "VOXCPM2_START_TIMEOUT_SEC": "600",
-        "VOXCPM2_STOP_TIMEOUT_SEC": "120",
-        "VOXCPM2_LOG_LEVEL": "INFO",
-    }
-    if prompt_text_file is not None:
-        bridge_values["VOXCPM2_PROMPT_TEXT_FILE"] = str(prompt_text_file)
+    if args.tts_backend == "fish_s2pro":
+        fish_root = runtime_root / "runtime" / "fish-s2-pro"
+        bridge_values = {
+            "OPENAI_SPEECH_PYTHON": str(pipecat_python),
+            "OPENAI_SPEECH_BRIDGE_HOST": "127.0.0.1",
+            "OPENAI_SPEECH_BRIDGE_PORT": str(bridge_port),
+            "OPENAI_SPEECH_BASE_URL": f"http://127.0.0.1:{args.fish_http_port}",
+            "OPENAI_SPEECH_HEALTH_PATH": "/health",
+            "OPENAI_SPEECH_ENDPOINT": "/v1/audio/speech",
+            "OPENAI_SPEECH_PROVIDER": "sglang",
+            "OPENAI_SPEECH_MODEL": "fishaudio/s2-pro",
+            "OPENAI_SPEECH_VOICE": "default",
+            "OPENAI_SPEECH_SAMPLE_RATE": "44100",
+            "OPENAI_SPEECH_REFERENCE_AUDIO": str(prompt_wav),
+            "OPENAI_SPEECH_REFERENCE_TEXT": prompt_text,
+            "OPENAI_SPEECH_EXTRA_BODY_JSON": '{"seed":20260811}',
+            "OPENAI_SPEECH_WARMUP_TEXT": "\u4f60\u597d\u3002",
+            "OPENAI_SPEECH_REQUEST_TIMEOUT_SEC": "120",
+            "OPENAI_SPEECH_CONNECT_TIMEOUT_SEC": "10",
+        }
+        upstream_values = {
+            "FISH_ROOT": str(fish_root),
+            "SGLANG_OMNI_SRC": str(fish_root / "src" / "sglang-omni-ghproxy"),
+            "FISH_VENV": str(fish_root / "venv"),
+            "FISH_MODEL": str(fish_root / "models" / "fishaudio-s2-pro"),
+            "FISH_REFERENCE_DIR": str(prompt_wav.parent),
+            "FISH_CUDA_VISIBLE_DEVICES": ",".join(fish_gpu_items),
+            "FISH_HTTP_HOST": "127.0.0.1",
+            "FISH_HTTP_PORT": str(args.fish_http_port),
+            "FISH_PROFILE": args.fish_profile,
+            "FISH_START_TIMEOUT_SEC": "900",
+            "FISH_STOP_TIMEOUT_SEC": "120",
+        }
+        upstream_text = "\n".join(
+            f"{key}={shlex.quote(value)}" for key, value in upstream_values.items()
+        )
+        assert upstream_env is not None
+        _write_private(upstream_env, upstream_text)
+    else:
+        model_path = runtime_root / "models" / "VoxCPM2"
+        voxcpm_python = runtime_root / "venvs" / "voxcpm2-nano-2.0.3" / "bin" / "python"
+        bridge_values = {
+            "CUDA_VISIBLE_DEVICES": args.tts_gpu,
+            "VOXCPM2_DEVICES": "0",
+            "VOXCPM2_PYTHON": str(voxcpm_python),
+            "VOXCPM2_MODEL_PATH": str(model_path),
+            "VOXCPM2_PROMPT_WAV": str(prompt_wav),
+            "VOXCPM2_BRIDGE_HOST": "127.0.0.1",
+            "VOXCPM2_BRIDGE_PORT": str(bridge_port),
+            "VOXCPM2_INFERENCE_TIMESTEPS": "10",
+            "VOXCPM2_GPU_MEMORY_UTILIZATION": "0.90",
+            "VOXCPM2_MAX_BATCHED_TOKENS": "8192",
+            "VOXCPM2_MAX_NUM_SEQS": "16",
+            "VOXCPM2_WARMUP_TEXT": "\u4f60\u597d\u3002",
+            "VOXCPM2_WARMUP_TIMEOUT_SEC": "120",
+            "VOXCPM2_START_TIMEOUT_SEC": "600",
+            "VOXCPM2_STOP_TIMEOUT_SEC": "120",
+            "VOXCPM2_LOG_LEVEL": "INFO",
+        }
+        if prompt_text_file is not None:
+            bridge_values["VOXCPM2_PROMPT_TEXT_FILE"] = str(prompt_text_file)
     bridge_text = "\n".join(
         f"{key}={shlex.quote(value)}" for key, value in bridge_values.items()
     )
     _write_private(bridge_env, bridge_text)
 
     print(f"CUSTOM_ENV_READY={custom_env}")
-    print(f"VOXCPM2_ENV_READY={bridge_env}")
+    print(f"TTS_BRIDGE_ENV_READY={bridge_env}")
+    if upstream_env is not None:
+        print(f"FISH_S2PRO_ENV_READY={upstream_env}")
     print(
         "GPU_MAP_READY="
-        f"dystream:{','.join(gpu_items)} voxcpm2_physical:{args.tts_gpu}"
+        + (
+            f"dystream:{','.join(gpu_items)} fish:{','.join(fish_gpu_items)}"
+            if args.tts_backend == "fish_s2pro"
+            else f"dystream:{','.join(gpu_items)} voxcpm2:{args.tts_gpu}"
+        )
     )
     print("CREDENTIALS_COPIED=yes values_printed=no")
 

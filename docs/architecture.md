@@ -13,7 +13,7 @@ Browser microphone PCM
          -> Paraformer streaming ASR
          -> resilient OpenAI-compatible LLM
          -> optional provider web search
-         -> VoxCPM2 cloned TTS
+         -> Fish Speech S2 Pro cloned TTS through SGLang-Omni
   -> assistant PCM (normalized by the AV2AV engine as required)
   -> continuous DyStream motion worker (logical GPU 0)
   -> fixed-source LIA render worker (logical GPU 1)
@@ -56,10 +56,12 @@ one fMP4 timeline.
 
 - DyStream motion and LIA rendering use two distinct logical devices selected by
   `CUDA_VISIBLE_DEVICES`, normally logical `0` and `1`.
-- The custom cascade requires a third, non-overlapping physical GPU for
-  VoxCPM2. The configuration generator rejects overlap.
-- Fish S2 Pro is an optional candidate. Its tested dual-GPU path separates its
-  TTS engine and vocoder and is not the default production topology.
+- The current deployment assigns two non-overlapping physical GPUs
+  to Fish S2 Pro through SGLang-Omni: logical GPU 0 runs the TTS engine and
+  logical GPU 1 runs the vocoder.
+- The unified lifecycle manages the Fish HTTP service and local PCM bridge.
+  VoxCPM2 remains a compatible single-GPU fallback selected explicitly during
+  configuration.
 
 ## Output and buffering
 

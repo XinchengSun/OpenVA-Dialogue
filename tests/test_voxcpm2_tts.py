@@ -29,8 +29,12 @@ try:
     )
     from pipecat.processors.frame_processor import FrameDirection
     from pipecat.utils.asyncio.task_manager import TaskManager
-    from pipecat_dystream.voxcpm2_tts import VoxCPM2LocalTTSService
+    from pipecat_dystream.voxcpm2_tts import (
+        LocalPCMTTSService,
+        VoxCPM2LocalTTSService,
+    )
 except ModuleNotFoundError:
+    LocalPCMTTSService = None
     VoxCPM2LocalTTSService = None
 
 
@@ -515,6 +519,40 @@ class VoxCPM2BridgeTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipIf(VoxCPM2LocalTTSService is None, "Pipecat is not installed")
 class VoxCPM2PipecatAdapterTests(unittest.IsolatedAsyncioTestCase):
+    def test_generic_fish_config_takes_precedence_and_reports_provider(self):
+        with patch.dict(
+            os.environ,
+            {
+                "PIPECAT_TTS_BRIDGE_URI": "ws://127.0.0.1:8771",
+                "PIPECAT_TTS_MODEL": "fishaudio/s2-pro",
+                "PIPECAT_TTS_VOICE": "zero-shot-cloned",
+                "VOXCPM2_BRIDGE_URI": "ws://127.0.0.1:8770",
+            },
+            clear=True,
+        ):
+            service = LocalPCMTTSService(connector=lambda uri: None)
+
+        snapshot = service.health_snapshot()
+        self.assertFalse(snapshot["ready"])
+        self.assertEqual(snapshot["model"], "fishaudio/s2-pro")
+        self.assertEqual(snapshot["voice"], "zero-shot-cloned")
+        self.assertEqual(snapshot["bridge_uri"], "ws://127.0.0.1:8771")
+        self.assertEqual(snapshot["active_requests"], 0)
+        self.assertIsNone(snapshot["warmup_elapsed_ms"])
+
+    def test_legacy_voxcpm_config_keeps_fallback_identity(self):
+        with patch.dict(
+            os.environ,
+            {"VOXCPM2_BRIDGE_URI": "ws://127.0.0.1:8770"},
+            clear=True,
+        ):
+            service = LocalPCMTTSService(connector=lambda uri: None)
+
+        snapshot = service.health_snapshot()
+        self.assertEqual(snapshot["model"], "VoxCPM2")
+        self.assertEqual(snapshot["voice"], "cloned")
+        self.assertEqual(snapshot["bridge_uri"], "ws://127.0.0.1:8770")
+
     async def test_complete_upstream_sentence_starts_tts_without_lookahead(self):
         health = _FakeClientWebSocket(
             [json.dumps({"type": "health", "status": "ok", "sample_rate": 24_000})]

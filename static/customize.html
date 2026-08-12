@@ -377,10 +377,10 @@
     </section>
 
     <details class="advanced" id="advanced">
-      <summary>高级选项 · 参考文本</summary>
+      <summary id="transcriptSummary">参考文本</summary>
       <div class="advancedBody">
-        <textarea id="transcript" maxlength="1000" placeholder="准确知道音频内容时再填写；不确定请留空。"></textarea>
-        <p class="hint">文本必须与参考音频完全一致。</p>
+        <textarea id="transcript" maxlength="1000" placeholder="请输入与参考声音逐字一致的文本。"></textarea>
+        <p class="hint" id="transcriptHint">Fish Speech S2 Pro 必填；文本必须与参考声音完全一致。</p>
       </div>
     </details>
 
@@ -407,6 +407,8 @@
     const imageInput = document.getElementById('imageInput');
     const mediaInput = document.getElementById('mediaInput');
     const transcript = document.getElementById('transcript');
+    const transcriptSummary = document.getElementById('transcriptSummary');
+    const transcriptHint = document.getElementById('transcriptHint');
     const imagePreview = document.getElementById('imagePreview');
     const imagePlaceholder = document.getElementById('imagePlaceholder');
     const audioPreview = document.getElementById('audioPreview');
@@ -447,6 +449,7 @@
     let currentJobState = '';
     let currentJobRetryable = false;
     let serviceAvailable = false;
+    let transcriptRequired = true;
     let operationPhase = 'idle';
     let pollGeneration = 0;
     let draftRevision = 0;
@@ -475,6 +478,10 @@
 
     function hasFiles() {
       return Boolean(imageInput.files[0] && mediaInput.files[0]);
+    }
+
+    function hasRequiredTranscript() {
+      return !transcriptRequired || Boolean(transcript.value.trim());
     }
 
     function hasDraft() {
@@ -607,7 +614,8 @@
       uploadGrid.hidden = chatReady;
       advanced.hidden = chatReady;
       generateBtn.hidden = chatReady;
-      generateBtn.disabled = locked || !serviceAvailable || (!hasFiles() && !canContinueJob());
+      generateBtn.disabled = locked || !serviceAvailable
+        || (!canContinueJob() && (!hasFiles() || !hasRequiredTranscript()));
       generateBtn.textContent = canContinueJob()
         ? (currentJobState === 'failed' ? '重试启用' : '继续启用')
         : '生成并启用';
@@ -822,6 +830,11 @@
 
       const authoritativeActive = data.active && data.active.job_id ? data.active : null;
       serviceAvailable = data.available !== false;
+      transcriptRequired = data.transcript_required === true;
+      transcriptSummary.textContent = transcriptRequired ? '参考文本 · 必填' : '高级选项 · 参考文本';
+      transcriptHint.textContent = transcriptRequired
+        ? 'Fish Speech S2 Pro 必填；文本必须与参考声音完全一致。'
+        : '文本必须与参考声音完全一致；不确定时可以留空。';
       renderActive(authoritativeActive);
       serviceBadge.classList.toggle('unavailable', !serviceAvailable);
       serviceLabel.textContent = serviceAvailable ? '服务已连接' : '服务尚未就绪';
@@ -1099,6 +1112,11 @@
       try {
         const data = await fetchActiveSnapshot();
         serviceAvailable = data.available !== false;
+        transcriptRequired = data.transcript_required === true;
+        transcriptSummary.textContent = transcriptRequired ? '参考文本 · 必填' : '高级选项 · 参考文本';
+        transcriptHint.textContent = transcriptRequired
+          ? 'Fish Speech S2 Pro 必填；文本必须与参考声音完全一致。'
+          : '文本必须与参考声音完全一致；不确定时可以留空。';
         renderActive(data.active || null);
         readyForChat = Boolean(activeJob && serviceAvailable && !currentJob);
         serviceBadge.classList.toggle('unavailable', !serviceAvailable);

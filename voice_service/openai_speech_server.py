@@ -1,8 +1,7 @@
-"""Candidate OpenAI-compatible streaming speech bridge.
+"""OpenAI-compatible streaming speech bridge.
 
-This module intentionally runs beside the production VoxCPM2 bridge.  It
-adapts raw PCM streaming from engines such as SGLang-Omni Fish Speech S2 Pro
-to the already verified local WebSocket contract used by Pipecat.
+This module adapts raw PCM streaming from SGLang-Omni Fish Speech S2 Pro and
+other compatible engines to the local WebSocket contract used by Pipecat.
 """
 
 from __future__ import annotations
@@ -325,7 +324,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     parser = argparse.ArgumentParser(
-        description="Candidate OpenAI-compatible PCM bridge"
+        description="OpenAI-compatible PCM speech bridge"
     )
     parser.add_argument(
         "--host", default=os.getenv("OPENAI_SPEECH_BRIDGE_HOST", "127.0.0.1")
@@ -340,11 +339,11 @@ def main() -> None:
         raise SystemExit("OpenAI speech bridge must bind to localhost")
 
     backend = _backend_from_env()
-    # Reuse the production-tested wire protocol and signal-safe runner.  The
-    # candidate stays isolated by its module name, process, port and env file.
-    candidate_warmup = os.getenv("OPENAI_SPEECH_WARMUP_TEXT", "").strip()
-    if candidate_warmup and not os.getenv("VOXCPM2_WARMUP_TEXT", "").strip():
-        os.environ["VOXCPM2_WARMUP_TEXT"] = candidate_warmup
+    # Reuse the production-tested wire protocol and signal-safe runner while
+    # keeping this HTTP-backed bridge isolated by process, port and env file.
+    warmup_text = os.getenv("OPENAI_SPEECH_WARMUP_TEXT", "").strip()
+    if warmup_text and not os.getenv("VOXCPM2_WARMUP_TEXT", "").strip():
+        os.environ["VOXCPM2_WARMUP_TEXT"] = warmup_text
     asyncio.run(_run_server(args.host, args.port, _backend=backend))
 
 

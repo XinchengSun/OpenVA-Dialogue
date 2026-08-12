@@ -1,13 +1,28 @@
 import importlib.util
+import json
 import math
+import os
 import shutil
 import struct
 import subprocess
 import tempfile
 import unittest
 import wave
+from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
+
+try:
+    import fcntl  # noqa: F401
+except ModuleNotFoundError:
+    import sys
+    import types
+
+    fcntl_stub = types.ModuleType("fcntl")
+    fcntl_stub.LOCK_EX = 2
+    fcntl_stub.LOCK_NB = 4
+    fcntl_stub.flock = lambda *_args, **_kwargs: None
+    sys.modules["fcntl"] = fcntl_stub
 
 from PIL import Image
 
@@ -16,6 +31,8 @@ from customization_runtime import (
     _normalize_image,
     _normalize_voice,
     _patch_env_file,
+    _runtime_missing,
+    _runtime_paths,
 )
 
 
@@ -27,6 +44,96 @@ STATIC_ROOT = Path(__file__).resolve().parents[1] / "static"
 
 
 class CustomizationRuntimeTests(unittest.TestCase):
+    def _activation_fixture(self, root, provider="fish_s2pro", transcript="参考文本。"):
+        runtime_root = root / "customizations"
+        job_dir = runtime_root / ("a" * 32)
+        assets = job_dir / "assets"
+        assets.mkdir(parents=True)
+        image = assets / "reference.png"
+        voice = assets / "voice_reference.wav"
+        image.write_bytes(b"image")
+        voice.write_bytes(b"voice")
+        transcript_path = assets / "voice_reference.txt"
+        if transcript:
+            transcript_path.write_text(transcript + "\n", encoding="utf-8")
+        main_env = root / "custom.env"
+        tts_env = root / "tts.env"
+        fish_env = root / "fish.env"
+        main_env.write_text("DYSTREAM_REF_IMAGE=/old.png\n", encoding="utf-8")
+        if provider == "fish_s2pro":
+            tts_env.write_text(
+                "OPENAI_SPEECH_REFERENCE_AUDIO=/old.wav\n"
+                "OPENAI_SPEECH_REFERENCE_TEXT='old text'\n",
+                encoding="utf-8",
+            )
+            fish_env.write_text("FISH_REFERENCE_DIR=/old/references\n", encoding="utf-8")
+        else:
+            tts_env.write_text("VOXCPM2_PROMPT_WAV=/old.wav\n", encoding="utf-8")
+        manifest = {
+            "job_id": job_dir.name,
+            "image_path": str(image),
+            "voice_path": str(voice),
+            "transcript_path": str(transcript_path) if transcript else "",
+            "voice": {"source_type": "audio"},
+        }
+        (job_dir / "manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        (job_dir / "status.json").write_text("{}\n", encoding="utf-8")
+        args = SimpleNamespace(
+            job_dir=job_dir,
+            runtime_root=runtime_root,
+            repo_root=root / "repo",
+            main_env=main_env,
+            tts_provider=provider,
+            tts_env=tts_env,
+            fish_env=fish_env if provider == "fish_s2pro" else None,
+            port=7860,
+        )
+        return args, image, voice, main_env, tts_env, fish_env
+
+    def test_fish_runtime_paths_use_provider_neutral_bridge_env(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config"
+            config.mkdir()
+            main_env = config / "custom_cascade.env"
+            tts_env = config / "fish_speech_bridge.env"
+            fish_env = config / "fish_s2pro.env"
+            for path in (main_env, tts_env, fish_env):
+                path.write_text("READY=1\n", encoding="utf-8")
+            environment = {
+                "PIPECAT_TTS_PROVIDER": "fish_s2pro",
+                "PIPECAT_TTS_BRIDGE_ENV_FILE": str(tts_env),
+                "FISH_S2PRO_ENV_FILE": str(fish_env),
+                "CUSTOMIZATION_MAIN_ENV_FILE": str(main_env),
+            }
+            with mock.patch.dict(os.environ, environment, clear=True):
+                paths = _runtime_paths()
+            self.assertEqual(paths["tts_provider"], "fish_s2pro")
+            self.assertEqual(paths["tts_env"], tts_env.resolve())
+            self.assertEqual(paths["fish_env"], fish_env.resolve())
+            self.assertEqual(paths["runtime_root"], (root / "customizations").resolve())
+            self.assertNotIn("tts_env", _runtime_missing(paths))
+            self.assertNotIn("fish_env", _runtime_missing(paths))
+
+    def test_fish_runtime_requires_upstream_env(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            main_env = root / "main.env"
+            tts_env = root / "bridge.env"
+            for path in (main_env, tts_env):
+                path.write_text("READY=1\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {
+                "PIPECAT_TTS_PROVIDER": "fish_s2pro",
+                "PIPECAT_TTS_BRIDGE_ENV_FILE": str(tts_env),
+                "FISH_S2PRO_ENV_FILE": str(root / "missing-fish.env"),
+                "CUSTOMIZATION_MAIN_ENV_FILE": str(main_env),
+                "CUSTOMIZATION_ROOT": str(root / "customizations"),
+            }, clear=True):
+                paths = _runtime_paths()
+            self.assertIn("fish_env", _runtime_missing(paths))
+
     def test_product_pages_use_current_names_and_switch_flow(self):
         customize = (STATIC_ROOT / "customize.html").read_text(encoding="utf-8")
         realtime = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
@@ -43,7 +150,7 @@ class CustomizationRuntimeTests(unittest.TestCase):
         self.assertIn("window.location.assign('/')", customize)
         self.assertNotIn("激活并重启模型", customize)
         self.assertNotIn("renderActive({\n        job_id: readyJob", customize)
-        self.assertIn("<title>实时数字人</title>", realtime)
+        self.assertIn("<title>FlashAV2AV · 实时数字人</title>", realtime)
         self.assertIn("更换数字人", realtime)
         self.assertIn("运行日志", realtime)
         self.assertNotIn("Doubao SeedDuplex + DyStream Live AV2AV", realtime)
@@ -94,8 +201,106 @@ class CustomizationRuntimeTests(unittest.TestCase):
             )
         self.assertEqual(environment["PYTHONPATH"].split(CONTROLLER.os.pathsep)[0], str(repo))
         self.assertNotIn("PYTHONSAFEPATH", environment)
-        self.assertEqual(environment["ENV_FILE"], "/runtime/custom.env")
+        self.assertEqual(environment["ENV_FILE"], str(Path("/runtime/custom.env")))
         self.assertEqual(token, "custom-aaaaaaaaaaaaaaaa")
+
+    def test_loaded_asset_check_uses_fish_bridge_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "reference.png"
+            voice = Path(directory) / "reference.wav"
+            calls = []
+
+            def fake_environment(pid_path):
+                calls.append(pid_path.name)
+                if pid_path.name == "pipecat_mse.pid":
+                    return {"DYSTREAM_REF_IMAGE": str(image)}
+                return {"OPENAI_SPEECH_REFERENCE_AUDIO": str(voice)}
+
+            with mock.patch.object(CONTROLLER, "process_environment", fake_environment):
+                CONTROLLER.verify_loaded_assets(
+                    Path(directory) / "repo", image, voice, "fish_s2pro"
+                )
+            self.assertEqual(calls, [
+                "pipecat_mse.pid", "openai_speech_bridge.flashav2av.pid"
+            ])
+
+    def test_loaded_asset_check_preserves_voxcpm2_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "reference.png"
+            voice = Path(directory) / "reference.wav"
+            calls = []
+
+            def fake_environment(pid_path):
+                calls.append(pid_path.name)
+                if pid_path.name == "pipecat_mse.pid":
+                    return {"DYSTREAM_REF_IMAGE": str(image)}
+                return {"VOXCPM2_PROMPT_WAV": str(voice)}
+
+            with mock.patch.object(CONTROLLER, "process_environment", fake_environment):
+                CONTROLLER.verify_loaded_assets(
+                    Path(directory) / "repo", image, voice, "voxcpm2"
+                )
+            self.assertEqual(calls, ["pipecat_mse.pid", "voxcpm2_bridge.pid"])
+
+    def test_fish_activation_updates_all_provider_assets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args, image, voice, main_env, tts_env, fish_env = (
+                self._activation_fixture(Path(directory))
+            )
+            with mock.patch.object(
+                CONTROLLER, "run_demo_restart", return_value="launch-token"
+            ), mock.patch.object(CONTROLLER, "verify_health"), mock.patch.object(
+                CONTROLLER, "verify_loaded_assets"
+            ) as loaded, mock.patch.object(CONTROLLER.time, "sleep"):
+                result = CONTROLLER.activate(args)
+            self.assertEqual(result, 0)
+            self.assertIn(str(image), main_env.read_text(encoding="utf-8"))
+            tts_value = tts_env.read_text(encoding="utf-8")
+            self.assertIn(str(voice), tts_value)
+            self.assertIn("参考文本。", tts_value)
+            self.assertIn(str(voice.parent), fish_env.read_text(encoding="utf-8"))
+            loaded.assert_called_once_with(
+                args.repo_root.resolve(), image.resolve(), voice.resolve(), "fish_s2pro"
+            )
+
+    def test_fish_activation_rejects_missing_transcript_before_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args, _, _, main_env, tts_env, fish_env = self._activation_fixture(
+                Path(directory), transcript=""
+            )
+            originals = tuple(
+                path.read_text(encoding="utf-8")
+                for path in (main_env, tts_env, fish_env)
+            )
+            with mock.patch.object(CONTROLLER, "run_demo_restart") as restart:
+                with self.assertRaisesRegex(RuntimeError, "exact reference transcript"):
+                    CONTROLLER.activate(args)
+            restart.assert_not_called()
+            self.assertEqual(originals, tuple(
+                path.read_text(encoding="utf-8")
+                for path in (main_env, tts_env, fish_env)
+            ))
+
+    def test_fish_activation_rolls_back_all_three_env_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args, _, _, main_env, tts_env, fish_env = self._activation_fixture(
+                Path(directory)
+            )
+            originals = tuple(
+                path.read_text(encoding="utf-8")
+                for path in (main_env, tts_env, fish_env)
+            )
+            with mock.patch.object(
+                CONTROLLER, "run_demo_restart", return_value="launch-token"
+            ), mock.patch.object(
+                CONTROLLER, "verify_health", side_effect=[RuntimeError("bad"), None]
+            ), mock.patch.object(CONTROLLER.time, "sleep"):
+                result = CONTROLLER.activate(args)
+            self.assertEqual(result, 1)
+            self.assertEqual(originals, tuple(
+                path.read_text(encoding="utf-8")
+                for path in (main_env, tts_env, fish_env)
+            ))
 
     def test_image_is_exif_safe_rgb_png_without_custom_crop(self):
         with tempfile.TemporaryDirectory() as directory:

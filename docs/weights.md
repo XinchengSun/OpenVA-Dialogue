@@ -14,11 +14,8 @@ python scripts/setup_weights.py download
 python scripts/setup_weights.py verify --deep
 ```
 
-The default download installs only models marked `required`. Optional Fish S2 Pro can be selected explicitly:
-
-```bash
-python scripts/setup_weights.py --model fish-audio-s2-pro download
-```
+The default download installs all models marked `required`, including Fish
+Speech S2 Pro, the primary TTS in the current deployment.
 
 Use `--root /absolute/path` when model storage must live outside the checkout.
 The unified `scripts/flashav2av setup` does this automatically under
@@ -46,7 +43,7 @@ python -m pip install huggingface_hub modelscope
 | `wav2vec2-base-960h` | `facebook/wav2vec2-base-960h` | `tools/hf_models/wav2vec2-base-960h/pytorch_model.bin` | Apache-2.0. |
 | VoxCPM2 | `openbmb/VoxCPM2` | `$FLASHAV2AV_DATA_ROOT/models/VoxCPM2/` | Apache-2.0; installed by `voice_service/setup_voxcpm2.sh`, not duplicated by this manifest. |
 | `sensevoice-small` | `iic/SenseVoiceSmall` | `runtime/custom_cascade/cache/pipecat/modelscope/manual/SenseVoiceSmall/` | Apache-2.0; optional final-ASR/customization helper. |
-| `fish-audio-s2-pro` | `fishaudio/s2-pro` | `runtime/custom_cascade/candidates/fish-s2-pro/models/fishaudio-s2-pro/` | Fish Audio Research License; optional candidate, not the production default. Research/non-commercial use only unless a separate commercial license is obtained. |
+| `fish-audio-s2-pro` | `fishaudio/s2-pro` | `runtime/fish-s2-pro/models/fishaudio-s2-pro/` | Primary TTS for the current Fish/SGLang-Omni deployment. Fish Audio Research License; research/non-commercial use only unless a separate commercial license is obtained. |
 
 Paraformer is installed separately by `scripts/prefetch_custom_asr.sh` into the
 exact ModelScope cache used by the Pipecat runtime. This avoids maintaining a

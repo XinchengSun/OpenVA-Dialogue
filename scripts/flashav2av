@@ -25,7 +25,8 @@ Usage: bash scripts/flashav2av <command>
 
 Commands:
   setup [--check-only]  Prepare dependencies and check external model assets.
-  configure ARGS        Create private custom-cascade/VoxCPM2 runtime envs.
+  setup-voxcpm2         Install the optional VoxCPM2 compatibility runtime.
+  configure ARGS        Create private custom-cascade/Fish runtime envs.
   start                 Start FlashAV2AV and run health/media checks.
   status                Validate the managed service and media readiness.
   restart               Restart only the managed FlashAV2AV services.
@@ -37,7 +38,7 @@ Environment:
   FLASHAV2AV_DATA_ROOT     Models, venvs and caches outside Git.
   FLASHAV2AV_PYTHON        Python 3.11 bootstrap executable.
   PIPECAT_VENV             Override the Pipecat virtual environment.
-  VOXCPM2_PYTHON_BOOTSTRAP Python 3.11 used by the VoxCPM2 installer.
+  FISH_ROOT                Checked SGLang-Omni/Fish runtime root.
 EOF
 }
 
@@ -61,6 +62,11 @@ show_asset_status() {
     "$ROOT_DIR/checkpoints/last.ckpt"
     "$ROOT_DIR/tools/pretrained_model/epoch=0-step=312000.ckpt"
     "$ROOT_DIR/tools/hf_models/wav2vec2-base-960h/pytorch_model.bin"
+    "$DATA_ROOT/runtime/fish-s2-pro/models/fishaudio-s2-pro/codec.pth"
+    "$DATA_ROOT/runtime/fish-s2-pro/models/fishaudio-s2-pro/config.json"
+    "$DATA_ROOT/runtime/fish-s2-pro/models/fishaudio-s2-pro/model.safetensors.index.json"
+    "$DATA_ROOT/runtime/fish-s2-pro/models/fishaudio-s2-pro/model-00001-of-00002.safetensors"
+    "$DATA_ROOT/runtime/fish-s2-pro/models/fishaudio-s2-pro/model-00002-of-00002.safetensors"
   )
 
   for asset in "${assets[@]}"; do
@@ -154,6 +160,13 @@ setup_project() {
       --model wav2vec2-base-960h \
       download
 
+  HF_HOME="${HF_HOME:-$DATA_ROOT/cache/huggingface}" \
+  HF_XET_HIGH_PERFORMANCE="${HF_XET_HIGH_PERFORMANCE:-1}" \
+    "$PIPECAT_VENV/bin/python" "$ROOT_DIR/scripts/setup_weights.py" \
+      --root "$DATA_ROOT" \
+      --model fish-audio-s2-pro \
+      download
+
   mkdir -p \
     "$ROOT_DIR/checkpoints" \
     "$ROOT_DIR/tools/pretrained_model" \
@@ -164,10 +177,6 @@ setup_project() {
     "$ROOT_DIR/tools/pretrained_model/epoch=0-step=312000.ckpt"
   ln -sfn "$weights_root/tools/hf_models/wav2vec2-base-960h/pytorch_model.bin" \
     "$ROOT_DIR/tools/hf_models/wav2vec2-base-960h/pytorch_model.bin"
-
-  VOXCPM2_DATA_ROOT="$DATA_ROOT" \
-  VOXCPM2_PYTHON_BOOTSTRAP="${VOXCPM2_PYTHON_BOOTSTRAP:-$PYTHON_BOOTSTRAP}" \
-    bash "$ROOT_DIR/voice_service/setup_voxcpm2.sh" --data-root "$DATA_ROOT"
 
   CUSTOM_CASCADE_DATA_ROOT="$DATA_ROOT" \
   PIPECAT_PYTHON="$PIPECAT_VENV/bin/python" \
@@ -182,7 +191,7 @@ EOF
     return 2
   fi
   echo "SETUP_READY data_root=$DATA_ROOT env_file=$ENV_FILE"
-  echo "NEXT: fill private credentials and media, then run configure and start."
+  echo "NEXT: prepare the checked SGLang-Omni Fish runtime, then configure and start."
 }
 
 configure_project() {
@@ -193,6 +202,7 @@ configure_project() {
     "$PIPECAT_VENV/bin/python" "$ROOT_DIR/scripts/configure_custom_runtime.py" \
       --repo-root "$ROOT_DIR" \
       --runtime-root "$DATA_ROOT" \
+      --pipecat-python "$PIPECAT_VENV/bin/python" \
       "$@"
   echo "CONFIGURE_READY env_file=$GENERATED_ENV"
 }
@@ -222,6 +232,11 @@ case "$COMMAND" in
     ;;
   configure)
     configure_project "$@"
+    ;;
+  setup-voxcpm2)
+    (($# == 0)) || die "command 'setup-voxcpm2' does not accept arguments"
+    require_linux
+    bash "$ROOT_DIR/voice_service/setup_voxcpm2.sh" --data-root "$DATA_ROOT"
     ;;
   start | status | restart | stop)
     (($# == 0)) || die "command '$COMMAND' does not accept arguments"

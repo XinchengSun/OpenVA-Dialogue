@@ -103,16 +103,17 @@
     },
     {
       "id": "fish-audio-s2-pro",
-      "required": false,
-      "role": "tts-candidate-not-production-default",
+      "required": true,
+      "role": "primary-tts",
       "provider": "huggingface",
       "repo_id": "fishaudio/s2-pro",
-      "revision": "15765083472df91a268805e2c5a99c5cddce5f7f",
+      "revision": "1de9996b6be38b745688de084d87a5633f714e4e",
       "license": "Fish Audio Research License",
       "redistribution": "upstream-only-research-and-non-commercial",
-      "directory_target": "runtime/custom_cascade/candidates/fish-s2-pro/models/fishaudio-s2-pro",
+      "directory_target": "runtime/fish-s2-pro/models/fishaudio-s2-pro",
       "required_files": [
         "config.json",
+        "codec.pth",
         "model.safetensors.index.json",
         "model-00001-of-00002.safetensors",
         "model-00002-of-00002.safetensors"

@@ -13,7 +13,5 @@
   reference local sample files are not supported from a clean clone.
 - GitHub CI does not run GPU inference or a full browser conversation.
 - No reproducible microphone-to-visible-avatar E2E benchmark is published yet.
-- Required checkpoints live in upstream model repositories. DyStream currently
-  publishes no model card or license file; Fish S2 Pro uses the Fish Audio
-  Research License and is not the default TTS.
-- The repository currently has no project-level open-source license.
+- Required checkpoints live in upstream model repositories and are downloaded
+  by the setup tooling instead of being stored in Git.

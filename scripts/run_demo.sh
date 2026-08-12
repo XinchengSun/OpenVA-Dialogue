@@ -16,9 +16,15 @@ LOG_FILE="$ROOT_DIR/logs/pipecat_mse.log"
 LOCK_FILE="$ROOT_DIR/logs/run_demo.lock"
 READY_FILE="$ROOT_DIR/logs/demo_ready.pid"
 START_SCRIPT="$ROOT_DIR/scripts/start_pipecat_mse.sh"
-BRIDGE_SCRIPT="$ROOT_DIR/voice_service/run_bridge.sh"
-BRIDGE_STATE_FILE="$ROOT_DIR/logs/voxcpm2_bridge.env_path"
+VOX_BRIDGE_SCRIPT="$ROOT_DIR/voice_service/run_bridge.sh"
+FISH_BRIDGE_SCRIPT="$ROOT_DIR/voice_service/run_openai_speech_bridge.sh"
+FISH_MANAGER_SCRIPT="$ROOT_DIR/scripts/manage_fish_s2pro.sh"
+TTS_STATE_FILE="$ROOT_DIR/logs/tts_stack.state"
 DIALOG_MODE="native_s2s"
+TTS_PROVIDER="none"
+TTS_BRIDGE_ENV=""
+TTS_UPSTREAM_ENV=""
+EXPECTED_TTS_MODEL=""
 
 mkdir -p "$ROOT_DIR/logs"
 
@@ -88,7 +94,9 @@ import sys
 h = json.load(sys.stdin)
 expected_engine_version = sys.argv[1]
 expected_dialog_mode = sys.argv[2]
+expected_tts_model = sys.argv[3]
 dialog = h.get("dialog_session", {})
+tts = (dialog.get("custom_cascade") or {}).get("tts") or {}
 checks = {
     "status=ok": h.get("status") == "ok",
     "engine_version": h.get("engine_version") == expected_engine_version,
@@ -104,6 +112,11 @@ checks = {
         if expected_dialog_mode == "native_s2s"
         else dialog.get("custom_cascade_ready") is True
     ),
+    "tts_model": (
+        True
+        if expected_dialog_mode == "native_s2s"
+        else tts.get("model") == expected_tts_model
+    ),
 }
 failed = [name for name, passed in checks.items() if not passed]
 if failed:
@@ -117,7 +130,7 @@ print(
         generation=h.get("stream_generation", "unknown"),
     )
 )
-' "$EXPECTED_ENGINE_VERSION" "$DIALOG_MODE"
+' "$EXPECTED_ENGINE_VERSION" "$DIALOG_MODE" "$EXPECTED_TTS_MODEL"
 }
 
 health_summary() {
@@ -153,94 +166,171 @@ load_dialog_config() {
   PORT_VALUE="${PORT:-7860}"
   PYTHON_BIN="${PIPECAT_PYTHON:-$PYTHON_BIN}"
   EXPECTED_ENGINE_VERSION="${EXPECTED_ENGINE_VERSION:-FLASHAV2AV_0.1.0}"
+  if [[ "$DIALOG_MODE" == "custom_cascade" ]]; then
+    if [[ -n "${PIPECAT_TTS_PROVIDER:-}" ]]; then
+      TTS_PROVIDER="$PIPECAT_TTS_PROVIDER"
+    elif [[ -n "${VOXCPM2_ENV_FILE:-}" ]]; then
+      TTS_PROVIDER="voxcpm2"
+    else
+      TTS_PROVIDER="fish_s2pro"
+    fi
+    case "$TTS_PROVIDER" in
+      fish_s2pro)
+        TTS_BRIDGE_ENV="${PIPECAT_TTS_BRIDGE_ENV_FILE:-}"
+        TTS_UPSTREAM_ENV="${FISH_S2PRO_ENV_FILE:-}"
+        EXPECTED_TTS_MODEL="${PIPECAT_TTS_MODEL:-fishaudio/s2-pro}"
+        ;;
+      voxcpm2)
+        TTS_BRIDGE_ENV="${PIPECAT_TTS_BRIDGE_ENV_FILE:-${VOXCPM2_ENV_FILE:-}}"
+        TTS_UPSTREAM_ENV=""
+        EXPECTED_TTS_MODEL="${PIPECAT_TTS_MODEL:-VoxCPM2}"
+        ;;
+      *) die "PIPECAT_TTS_PROVIDER must be fish_s2pro or voxcpm2" ;;
+    esac
+  else
+    TTS_PROVIDER="none"
+  fi
 }
 
 bridge_env_file() {
-  [[ -n "${VOXCPM2_ENV_FILE:-}" ]] \
-    || die "custom_cascade requires VOXCPM2_ENV_FILE"
-  printf '%s' "$VOXCPM2_ENV_FILE"
+  [[ -n "$TTS_BRIDGE_ENV" ]] || die "custom_cascade requires PIPECAT_TTS_BRIDGE_ENV_FILE"
+  printf '%s' "$TTS_BRIDGE_ENV"
 }
 
-write_bridge_state() {
-  local env_path="$1"
-  local temporary="$BRIDGE_STATE_FILE.tmp.$$"
-  if [[ "$env_path" != /* || "$env_path" == *$'\n'* ]]; then
-    echo "ERROR: VoxCPM2 environment path must be an absolute single-line path" >&2
-    return 1
-  fi
-  if ! printf '%s\n' "$env_path" > "$temporary" \
+write_tts_state() {
+  local provider="$1" bridge_env="$2" upstream_env="${3:--}"
+  local temporary="$TTS_STATE_FILE.tmp.$$"
+  [[ "$provider" == "fish_s2pro" || "$provider" == "voxcpm2" ]] || return 1
+  [[ "$bridge_env" == /* && "$bridge_env" != *$'\n'* ]] || return 1
+  [[ "$upstream_env" == "-" || ( "$upstream_env" == /* && "$upstream_env" != *$'\n'* ) ]] || return 1
+  if ! printf 'v1\n%s\n%s\n%s\n' "$provider" "$bridge_env" "$upstream_env" > "$temporary" \
     || ! chmod 600 "$temporary" \
-    || ! mv -f -- "$temporary" "$BRIDGE_STATE_FILE"; then
+    || ! mv -f -- "$temporary" "$TTS_STATE_FILE"; then
     rm -f -- "$temporary"
-    echo "ERROR: could not persist VoxCPM2 bridge state" >&2
+    echo "ERROR: could not persist TTS stack state" >&2
     return 1
   fi
 }
 
-bridge_env_from_state() {
-  local env_path=""
-  [[ -f "$BRIDGE_STATE_FILE" ]] || return 1
-  IFS= read -r env_path < "$BRIDGE_STATE_FILE" || return 1
-  [[ "$env_path" == /* && "$env_path" != *$'\n'* ]] || return 1
-  printf '%s' "$env_path"
+read_tts_state() {
+  local version="" provider="" bridge_env="" upstream_env="" extra=""
+  [[ -f "$TTS_STATE_FILE" ]] || return 1
+  {
+    IFS= read -r version
+    IFS= read -r provider
+    IFS= read -r bridge_env
+    IFS= read -r upstream_env
+    IFS= read -r extra || true
+  } < "$TTS_STATE_FILE"
+  [[ "$version" == "v1" && -z "$extra" ]] || return 1
+  [[ "$provider" == "fish_s2pro" || "$provider" == "voxcpm2" ]] || return 1
+  [[ "$bridge_env" == /* && "$bridge_env" != *$'\n'* ]] || return 1
+  [[ "$upstream_env" == "-" || "$upstream_env" == /* ]] || return 1
+  printf '%s\n%s\n%s\n' "$provider" "$bridge_env" "$upstream_env"
 }
 
-start_bridge_if_custom() {
-  local env_path=""
+start_tts_stack_if_custom() {
+  local -a existing_state=()
+  local state_payload=""
+  local state_created=0
+  local upstream="-"
   [[ "$DIALOG_MODE" == "custom_cascade" ]] || return 0
-  require_file "$BRIDGE_SCRIPT" "VoxCPM2 bridge manager"
-  env_path="$(bridge_env_file)"
-  require_file "$env_path" "VoxCPM2 bridge environment"
-  bash "$BRIDGE_SCRIPT" start "$env_path"
-  if ! write_bridge_state "$env_path"; then
-    bash "$BRIDGE_SCRIPT" stop "$env_path" || true
-    return 1
+  require_file "$(bridge_env_file)" "TTS bridge environment"
+  if [[ "$TTS_PROVIDER" == "fish_s2pro" ]]; then
+    require_file "$FISH_MANAGER_SCRIPT" "Fish S2 Pro manager"
+    require_file "$FISH_BRIDGE_SCRIPT" "Fish PCM bridge manager"
+    require_file "$TTS_UPSTREAM_ENV" "Fish S2 Pro environment"
+    upstream="$TTS_UPSTREAM_ENV"
+  else
+    require_file "$VOX_BRIDGE_SCRIPT" "VoxCPM2 bridge manager"
   fi
-}
-
-stop_owned_bridge_if_present() {
-  local env_path=""
-  if [[ ! -f "$ROOT_DIR/logs/voxcpm2_bridge.pid" ]]; then
-    rm -f -- "$BRIDGE_STATE_FILE"
-    return 0
+  if [[ -f "$TTS_STATE_FILE" ]]; then
+    state_payload="$(read_tts_state)" \
+      || die "existing TTS ownership state is malformed; refusing to overwrite it"
+    mapfile -t existing_state <<< "$state_payload"
+    [[ ${#existing_state[@]} -eq 3 \
+          && "${existing_state[0]}" == "$TTS_PROVIDER" \
+          && "${existing_state[1]}" == "$TTS_BRIDGE_ENV" \
+          && "${existing_state[2]}" == "$upstream" ]] \
+      || die "configured TTS stack differs from the owned stack; use restart"
+  else
+    write_tts_state "$TTS_PROVIDER" "$TTS_BRIDGE_ENV" "$upstream" \
+      || die "could not record TTS ownership before startup"
+    state_created=1
   fi
-  if ! env_path="$(bridge_env_from_state)"; then
-    if [[ "$DIALOG_MODE" == "custom_cascade" ]]; then
-      env_path="$(bridge_env_file)"
-    else
-      echo "ERROR: owned VoxCPM2 PID exists but its environment state is unavailable" >&2
+  if [[ "$TTS_PROVIDER" == "fish_s2pro" ]]; then
+    if ! bash "$FISH_MANAGER_SCRIPT" start "$TTS_UPSTREAM_ENV"; then
+      # The Fish manager may intentionally retain a verified recovery record
+      # after a partial start. Keep our ownership state so the unified `stop`
+      # command can invoke that recovery path instead of orphaning the stack.
+      return 1
+    fi
+    if ! OPENAI_SPEECH_INSTANCE=flashav2av \
+      bash "$FISH_BRIDGE_SCRIPT" start "$TTS_BRIDGE_ENV"; then
+      if bash "$FISH_MANAGER_SCRIPT" stop "$TTS_UPSTREAM_ENV"; then
+        rm -f -- "$TTS_STATE_FILE"
+      fi
+      return 1
+    fi
+  else
+    if ! bash "$VOX_BRIDGE_SCRIPT" start "$TTS_BRIDGE_ENV"; then
+      if [[ "$state_created" -eq 1 ]]; then
+        rm -f -- "$TTS_STATE_FILE"
+      fi
       return 1
     fi
   fi
-  if [[ ! -f "$BRIDGE_SCRIPT" ]]; then
-    echo "ERROR: missing VoxCPM2 bridge manager: $BRIDGE_SCRIPT" >&2
-    return 1
-  fi
-  if [[ ! -f "$env_path" ]]; then
-    echo "ERROR: missing VoxCPM2 bridge environment: $env_path" >&2
-    return 1
-  fi
-  if ! bash "$BRIDGE_SCRIPT" stop "$env_path"; then
-    return 1
-  fi
-  rm -f -- "$BRIDGE_STATE_FILE"
 }
 
-ensure_bridge_state_if_custom() {
-  local env_path=""
-  [[ "$DIALOG_MODE" == "custom_cascade" ]] || return 0
-  if bridge_env_from_state >/dev/null; then
-    return 0
+stop_owned_tts_stack_if_present() {
+  local -a state=()
+  local state_payload=""
+  [[ -f "$TTS_STATE_FILE" ]] || return 0
+  state_payload="$(read_tts_state)" \
+    || { echo "ERROR: malformed TTS ownership state" >&2; return 1; }
+  mapfile -t state <<< "$state_payload"
+  [[ ${#state[@]} -eq 3 ]] \
+    || { echo "ERROR: malformed TTS ownership state" >&2; return 1; }
+  if [[ "${state[0]}" == "fish_s2pro" ]]; then
+    require_file "$FISH_BRIDGE_SCRIPT" "Fish PCM bridge manager"
+    require_file "$FISH_MANAGER_SCRIPT" "Fish S2 Pro manager"
+    OPENAI_SPEECH_INSTANCE=flashav2av \
+      bash "$FISH_BRIDGE_SCRIPT" stop "${state[1]}" || return 1
+    bash "$FISH_MANAGER_SCRIPT" stop "${state[2]}" || return 1
+  else
+    require_file "$VOX_BRIDGE_SCRIPT" "VoxCPM2 bridge manager"
+    bash "$VOX_BRIDGE_SCRIPT" stop "${state[1]}" || return 1
   fi
-  env_path="$(bridge_env_file)"
-  write_bridge_state "$env_path"
+  rm -f -- "$TTS_STATE_FILE"
 }
 
-status_bridge_if_custom() {
+status_tts_stack_if_custom() {
+  local -a state=()
+  local expected_upstream="-"
+  local state_payload=""
   [[ "$DIALOG_MODE" == "custom_cascade" ]] || return 0
-  require_file "$BRIDGE_SCRIPT" "VoxCPM2 bridge manager"
-  require_file "$(bridge_env_file)" "VoxCPM2 bridge environment"
-  bash "$BRIDGE_SCRIPT" status "$(bridge_env_file)"
+  state_payload="$(read_tts_state)" \
+    || die "custom cascade has no valid TTS ownership state"
+  mapfile -t state <<< "$state_payload"
+  [[ ${#state[@]} -eq 3 ]] \
+    || die "custom cascade has malformed TTS ownership state"
+  if [[ "$TTS_PROVIDER" == "fish_s2pro" ]]; then
+    expected_upstream="$TTS_UPSTREAM_ENV"
+  fi
+  [[ "${state[0]}" == "$TTS_PROVIDER" \
+        && "${state[1]}" == "$TTS_BRIDGE_ENV" \
+        && "${state[2]}" == "$expected_upstream" ]] \
+    || die "running TTS stack differs from the configured stack; use restart"
+  if [[ "$TTS_PROVIDER" == "fish_s2pro" ]]; then
+    require_file "$FISH_MANAGER_SCRIPT" "Fish S2 Pro manager"
+    require_file "$FISH_BRIDGE_SCRIPT" "Fish PCM bridge manager"
+    bash "$FISH_MANAGER_SCRIPT" status "${state[2]}"
+    OPENAI_SPEECH_INSTANCE=flashav2av \
+      bash "$FISH_BRIDGE_SCRIPT" status "${state[1]}"
+  else
+    require_file "$VOX_BRIDGE_SCRIPT" "VoxCPM2 bridge manager"
+    bash "$VOX_BRIDGE_SCRIPT" status "${state[1]}"
+  fi
 }
 
 cleanup_failed_start() {
@@ -250,7 +340,7 @@ cleanup_failed_start() {
   fi
   pid="$(read_managed_pid)"
   if [[ -z "$pid" ]] || ! pid_is_alive "$pid" || ! pid_is_managed_server "$pid"; then
-    stop_owned_bridge_if_present || true
+    stop_owned_tts_stack_if_present || true
   fi
 }
 
@@ -277,8 +367,14 @@ preflight() {
       || die "custom_cascade requires PIPECAT_LLM_API_KEY or OPENAI_API_KEY"
     [[ -n "${PIPECAT_LLM_MODEL:-${OPENAI_MODEL:-}}" ]] \
       || die "custom_cascade requires PIPECAT_LLM_MODEL or OPENAI_MODEL"
-    require_file "$BRIDGE_SCRIPT" "VoxCPM2 bridge manager"
-    require_file "$(bridge_env_file)" "VoxCPM2 bridge environment"
+    if [[ "$TTS_PROVIDER" == "fish_s2pro" ]]; then
+      require_file "$FISH_MANAGER_SCRIPT" "Fish S2 Pro manager"
+      require_file "$FISH_BRIDGE_SCRIPT" "Fish PCM bridge manager"
+      require_file "$TTS_UPSTREAM_ENV" "Fish S2 Pro environment"
+    else
+      require_file "$VOX_BRIDGE_SCRIPT" "VoxCPM2 bridge manager"
+    fi
+    require_file "$(bridge_env_file)" "TTS bridge environment"
   fi
 
   visible_gpus="${CUDA_VISIBLE_DEVICES:-0,1}"
@@ -329,7 +425,9 @@ write_ready_marker() {
   local temporary="$READY_FILE.tmp.$$"
   [[ "$LAUNCH_TOKEN" =~ ^[A-Za-z0-9._-]{1,128}$ ]] \
     || die "DEMO_LAUNCH_TOKEN contains unsupported characters"
-  printf '%s %s %s\n' "$pid" "$EXPECTED_ENGINE_VERSION" "$LAUNCH_TOKEN" > "$temporary"
+  printf '%s %s %s %s\n' \
+    "$pid" "$EXPECTED_ENGINE_VERSION" "$LAUNCH_TOKEN" "$TTS_PROVIDER" > "$temporary"
+  chmod 600 "$temporary"
   mv -f -- "$temporary" "$READY_FILE"
 }
 
@@ -338,9 +436,15 @@ ready_marker_matches() {
   local marker_pid=""
   local marker_version=""
   local marker_token=""
+  local marker_provider=""
+  local marker_extra=""
   [[ -f "$READY_FILE" ]] || return 1
-  read -r marker_pid marker_version marker_token < "$READY_FILE" || return 1
-  [[ "$marker_pid" == "$pid" && "$marker_version" == "$EXPECTED_ENGINE_VERSION" ]]
+  read -r marker_pid marker_version marker_token marker_provider marker_extra \
+    < "$READY_FILE" || return 1
+  [[ -z "$marker_extra" \
+        && "$marker_pid" == "$pid" \
+        && "$marker_version" == "$EXPECTED_ENGINE_VERSION" \
+        && "$marker_provider" == "$TTS_PROVIDER" ]]
 }
 
 show_status() {
@@ -357,7 +461,7 @@ show_status() {
   fi
   pid_is_managed_server "$pid" \
     || die "PID file points to an unrelated process; refusing to manage pid=$pid"
-  status_bridge_if_custom
+  status_tts_stack_if_custom
   summary="$(health_summary)" \
     || die "managed server pid=$pid is running but health validation failed"
   ready_marker_matches "$pid" \
@@ -373,8 +477,7 @@ start_demo() {
   pid="$(read_managed_pid)"
   if [[ -n "$pid" ]] && pid_is_alive "$pid"; then
     if pid_is_managed_server "$pid"; then
-      status_bridge_if_custom
-      ensure_bridge_state_if_custom
+      status_tts_stack_if_custom
       summary="$(health_summary)" \
         || die "managed server pid=$pid is running but unhealthy; inspect $LOG_FILE"
       media_smoke \
@@ -404,7 +507,7 @@ raise SystemExit(0 if occupied else 1)
     die "port $PORT_VALUE is already occupied by an unmanaged process"
   fi
 
-  start_bridge_if_custom
+  start_tts_stack_if_custom
 
   if ! PIPECAT_PYTHON="$PYTHON_BIN" \
     ENV_FILE="$ENV_FILE" \
@@ -441,14 +544,14 @@ stop_demo() {
   pid="$(read_managed_pid)"
   if [[ -z "$pid" ]]; then
     rm -f -- "$READY_FILE"
-    stop_owned_bridge_if_present || result=$?
+    stop_owned_tts_stack_if_present || result=$?
     echo "DEMO_STOPPED already_stopped=1"
     return "$result"
   fi
   if ! pid_is_alive "$pid"; then
     rm -f -- "$PID_FILE"
     rm -f -- "$READY_FILE"
-    stop_owned_bridge_if_present || result=$?
+    stop_owned_tts_stack_if_present || result=$?
     echo "DEMO_STOPPED removed_stale_pid=$pid"
     return "$result"
   fi
@@ -483,10 +586,10 @@ stop_demo() {
     rm -f -- "$READY_FILE"
   fi
   if [[ "$mse_stopped" -eq 1 ]]; then
-    stop_owned_bridge_if_present || result=$?
+    stop_owned_tts_stack_if_present || result=$?
     echo "DEMO_STOPPED pid=$pid"
   else
-    echo "ERROR: VoxCPM2 bridge was left running because its MSE client is still alive" >&2
+    echo "ERROR: TTS stack was left running because its MSE client is still alive" >&2
   fi
   return "$result"
 }

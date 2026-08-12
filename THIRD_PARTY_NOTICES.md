@@ -37,10 +37,10 @@ and must review the license version attached to the downloaded revision.
 - Upstream: <https://www.modelscope.cn/models/iic/SenseVoiceSmall>
 - Declared license: Apache License 2.0
 
-## Fish Audio S2 Pro candidate
+## Fish Audio S2 Pro
 
 - Upstream: <https://huggingface.co/fishaudio/s2-pro>
-- Recorded revision: `15765083472df91a268805e2c5a99c5cddce5f7f`
+- Recorded revision: `1de9996b6be38b745688de084d87a5633f714e4e`
 - License: Fish Audio Research License
 - Required upstream attribution: `This model is licensed under the Fish Audio
   Research License, Copyright © 39 AI, INC. All Rights Reserved.`
@@ -49,8 +49,8 @@ and must review the license version attached to the downloaded revision.
   imposes distribution, attribution, acceptable-use and other conditions; read
   the full upstream `LICENSE.md` before use or distribution.
 
-Fish S2 Pro is recorded as an optional TTS candidate and is not required for the
-default VoxCPM2 runtime.
+Fish S2 Pro is the primary TTS in the current deployment. VoxCPM2 is retained
+as a compatible fallback.
 
 ## Reference media
 

@@ -24,6 +24,14 @@ jobs:
           done < <(find . -type f \( -name '*.sh' -o -path './scripts/flashav2av' \) -print0)
       - name: Validate weight manifest and downloader
         run: python -m unittest tests.test_weights_manifest -v
+      - name: Validate primary Fish configuration
+        run: python -m unittest tests.test_configure_custom_runtime tests.test_s2s_launcher_contract -v
+      - name: Install customization test dependencies
+        run: python -m pip install 'aiohttp==3.13.2' 'Pillow==12.0.0'
+      - name: Validate Fish portrait and voice customization
+        run: python -m unittest tests.test_customization_runtime -v
+      - name: Validate Fish lifecycle ownership
+        run: bash tests/test_fish_s2pro_lifecycle.sh
       - name: Validate release CLI
         run: bash scripts/flashav2av help
       - name: Reject committed model weights and credentials

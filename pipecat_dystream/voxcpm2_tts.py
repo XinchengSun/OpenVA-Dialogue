@@ -1,4 +1,4 @@
-"""Pipecat TTS adapter for the isolated local VoxCPM2 bridge."""
+"""Pipecat TTS adapter for the local PCM speech bridge."""
 
 from __future__ import annotations
 
@@ -32,16 +32,24 @@ def _default_connector(uri: str) -> Any:
     return connect(uri, max_size=None, ping_interval=20, ping_timeout=20)
 
 
-class VoxCPM2LocalTTSService(TTSService):
-    """Stream true-rate PCM16 from the localhost VoxCPM2 process."""
+class LocalPCMTTSService(TTSService):
+    """Stream true-rate PCM16 from a localhost speech bridge."""
 
     def __init__(
         self,
         *,
         uri: str | None = None,
+        model: str | None = None,
+        voice: str | None = None,
         connector: Connector | None = None,
         **kwargs: Any,
     ) -> None:
+        generic_uri = os.getenv("PIPECAT_TTS_BRIDGE_URI", "").strip()
+        legacy_vox_uri = os.getenv("VOXCPM2_BRIDGE_URI", "").strip()
+        default_model = "VoxCPM2" if legacy_vox_uri and not generic_uri else "fishaudio/s2-pro"
+        default_voice = "cloned" if default_model == "VoxCPM2" else "zero-shot-cloned"
+        self._model = model or os.getenv("PIPECAT_TTS_MODEL", "").strip() or default_model
+        self._voice = voice or os.getenv("PIPECAT_TTS_VOICE", "").strip() or default_voice
         super().__init__(
             # RecoveringOpenAILLMService already emits one complete sentence
             # per TextFrame. Re-aggregating here makes Pipecat 1.6 wait for the
@@ -55,21 +63,36 @@ class VoxCPM2LocalTTSService(TTSService):
             push_start_frame=True,
             push_stop_frames=True,
             reuse_context_id_within_turn=True,
-            settings=TTSSettings(model="VoxCPM2", voice="cloned", language=Language.ZH),
+            settings=TTSSettings(
+                model=self._model,
+                voice=self._voice,
+                language=Language.ZH,
+            ),
             **kwargs,
         )
-        self._uri = uri or os.getenv("VOXCPM2_BRIDGE_URI", "ws://127.0.0.1:8770")
+        self._uri = (
+            uri
+            or generic_uri
+            or legacy_vox_uri
+            or "ws://127.0.0.1:8771"
+        )
         self._connector = connector or _default_connector
         self._release_timeout = float(
-            os.getenv("VOXCPM2_RELEASE_TIMEOUT_SEC", "0.25")
+            os.getenv(
+                "PIPECAT_TTS_RELEASE_TIMEOUT_SEC",
+                os.getenv("VOXCPM2_RELEASE_TIMEOUT_SEC", "0.25"),
+            )
         )
         self._cancel_timeout = float(
-            os.getenv("VOXCPM2_CANCEL_SEND_TIMEOUT_SEC", "0.10")
+            os.getenv(
+                "PIPECAT_TTS_CANCEL_SEND_TIMEOUT_SEC",
+                os.getenv("VOXCPM2_CANCEL_SEND_TIMEOUT_SEC", "0.10"),
+            )
         )
         if self._release_timeout <= 0:
-            raise ValueError("VOXCPM2_RELEASE_TIMEOUT_SEC must be positive")
+            raise ValueError("TTS release timeout must be positive")
         if self._cancel_timeout <= 0:
-            raise ValueError("VOXCPM2_CANCEL_SEND_TIMEOUT_SEC must be positive")
+            raise ValueError("TTS cancel timeout must be positive")
         self._active: dict[str, dict[str, Any]] = defaultdict(dict)
         self._cancelled_requests: set[str] = set()
         self._release_tasks: set[asyncio.Task[None]] = set()
@@ -87,7 +110,8 @@ class VoxCPM2LocalTTSService(TTSService):
     def health_snapshot(self) -> dict[str, Any]:
         return {
             "ready": self._ready,
-            "model": "VoxCPM2",
+            "model": self._model,
+            "voice": self._voice,
             "bridge_uri": self._uri,
             "sample_rate": self.sample_rate,
             "active_requests": sum(len(items) for items in self._active.values()),
@@ -102,7 +126,10 @@ class VoxCPM2LocalTTSService(TTSService):
 
     async def wait_ready(self, timeout: float | None = None) -> int:
         timeout_s = timeout or float(
-            os.getenv("VOXCPM2_CONNECT_TIMEOUT_SEC", "30.0")
+            os.getenv(
+                "PIPECAT_TTS_CONNECT_TIMEOUT_SEC",
+                os.getenv("VOXCPM2_CONNECT_TIMEOUT_SEC", "30.0"),
+            )
         )
         self._ready = False
 
@@ -112,10 +139,10 @@ class VoxCPM2LocalTTSService(TTSService):
                 event = json.loads(await websocket.recv())
                 sample_rate = int(event.get("sample_rate", 0))
                 if event.get("type") != "health" or event.get("status") != "ok":
-                    raise ConnectionError(f"VoxCPM2 bridge is not ready: {event}")
+                    raise ConnectionError(f"TTS bridge is not ready: {event}")
                 if sample_rate <= 0:
                     raise ConnectionError(
-                        f"VoxCPM2 bridge returned invalid sample rate: {event}"
+                        f"TTS bridge returned invalid sample rate: {event}"
                     )
                 self._sample_rate = sample_rate
                 self._ready = True
@@ -195,9 +222,9 @@ class VoxCPM2LocalTTSService(TTSService):
                         continue
                     if isinstance(message, bytes):
                         if not metadata_received:
-                            raise RuntimeError("VoxCPM2 audio arrived before start metadata")
+                            raise RuntimeError("TTS audio arrived before start metadata")
                         if not message or len(message) % 2:
-                            raise RuntimeError("VoxCPM2 returned invalid PCM16 audio")
+                            raise RuntimeError("TTS bridge returned invalid PCM16 audio")
                         audio_received = True
                         yield TTSAudioRawFrame(
                             audio=message,
@@ -209,20 +236,20 @@ class VoxCPM2LocalTTSService(TTSService):
 
                     event = json.loads(message)
                     if str(event.get("request_id", "")) not in {"", request_id}:
-                        raise RuntimeError(f"foreign VoxCPM2 request event: {event}")
+                        raise RuntimeError(f"foreign TTS request event: {event}")
                     if str(event.get("context_id", "")) not in {"", context_id}:
-                        raise RuntimeError(f"foreign VoxCPM2 context event: {event}")
+                        raise RuntimeError(f"foreign TTS context event: {event}")
                     event_type = event.get("type")
                     if event_type == "start":
                         if metadata_received:
-                            raise RuntimeError(f"duplicate VoxCPM2 start metadata: {event}")
+                            raise RuntimeError(f"duplicate TTS start metadata: {event}")
                         sample_rate = int(event["sample_rate"])
                         if (
                             sample_rate <= 0
                             or int(event.get("channels", 0)) != 1
                             or int(event.get("sample_width", 0)) != 2
                         ):
-                            raise RuntimeError(f"invalid VoxCPM2 stream metadata: {event}")
+                            raise RuntimeError(f"invalid TTS stream metadata: {event}")
                         self._sample_rate = sample_rate
                         metadata_received = True
                         # A previous request may have failed transiently while
@@ -233,33 +260,33 @@ class VoxCPM2LocalTTSService(TTSService):
                     elif event_type == "done":
                         if not metadata_received:
                             raise RuntimeError(
-                                "VoxCPM2 done arrived before start metadata"
+                                "TTS done arrived before start metadata"
                             )
                         status = str(event.get("status", ""))
                         if status not in {"completed", "cancelled"}:
                             raise RuntimeError(
-                                f"invalid VoxCPM2 completion status: {event}"
+                                f"invalid TTS completion status: {event}"
                             )
                         if (
                             status == "cancelled"
                             and request_id not in self._cancelled_requests
                         ):
                             raise RuntimeError(
-                                f"unexpected VoxCPM2 cancellation: {event}"
+                                f"unexpected TTS cancellation: {event}"
                             )
                         if status == "completed" and not audio_received:
-                            raise RuntimeError("VoxCPM2 completed without PCM audio")
+                            raise RuntimeError("TTS completed without PCM audio")
                         self._ready = True
                         return
                     elif event_type == "error":
                         raise RuntimeError(str(event.get("error", "unknown bridge error")))
                     else:
-                        raise RuntimeError(f"unknown VoxCPM2 bridge event: {event}")
-                raise ConnectionError("VoxCPM2 bridge closed before done")
+                        raise RuntimeError(f"unknown TTS bridge event: {event}")
+                raise ConnectionError("TTS bridge closed before done")
         except Exception as exc:
             if request_id not in self._cancelled_requests:
                 self._ready = False
-                yield ErrorFrame(error=f"VoxCPM2 synthesis failed: {exc}")
+                yield ErrorFrame(error=f"TTS synthesis failed: {exc}")
         finally:
             requests = self._active.get(context_id)
             if requests is not None:
@@ -319,7 +346,7 @@ class VoxCPM2LocalTTSService(TTSService):
                 )
         except Exception as exc:
             logger.warning(
-                "failed to cancel VoxCPM2 request %s in context %s: %s",
+                "failed to cancel TTS request %s in context %s: %s",
                 request_id,
                 context_id,
                 exc,
@@ -355,8 +382,13 @@ class VoxCPM2LocalTTSService(TTSService):
                 last_error = exc
                 await asyncio.sleep(0)
         logger.warning(
-            "failed to release VoxCPM2 context %s (%s) after retry: %s",
+            "failed to release TTS context %s (%s) after retry: %s",
             context_id,
             reason,
             last_error,
         )
+
+
+# Backward-compatible import for deployments and tests that still use the old
+# provider-specific class name. The wire adapter itself is provider-neutral.
+VoxCPM2LocalTTSService = LocalPCMTTSService

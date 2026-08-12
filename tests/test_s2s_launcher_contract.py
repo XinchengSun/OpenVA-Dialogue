@@ -1,3 +1,4 @@
+import os
 import shutil
 import subprocess
 import unittest
@@ -9,6 +10,16 @@ EXPECTED_ENGINE_VERSION = "FLASHAV2AV_0.1.0"
 
 
 class S2SLauncherContractTests(unittest.TestCase):
+    def test_fish_start_failure_keeps_unified_ownership_for_recovery(self):
+        run_demo = (ROOT / "scripts" / "run_demo.sh").read_text(encoding="utf-8")
+        start_marker = 'if ! bash "$FISH_MANAGER_SCRIPT" start "$TTS_UPSTREAM_ENV"; then'
+        bridge_marker = 'if ! OPENAI_SPEECH_INSTANCE=flashav2av'
+        failure_block = run_demo.split(start_marker, 1)[1].split(bridge_marker, 1)[0]
+        self.assertIn("return 1", failure_block)
+        self.assertNotIn('rm -f -- "$TTS_STATE_FILE"', failure_block)
+        stop_block = run_demo.split("stop_owned_tts_stack_if_present()", 1)[1]
+        self.assertIn('bash "$FISH_MANAGER_SCRIPT" stop "${state[2]}"', stop_block)
+
     def test_all_demo_entrypoints_expect_the_current_engine_version(self):
         sources = (
             ROOT / "scripts" / "run_demo.sh",
@@ -23,17 +34,17 @@ class S2SLauncherContractTests(unittest.TestCase):
                     path.read_text(encoding="utf-8"),
                 )
 
-    def test_production_launchers_require_native_s2s_health(self):
+    def test_lifecycle_validates_native_and_custom_fish_health(self):
         run_demo = (ROOT / "scripts" / "run_demo.sh").read_text(encoding="utf-8")
         connect_demo = (ROOT / "scripts" / "connect_demo.ps1").read_text(
             encoding="utf-8"
         )
 
-        for source in (run_demo, connect_demo):
-            self.assertIn("s2s_ready", source)
-            self.assertIn("native_s2s", source)
-            self.assertNotIn("llm_ready", source)
-            self.assertNotIn("tts_ready", source)
+        self.assertIn("s2s_ready", run_demo)
+        self.assertIn("custom_cascade_ready", run_demo)
+        self.assertIn("fishaudio/s2-pro", run_demo)
+        self.assertIn("manage_fish_s2pro.sh", run_demo)
+        self.assertIn("native_s2s", connect_demo)
 
     def test_production_preflight_keeps_dual_gpu_guard(self):
         run_demo = (ROOT / "scripts" / "run_demo.sh").read_text(encoding="utf-8")
@@ -76,7 +87,7 @@ class S2SLauncherContractTests(unittest.TestCase):
         self.assertIn('--allowed-local-media-path "$reference_dir"', launcher)
         self.assertIn('CUDA_DEVICE_ORDER="${CUDA_DEVICE_ORDER:-PCI_BUS_ID}"', launcher)
 
-    def test_primary_env_contract_uses_qwen_audio_s2s(self):
+    def test_env_contract_exposes_fish_as_primary_cascade_tts(self):
         env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
 
         self.assertIn("PIPECAT_S2S_API_KEY=", env_example)
@@ -89,7 +100,7 @@ class S2SLauncherContractTests(unittest.TestCase):
         self.assertIn("PIPECAT_S2S_VAD_SILENCE_MS=500", env_example)
         self.assertIn("PIPECAT_S2S_VAD_THRESHOLD=0.5", env_example)
         self.assertIn("ENGINE_TTS_STREAM_RESET=0", env_example)
-        self.assertIn("ENGINE_LISTENER_AUDIO=1", env_example)
+        self.assertIn("ENGINE_LISTENER_AUDIO=0", env_example)
         self.assertIn("ENGINE_LISTENER_VIRTUAL_AUDIO=", env_example)
         self.assertIn("ENGINE_INTERRUPT_GRACE_SEC=0.40", env_example)
         self.assertIn("ENGINE_INTERRUPT_BRIDGE_SEC=0.20", env_example)
@@ -99,18 +110,29 @@ class S2SLauncherContractTests(unittest.TestCase):
             "PIPECAT_S2S_BASE_URL=wss://dashscope.aliyuncs.com",
             env_example,
         )
+        self.assertIn("PIPECAT_TTS_PROVIDER=fish_s2pro", env_example)
+        self.assertIn("PIPECAT_TTS_BRIDGE_URI=ws://127.0.0.1:8771", env_example)
+        self.assertIn("PIPECAT_TTS_MODEL=fishaudio/s2-pro", env_example)
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "Windows bash launchers do not preserve this workspace path; CI validates shell syntax",
+    )
     @unittest.skipUnless(shutil.which("bash"), "bash is required")
     def test_shell_launchers_are_syntax_valid(self):
         for script in (
             ROOT / "scripts" / "run_demo.sh",
             ROOT / "scripts" / "start_pipecat_mse.sh",
+            ROOT / "scripts" / "manage_fish_s2pro.sh",
         ):
             subprocess.run(
-                ["bash", "-n", str(script)],
+                ["bash", "-n"],
                 check=True,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
+                input=script.read_text(encoding="utf-8"),
             )
 
 

@@ -139,13 +139,27 @@ def process_environment(pid_file: Path) -> dict[str, str]:
     return values
 
 
-def verify_loaded_assets(repo_root: Path, image_path: Path, voice_path: Path) -> None:
+def verify_loaded_assets(
+    repo_root: Path,
+    image_path: Path,
+    voice_path: Path,
+    tts_provider: str,
+) -> None:
     mse_env = process_environment(repo_root / "logs" / "pipecat_mse.pid")
-    bridge_env = process_environment(repo_root / "logs" / "voxcpm2_bridge.pid")
     if Path(mse_env.get("DYSTREAM_REF_IMAGE", "")).resolve() != image_path:
         raise RuntimeError("managed MSE process did not load the selected reference image")
-    if Path(bridge_env.get("VOXCPM2_PROMPT_WAV", "")).resolve() != voice_path:
-        raise RuntimeError("managed VoxCPM2 process did not load the selected reference audio")
+    if tts_provider == "fish_s2pro":
+        bridge_env = process_environment(
+            repo_root / "logs" / "openai_speech_bridge.flashav2av.pid"
+        )
+        loaded_voice = bridge_env.get("OPENAI_SPEECH_REFERENCE_AUDIO", "")
+    else:
+        bridge_env = process_environment(repo_root / "logs" / "voxcpm2_bridge.pid")
+        loaded_voice = bridge_env.get("VOXCPM2_PROMPT_WAV", "")
+    if Path(loaded_voice).resolve() != voice_path:
+        raise RuntimeError(
+            f"managed {tts_provider} process did not load the selected reference audio"
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -154,7 +168,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--runtime-root", type=Path, required=True)
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--main-env", type=Path, required=True)
-    parser.add_argument("--vox-env", type=Path, required=True)
+    parser.add_argument(
+        "--tts-provider", choices=("fish_s2pro", "voxcpm2"), required=True
+    )
+    parser.add_argument("--tts-env", type=Path, required=True)
+    parser.add_argument("--fish-env", type=Path)
     parser.add_argument("--port", type=int, required=True)
     return parser.parse_args()
 
@@ -164,7 +182,8 @@ def activate(args: argparse.Namespace) -> int:
     runtime_root = args.runtime_root.resolve()
     repo_root = args.repo_root.resolve()
     main_env = args.main_env.resolve()
-    vox_env = args.vox_env.resolve()
+    tts_env = args.tts_env.resolve()
+    fish_env = args.fish_env.resolve() if args.fish_env else None
     if job_dir.parent != runtime_root or job_dir.name != job_dir.name.lower():
         raise RuntimeError("job directory is outside the configured runtime root")
     manifest_path = job_dir / "manifest.json"
@@ -177,7 +196,7 @@ def activate(args: argparse.Namespace) -> int:
     voice_path = Path(str(manifest.get("voice_path") or "")).resolve()
     transcript_raw = str(manifest.get("transcript_path") or "").strip()
     transcript_path = Path(transcript_raw).resolve() if transcript_raw else None
-    for path in (image_path, voice_path, main_env, vox_env):
+    for path in (image_path, voice_path, main_env, tts_env):
         if not path.is_file():
             raise RuntimeError(f"required activation file is missing: {path}")
     if image_path.parent.parent != job_dir or voice_path.parent.parent != job_dir:
@@ -185,6 +204,16 @@ def activate(args: argparse.Namespace) -> int:
     if transcript_path is not None:
         if not transcript_path.is_file() or transcript_path.parent.parent != job_dir:
             raise RuntimeError("prepared transcript is outside the selected job")
+    transcript = (
+        transcript_path.read_text(encoding="utf-8").strip()
+        if transcript_path is not None
+        else ""
+    )
+    if args.tts_provider == "fish_s2pro":
+        if not transcript:
+            raise RuntimeError("Fish Speech S2 Pro requires an exact reference transcript")
+        if fish_env is None or not fish_env.is_file():
+            raise RuntimeError("Fish S2 Pro environment file is missing")
 
     runtime_root.mkdir(parents=True, exist_ok=True)
     lock_path = runtime_root / "activation.lock"
@@ -204,16 +233,21 @@ def activate(args: argparse.Namespace) -> int:
             return 2
 
         main_backup = rollback_dir / "custom_cascade.env"
-        vox_backup = rollback_dir / "voxcpm2.env"
+        tts_backup = rollback_dir / "tts_bridge.env"
+        fish_backup = rollback_dir / "fish_s2pro.env"
         active_path = runtime_root / "active.json"
         active_backup = rollback_dir / "active.json"
         active_existed = active_path.is_file()
         shutil.copy2(main_env, main_backup)
-        shutil.copy2(vox_env, vox_backup)
+        shutil.copy2(tts_env, tts_backup)
+        if fish_env is not None:
+            shutil.copy2(fish_env, fish_backup)
         if active_existed:
             shutil.copy2(active_path, active_backup)
         os.chmod(main_backup, 0o600)
-        os.chmod(vox_backup, 0o600)
+        os.chmod(tts_backup, 0o600)
+        if fish_env is not None:
+            os.chmod(fish_backup, 0o600)
         update_status(
             status_path,
             state="activating",
@@ -221,11 +255,23 @@ def activate(args: argparse.Namespace) -> int:
         )
         try:
             patch_env_file(main_env, {"DYSTREAM_REF_IMAGE": str(image_path)})
-            patch_env_file(vox_env, {
-                "VOXCPM2_PROMPT_WAV": str(voice_path),
-                "VOXCPM2_PROMPT_TEXT": "",
-                "VOXCPM2_PROMPT_TEXT_FILE": str(transcript_path) if transcript_path else "",
-            })
+            if args.tts_provider == "fish_s2pro":
+                patch_env_file(tts_env, {
+                    "OPENAI_SPEECH_REFERENCE_AUDIO": str(voice_path),
+                    "OPENAI_SPEECH_REFERENCE_TEXT": transcript,
+                })
+                assert fish_env is not None
+                patch_env_file(
+                    fish_env, {"FISH_REFERENCE_DIR": str(voice_path.parent)}
+                )
+            else:
+                patch_env_file(tts_env, {
+                    "VOXCPM2_PROMPT_WAV": str(voice_path),
+                    "VOXCPM2_PROMPT_TEXT": "",
+                    "VOXCPM2_PROMPT_TEXT_FILE": (
+                        str(transcript_path) if transcript_path else ""
+                    ),
+                })
             update_status(
                 status_path,
                 state="restarting",
@@ -234,7 +280,9 @@ def activate(args: argparse.Namespace) -> int:
             time.sleep(1.5)
             launch_token = run_demo_restart(repo_root, main_env, args.port, job_id)
             verify_health(args.port, launch_token)
-            verify_loaded_assets(repo_root, image_path, voice_path)
+            verify_loaded_assets(
+                repo_root, image_path, voice_path, args.tts_provider
+            )
             active = {
                 "job_id": job_id,
                 "activated_at": time.time(),
@@ -262,7 +310,9 @@ def activate(args: argparse.Namespace) -> int:
             rollback_error: Exception | None = None
             try:
                 shutil.copy2(main_backup, main_env)
-                shutil.copy2(vox_backup, vox_env)
+                shutil.copy2(tts_backup, tts_env)
+                if fish_env is not None:
+                    shutil.copy2(fish_backup, fish_env)
                 if active_existed:
                     shutil.copy2(active_backup, active_path)
                 elif active_path.exists():
