@@ -1,24 +1,69 @@
-# Current Architecture
+# FlashAV2AV architecture
+
+## Runtime data flow
 
 ```text
-Browser PCM
-  -> Pipecat Silero VAD
-  -> SenseVoice/FunASR
-  -> resilient OpenAI-compatible LLM
-  -> Qwen3 realtime TTS
-  -> continuous DyStream motion worker (GPU 0)
-  -> fixed-source DyStream render worker (GPU 1)
+Browser microphone PCM
+  -> WebSocket input
+  -> dialogue route
+       native_s2s:
+         Qwen Audio realtime speech-to-speech
+       custom_cascade:
+         Silero VAD
+         -> Paraformer streaming ASR
+         -> resilient OpenAI-compatible LLM
+         -> optional provider web search
+         -> VoxCPM2 cloned TTS
+  -> assistant PCM (normalized by the AV2AV engine as required)
+  -> continuous DyStream motion worker (logical GPU 0)
+  -> fixed-source LIA render worker (logical GPU 1)
   -> H.264/AAC fragmented MP4
   -> browser MediaSource Extensions
 ```
 
-Pipecat owns dialogue orchestration. The mature MSE transport, dual-GPU workers,
-A/V queues, and browser live-tail behavior remain in the original DyStream
-runtime.
+Pipecat owns dialogue orchestration, turn events, and cancellation. The MSE
+runtime owns the long-lived motion/render workers, A/V queues, media boundaries,
+and browser live-tail behavior.
 
-Normal dialogue turns increment only `turn_id`; they preserve recurrent media
-state. A real interruption increments `stream_generation`, allowing stale queued
-items to be rejected without re-anchoring the renderer source motion.
+## Listener and Speaker contract
 
-See the root `README.md` for the full state contract, file ownership, root-cause
-analysis, and measured acceptance results.
+The official DyStream motion checkpoint has two audio-conditioning branches in
+one recurrent model:
+
+- Speaker: assistant audio is routed to `audio_self`; `audio_other` is zero.
+- Listener: `audio_self` is zero; authorized Listener conditioning is routed to
+  `audio_other`.
+
+This is not a Speaker checkpoint plus a Listener checkpoint. Both modes preserve
+the same recurrent motion state. A normal turn changes `turn_id` but does not
+reload the model, reset the renderer, or create a new media timeline.
+
+## Interruption contract
+
+A barge-in cancels the active dialogue/TTS request and applies a short graceful
+assistant tail. Stale queued data is fenced before it can re-enter the visible
+stream. Ordinary interruption remains on the current FFmpeg/MSE timeline; a new
+encoder epoch is reserved for genuine encoder or backlog recovery.
+
+## Media boundary contract
+
+Assistant-visible state changes are emitted only after the matching audio/video
+unit has been accepted by the encoder path. The browser releases live assistant
+audio at the corresponding safe media time, keeping mouth motion and audio on
+one fMP4 timeline.
+
+## GPU placement
+
+- DyStream motion and LIA rendering use two distinct logical devices selected by
+  `CUDA_VISIBLE_DEVICES`, normally logical `0` and `1`.
+- The custom cascade requires a third, non-overlapping physical GPU for
+  VoxCPM2. The configuration generator rejects overlap.
+- Fish S2 Pro is an optional candidate. Its tested dual-GPU path separates its
+  TTS engine and vocoder and is not the default production topology.
+
+## Output and buffering
+
+The native renderer output is 512 × 512. The server encodes H.264 video and AAC
+audio into fragmented MP4. The browser starts with a bounded media reserve and
+uses low-water playback control to mask short production jitter. CSS enlargement
+does not add model detail.

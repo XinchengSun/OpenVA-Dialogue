@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="340" viewBox="0 0 1200 340" role="img" aria-labelledby="title description">
+  <title id="title">FlashAV2AV</title>
+  <desc id="description">Low-latency full-duplex audio-video conversational avatars</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#090d1a"/>
+      <stop offset="0.55" stop-color="#121a39"/>
+      <stop offset="1" stop-color="#1f1240"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#42d7ff"/>
+      <stop offset="0.5" stop-color="#7d6bff"/>
+      <stop offset="1" stop-color="#ff4fd8"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="340" rx="28" fill="url(#background)"/>
+  <circle cx="1030" cy="60" r="190" fill="#6f4cff" opacity="0.10"/>
+  <circle cx="155" cy="330" r="210" fill="#20c9ff" opacity="0.08"/>
+
+  <g transform="translate(74 78)" fill="none" stroke="url(#accent)" stroke-width="5" stroke-linecap="round" filter="url(#glow)">
+    <path d="M0 92h24l12-42 22 92 20-126 22 146 20-101 17 59 17-28h28" opacity="0.95"/>
+    <path d="M208 14c49 0 88 39 88 88s-39 88-88 88c-22 0-43-8-58-22" opacity="0.72"/>
+    <path d="M217 56c28 0 51 22 51 50 0 20-12 37-29 45" opacity="0.9"/>
+    <circle cx="219" cy="91" r="5" fill="#42d7ff" stroke="none"/>
+    <path d="M208 121c13 8 25 8 38 0"/>
+  </g>
+
+  <text x="420" y="142" fill="#f7f8ff" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="70" font-weight="750" letter-spacing="-2">FlashAV2AV</text>
+  <rect x="422" y="164" width="584" height="4" rx="2" fill="url(#accent)"/>
+  <text x="422" y="216" fill="#cbd4ff" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="25" font-weight="450">Low-latency · Full-duplex · Audio-video conversation</text>
+
+  <g transform="translate(422 253)" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="15" font-weight="600">
+    <rect width="116" height="36" rx="18" fill="#182c49" stroke="#42d7ff" stroke-opacity="0.55"/>
+    <text x="58" y="23" text-anchor="middle" fill="#79e4ff">BARGE-IN</text>
+    <rect x="128" width="154" height="36" rx="18" fill="#252348" stroke="#8c7cff" stroke-opacity="0.55"/>
+    <text x="205" y="23" text-anchor="middle" fill="#bcb3ff">CONTINUOUS AV</text>
+    <rect x="294" width="144" height="36" rx="18" fill="#3d1b49" stroke="#ff61dc" stroke-opacity="0.55"/>
+    <text x="366" y="23" text-anchor="middle" fill="#ff9bea">OPTIONAL SEARCH</text>
+  </g>
+</svg>
