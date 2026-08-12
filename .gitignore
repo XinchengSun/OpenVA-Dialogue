@@ -79,6 +79,8 @@ dist/
 *.mkv
 *.aac
 *.ogg
+# Curated README previews are generated release assets, not private runtime media.
+!docs/assets/*.gif
 !assets/**/*.example.wav
 !assets/**/*.example.mp4
 .DS_Store

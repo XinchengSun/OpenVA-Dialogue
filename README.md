@@ -4,251 +4,180 @@
 
 # FlashAV2AV
 
-**Real-time conversational avatars with customizable portraits and zero-shot voice cloning.**
+**Customizable real-time conversational avatars with zero-shot voice cloning.**
 
 [![CI](https://github.com/XinchengSun/FlashAV2AV/actions/workflows/ci.yml/badge.svg)](https://github.com/XinchengSun/FlashAV2AV/actions/workflows/ci.yml)
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Linux](https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux&logoColor=111)](#requirements)
-[![Version](https://img.shields.io/badge/version-0.1.0-6C63FF)](VERSION)
+[![Linux](https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux&logoColor=111)](#tested-setup)
 
-[中文](README_zh-CN.md) · [Quick Start](#quick-start) · [Architecture](#architecture) · [Benchmarks](#benchmarks) · [Weights](docs/weights.md) · [Customization](README_CUSTOMIZATION.md)
+[中文](README_zh-CN.md) · [Quick Start](#quick-start) · [Architecture](#how-it-works) · [Benchmarks](#measured-performance) · [Deployment](docs/deployment.md) · [Customization](README_CUSTOMIZATION.md)
 
 </div>
 
-FlashAV2AV turns a browser microphone stream into a continuously rendered talking avatar. It combines streaming speech understanding, response generation, speech synthesis, DyStream motion, LIA rendering, H.264/AAC fragmented MP4, and browser MediaSource playback on one interruptible timeline.
+FlashAV2AV turns one portrait and one short reference recording into a
+browser-based conversational avatar. Its primary pipeline streams microphone
+audio through Paraformer, an OpenAI-compatible LLM, Fish Speech S2 Pro, and a
+continuous DyStream/LIA renderer while preserving one interruptible audio/video
+timeline.
 
-## Highlights
+> **Current primary stack:** Paraformer + streaming LLM + Fish Speech S2 Pro / SGLang-Omni + DyStream + LIA.
 
-- **Full-duplex interaction** — microphone input remains live while the avatar is speaking, with barge-in cancellation and graceful media handoff.
-- **Continuous Listener and Speaker motion** — both modes share the same recurrent DyStream state instead of restarting the avatar at every turn.
-- **Two dialogue routes** — native speech-to-speech for a compact path, or a configurable Paraformer → LLM → cloned-TTS cascade.
-- **Real-time information** — the cascade can route fresh-information queries to provider-backed web search without enabling LLM thinking mode.
-- **Local customization** — portrait and reference-voice assets stay outside Git and can be selected through a local customization workflow.
-- **One lifecycle CLI** — setup, configure, start, status, restart, and stop manage the selected TTS path and AV2AV service with ownership and readiness checks.
+## What it delivers
 
-## Architecture
+- **Portrait customization** from a single front-facing image.
+- **Zero-shot voice cloning** with Fish Speech S2 Pro from a short reference
+  recording and matching transcript.
+- **Streaming conversation with barge-in**: microphone capture stays active
+  while the avatar speaks, and a new turn can cancel the pending reply.
+- **Continuous Listener and Speaker motion** on the same recurrent DyStream
+  state instead of restarting the avatar at every turn.
+- **Fresh-information queries** through optional provider-backed web search,
+  with LLM thinking explicitly disabled on the tested low-latency path.
+- **One managed lifecycle** for the Fish service, PCM bridge, AV2AV workers,
+  media smoke test, restart, and cleanup.
 
-```mermaid
-flowchart LR
-    MIC["Browser microphone"] --> WS["WebSocket PCM"]
-    WS --> ROUTE{"Dialogue route"}
+## Preview
 
-    ROUTE -->|native_s2s| S2S["Qwen Audio realtime S2S"]
-    ROUTE -->|custom_cascade| VAD["Silero VAD"]
-    VAD --> ASR["Paraformer streaming ASR"]
-    ASR --> LLM["Streaming OpenAI-compatible LLM"]
-    LLM -. fresh queries .-> SEARCH["Provider web search"]
-    LLM --> TTS["Fish S2 Pro · SGLang-Omni"]
+The public repository currently includes the software and a generated
+DyStream preview, not a prerecorded end-to-end conversation. The preview shows
+the native 512 x 512 avatar output; a reproducible microphone-to-avatar demo
+capture is still being prepared.
 
-    S2S --> PCM["Assistant PCM"]
-    TTS --> PCM
-    PCM --> MOTION["DyStream motion · GPU 0"]
-    WS --> LISTENER["Listener conditioning"]
-    LISTENER --> MOTION
-    MOTION --> RENDER["LIA renderer · GPU 1"]
-    RENDER --> MUX["H.264 + AAC fMP4"]
-    MUX --> MSE["Browser MediaSource"]
-```
-
-Pipecat owns dialogue orchestration, turn events, and cancellation. `server_mse.py` owns the continuous AV2AV state, motion/render workers, A/V boundaries, fragmented MP4 transport, and browser WebSocket session. See [architecture.md](docs/architecture.md) for the state contract.
-
-## Deployment routes
-
-| Route | Speech pipeline | GPU topology | Best for |
-| --- | --- | --- | --- |
-| `custom_cascade` (current deployment) | Silero → Paraformer → streaming LLM → Fish S2 Pro / SGLang-Omni | 2 DyStream GPUs + 2 separate Fish GPUs | Zero-shot voice cloning, model selection, and real-time search |
-| `native_s2s` | Qwen Audio realtime speech-to-speech | 2 non-overlapping DyStream GPUs | Compact compatibility route |
-| VoxCPM2 fallback | The same cascade through the compatible local PCM bridge | 2 DyStream GPUs + 1 separate VoxCPM2 GPU | Compatibility and rollback |
-
-Fish Speech S2 Pro is the primary TTS in the current deployment. It runs through SGLang-Omni with the TTS engine and vocoder split across two GPUs; VoxCPM2 remains a compatible fallback.
-
-## Requirements
-
-The checked runtime contract is intentionally strict:
-
-| Component | Checked configuration |
-| --- | --- |
-| Host | Linux, NVIDIA GPU, `ffmpeg`, `ffprobe`, `curl`, `flock`, `nvidia-smi` |
-| Python | 3.11 |
-| PyTorch | `2.8.0+cu128` |
-| CUDA runtime | 12.8 |
-| Avatar output | 512 × 512, H.264 video + AAC audio |
-| DyStream | two distinct logical CUDA devices |
-| Current custom cascade | two Fish GPUs that do not overlap the two DyStream GPUs |
-| VoxCPM2 fallback | one additional GPU that does not overlap DyStream |
-
-The release installer has been validated for structure and dependency checks, but a blank-host multi-GPU installation is not exercised by GitHub CI.
+<div align="center">
+  <img src="docs/assets/flashav2av-avatar-preview.gif" alt="FlashAV2AV generated avatar preview" width="384">
+</div>
 
 ## Quick Start
 
-### 1. Clone and install
+The public installer targets the **tested Linux server image**. It downloads
+the model assets and prepares the managed services, but it does not build CUDA
+or SGLang-Omni from a blank host. Complete the short Fish runtime prerequisite
+in the [deployment guide](docs/deployment.md#prepare-the-fish-runtime) first.
 
 ```bash
 git clone https://github.com/XinchengSun/FlashAV2AV.git
 cd FlashAV2AV
 
-# Keep multi-gigabyte models, environments, and caches outside Git.
 export FLASHAV2AV_DATA_ROOT=/data/flashav2av
 bash scripts/flashav2av setup
-```
 
-The unified `setup` command prepares Pipecat and Paraformer, downloads the required Fish S2 Pro and DyStream/LIA/Wav2Vec2 assets, and creates ignored runtime symlinks. Fish still requires the checked SGLang-Omni source and Python environment on the host; the installer does not bootstrap that GPU runtime from a blank machine.
-
-The current installer is **not a universal CUDA bootstrap**: it expects the checked base runtime (`torch 2.8.0+cu128`, CUDA 12.8, MediaPipe, and the DyStream dependencies) to already be available to its `--system-site-packages` environment. Use it on the tested server image, or reproduce that base environment first. A container/lockfile for a blank host is still pending.
-
-### 2A. Native speech-to-speech
-
-Copy `.env.example` to a private `.env`, then set at least:
-
-```dotenv
-PIPECAT_MSE_DIALOG_MODE=native_s2s
-PIPECAT_S2S_API_KEY=your_private_key
-DYSTREAM_REF_IMAGE=/absolute/path/to/authorized-avatar.png
-
-CUDA_VISIBLE_DEVICES=0,1
-MOTION_GPU=0
-RENDER_GPU=1
-```
-
-### 2B. Current Fish S2 Pro custom cascade
-
-The deployed TTS path consists of a two-GPU SGLang-Omni service plus a local PCM bridge. Configure it through the unified lifecycle command; this example reserves GPUs 0/1 for DyStream and GPUs 2/3 for Fish:
-
-```bash
 bash scripts/flashav2av configure \
   --source-env /absolute/path/to/private-base.env \
-  --prompt-wav /absolute/path/to/authorized-reference.wav \
-  --prompt-text-file /absolute/path/to/reference-transcript.txt \
+  --prompt-wav /absolute/path/to/reference.wav \
+  --prompt-text-file /absolute/path/to/reference.txt \
   --dystream-gpus 0,1 \
   --fish-gpus 2,3 \
   --tts-backend fish_s2pro \
   --realtime-search-mode smart \
   --realtime-search-strategy turbo
-```
 
-`fish_s2pro` is the default TTS backend. `scripts/flashav2av start` manages the Fish HTTP service on port 8001 and its local PCM bridge on port 8771 together with the AV2AV service. The generic Pipecat adapter still accepts the legacy `VOXCPM2_BRIDGE_URI` variable for compatibility.
-
-### 2C. VoxCPM2 compatibility setup
-
-Prepare a private source env containing a DashScope/OpenAI-compatible key and an authorized reference voice, then generate isolated runtime envs:
-
-```bash
-bash scripts/flashav2av setup-voxcpm2
-
-bash scripts/flashav2av configure \
-  --source-env /absolute/path/to/private-base.env \
-  --prompt-wav /absolute/path/to/authorized-reference.wav \
-  --prompt-text-file /absolute/path/to/reference-transcript.txt \
-  --dystream-gpus 0,1 \
-  --tts-backend voxcpm2 \
-  --tts-gpu 2 \
-  --realtime-search-mode smart \
-  --realtime-search-strategy turbo
-```
-
-The generated env files are written with mode `0600` under `$FLASHAV2AV_DATA_ROOT/config/`. LLM thinking is explicitly disabled in this low-latency path.
-
-### 3. Start the managed AV2AV service
-
-```bash
 bash scripts/flashav2av start
 ```
 
-`DEMO_READY` means the workers, selected dialogue route, reachable bridge, and decodable media smoke test passed. The service binds to loopback by default. From a remote machine:
+The private base env must provide `PIPECAT_LLM_API_KEY` (or a compatible
+DashScope/OpenAI key) and `DYSTREAM_REF_IMAGE`. The two Fish GPUs must not
+overlap the two DyStream GPUs. A successful start ends with `DEMO_READY`.
+
+Forward the loopback browser service and open the local URL:
 
 ```bash
 ssh -N -L 6008:127.0.0.1:7860 <user>@<server>
 ```
 
-Open <http://127.0.0.1:6008/>, keep one demo tab, click **Start conversation**, and allow microphone access.
+<http://127.0.0.1:6008/>
 
-Useful lifecycle commands:
+Full prerequisites, endpoint mapping, native speech-to-speech, and the VoxCPM2
+fallback are documented in the [deployment guide](docs/deployment.md).
 
-```bash
-bash scripts/flashav2av status
-bash scripts/flashav2av restart
-bash scripts/flashav2av stop
-bash scripts/flashav2av setup --check-only
+## How it works
+
+```mermaid
+flowchart LR
+    MIC["Browser microphone"] --> VAD["Silero VAD"]
+    VAD --> ASR["Paraformer streaming ASR"]
+    ASR --> LLM["Streaming LLM"]
+    LLM -. optional live search .-> SEARCH["Web search"]
+    LLM --> TTS["Fish S2 Pro / SGLang-Omni"]
+    TTS --> MOTION["DyStream motion"]
+    MIC --> LISTENER["Listener conditioning"]
+    LISTENER --> MOTION
+    MOTION --> RENDER["LIA renderer"]
+    RENDER --> MEDIA["H.264 + AAC fMP4"]
+    MEDIA --> BROWSER["Browser MediaSource"]
 ```
 
-## Benchmarks
+Pipecat owns dialogue orchestration, turn events, and cancellation.
+`server_mse.py` owns the continuous avatar state, motion/render workers,
+audio/video boundaries, and fragmented-MP4 browser stream. The detailed state
+contract and GPU placement are in [architecture.md](docs/architecture.md).
 
-### Fish S2 Pro dual-GPU TTS
+## Tested setup
 
-Warm single-request measurements on an 8 × RTX 4090 host; the dual-GPU profiles used physical GPUs 5 and 6. Each profile contains 60 measured samples after 3 discarded warm-up samples. These values cover only the TTS bridge—not ASR, LLM, DyStream, encoding, network, or browser playback.
+| Component | Tested configuration |
+| --- | --- |
+| Host | Linux, Python 3.11, NVIDIA GPUs, `ffmpeg`/`ffprobe` |
+| Realtime Python runtime | PyTorch `2.8.0+cu128`, CUDA 12.8 |
+| Avatar | two distinct DyStream GPUs; native 512 x 512 output |
+| Primary TTS | two additional Fish S2 Pro GPUs, disjoint from DyStream |
+| Browser media | H.264 video + AAC audio over fMP4/MSE |
 
-| Profile | First PCM P50 / P95 | Audible TTFA P50 / P95 | RTF P50 / P95 | Starved samples |
-| --- | ---: | ---: | ---: | ---: |
-| Single GPU, stride 20/10 | 1259 / 1298 ms | 1262 / 1392 ms | 0.592 / 0.612 | 0 / 60 |
-| Dual GPU, stride 20/10 | 666 / 692 ms | 672 / 763 ms | 0.561 / 0.584 | 0 / 60 |
-| Dual GPU, stride 10/10 | **426 / 436 ms** | **431 / 579 ms** | 0.564 / 0.584 | 0 / 60 |
+`requirements-pipecat.txt` defines the realtime service dependencies. The root
+`requirements.txt` belongs to the legacy/offline research environment and is
+not the supported server installer. GitHub CI does not run GPU inference.
 
-Raw benchmark record: [`docs/fishspeech_2gpu_benchmark_20260811.json`](docs/fishspeech_2gpu_benchmark_20260811.json).
+## Measured performance
 
-No reproducible microphone-to-visible-avatar E2E benchmark is published yet. Provider latency, endpointing, browser buffering, and GPU contention must be reported separately; TTS-only figures must not be presented as conversational latency.
+The only published reproducible snapshot is **warm, single-request TTS bridge
+latency**; it is not microphone-to-visible-avatar latency. It was measured on
+2026-08-11 at commit `29d1bc376fa2` on an 8 x RTX 4090 host. Fish used physical
+GPUs 5/6, profile `low_ttfa_gapless` (`stream_stride=10`, follow-up stride 10),
+3 warm-up samples were discarded, and 60 requests were measured.
 
-## Model weights
+| Metric | Dual-GPU Fish S2 Pro |
+| --- | ---: |
+| First PCM P50 / P95 | **426 / 436 ms** |
+| Audible TTFA P50 / P95 | **431 / 579 ms** |
+| RTF P50 / P95 | **0.564 / 0.584** |
+| Playback starvation | **0 / 60** |
 
-Weights are downloaded directly from their official upstream repositories and are never committed to Git:
+The full single/dual-GPU comparison is in
+[`fishspeech_2gpu_benchmark_20260811.json`](docs/fishspeech_2gpu_benchmark_20260811.json).
+ASR, endpointing, LLM, DyStream, encoding, network, and browser buffering are
+excluded. No microphone-to-visible-avatar E2E number is published yet.
 
-```bash
-python scripts/setup_weights.py download
-python scripts/setup_weights.py verify --deep
+## Customize the avatar
 
-```
+After startup, open <http://127.0.0.1:6008/customize>. Upload a front-facing
+portrait, a clean 10-20 second reference recording, and its matching transcript.
+Activation updates the private runtime atomically and rolls back if validation
+or restart fails. See [README_CUSTOMIZATION.md](README_CUSTOMIZATION.md).
 
-`verify --deep` checks recorded hashes where available. The current public manifest publishes no SHA-256 values, so it verifies file presence and recorded sizes; it does not claim cryptographic integrity. See [weights.md](docs/weights.md) for the inventory, revisions, paths, and license status.
+## Documentation
 
-## Avatar and voice customization
+| Guide | Contents |
+| --- | --- |
+| [Deployment](docs/deployment.md) | tested host, Fish runtime, ports, lifecycle, alternative backends |
+| [Architecture](docs/architecture.md) | Listener/Speaker state, interruption, media boundaries, GPU placement |
+| [Customization](README_CUSTOMIZATION.md) | portrait and zero-shot voice-cloning workflow |
+| [Model weights](docs/weights.md) | pinned upstream assets and runtime paths |
+| [Known issues](docs/known_issues.md) | current visual, expression, and CI boundaries |
+| [README study](docs/readme_style_study.md) | the 10-project comparison and rewrite criteria |
 
-After startup, open the local-only customization page:
+## Project status
 
-```text
-http://127.0.0.1:6008/customize
-```
-
-Portraits, voice recordings, transcripts, generated latents, caches, and rollback snapshots remain private runtime assets. They are ignored by Git. See [README_CUSTOMIZATION.md](README_CUSTOMIZATION.md).
-
-## Runtime verification
-
-A demonstration should pass all of the following:
-
-- motion and render workers are alive;
-- the selected dialogue route reports ready;
-- media probes decode H.264 and AAC;
-- Listener, Speaker, and interruption stay on one continuous timeline;
-- at least three consecutive turns complete;
-- a barge-in returns to Listener and a new turn can start;
-- long-running browser playback does not exhaust its media buffer.
-
-```bash
-bash scripts/flashav2av status
-tail -f logs/pipecat_mse.log
-```
-
-## Repository layout
-
-```text
-pipecat_dystream/   dialogue, ASR, LLM, search, TTS, and MSE adapters
-voice_service/      Fish/SGLang-compatible and VoxCPM2 fallback PCM bridges
-model/              DyStream motion model code
-tools/              LIA renderer and preprocessing code
-static/             browser demo and customization frontend
-scripts/            setup, lifecycle, health checks, probes, and benchmarks
-tests/              logic, protocol, cancellation, and media regressions
-```
-
-`scripts/flashav2av` is the supported entry point and manages the configured Fish S2 Pro or VoxCPM2 TTS path together with the AV2AV service. Legacy offline scripts require local sample media that is intentionally not distributed.
-
-## Known limitations
-
-- The renderer produces native 512 × 512 frames; enlarging the player cannot add model detail.
-- Expression, emotion, nod, and blink controls are not exposed as stable production controls.
-- Listener naturalness remains dependent on the source checkpoint and conditioning audio.
-- GitHub CI validates the release surface, shell syntax, Python syntax, manifest, and credential/weight exclusions; it does not run GPU inference.
-
-See [known_issues.md](docs/known_issues.md) for the current list.
+- Fish S2 Pro is the primary managed TTS; VoxCPM2 and native speech-to-speech
+  remain compatibility paths.
+- The supported entry point is `bash scripts/flashav2av <command>`.
+- Native output is 512 x 512. Enlarging it cannot add model detail.
+- A complete fresh-host CUDA/SGLang installer and a reproducible E2E latency
+  benchmark are not published yet.
 
 ## Acknowledgements
 
-FlashAV2AV builds on [DyStream](https://github.com/XinchengSun/DyStream), [Pipecat](https://github.com/pipecat-ai/pipecat), [Fish Speech S2 Pro](https://huggingface.co/fishaudio/s2-pro), [SGLang-Omni](https://github.com/sgl-project/sglang-omni), [VoxCPM2](https://huggingface.co/openbmb/VoxCPM2), [FunASR/Paraformer](https://github.com/modelscope/FunASR), and [Wav2Vec2](https://huggingface.co/facebook/wav2vec2-base-960h).
+FlashAV2AV builds on [DyStream](https://github.com/XinchengSun/DyStream),
+[Pipecat](https://github.com/pipecat-ai/pipecat),
+[Fish Speech S2 Pro](https://huggingface.co/fishaudio/s2-pro),
+[SGLang-Omni](https://github.com/sgl-project/sglang-omni),
+[FunASR/Paraformer](https://github.com/modelscope/FunASR), and
+[Wav2Vec2](https://huggingface.co/facebook/wav2vec2-base-960h). VoxCPM2 is
+retained as a compatibility backend.
