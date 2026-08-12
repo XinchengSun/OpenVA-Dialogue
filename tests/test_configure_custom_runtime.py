@@ -1,4 +1,5 @@
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -8,6 +9,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "configure_custom_runtime.py"
+
+
+def _env_value(text: str, key: str) -> str:
+    prefix = f"{key}="
+    for line in text.splitlines():
+        if line.startswith(prefix):
+            values = shlex.split(line[len(prefix) :], posix=True)
+            return values[0] if values else ""
+    raise AssertionError(f"missing env key: {key}")
 
 
 class ConfigureCustomRuntimeTests(unittest.TestCase):
@@ -67,9 +77,9 @@ class ConfigureCustomRuntimeTests(unittest.TestCase):
             self.assertIn("PIPECAT_TTS_MODEL=fishaudio/s2-pro", main_env)
             self.assertIn("PIPECAT_TTS_BRIDGE_URI=ws://127.0.0.1:8771", main_env)
             self.assertIn("OPENAI_SPEECH_MODEL=fishaudio/s2-pro", bridge_env)
-            self.assertIn(
-                f"OPENAI_SPEECH_PYTHON='{root / 'runtime' / 'venvs' / 'pipecat' / 'bin' / 'python'}'",
-                bridge_env,
+            self.assertEqual(
+                _env_value(bridge_env, "OPENAI_SPEECH_PYTHON"),
+                str(root / "runtime" / "venvs" / "pipecat" / "bin" / "python"),
             )
             self.assertIn("OPENAI_SPEECH_REFERENCE_TEXT=", bridge_env)
             self.assertIn("FISH_CUDA_VISIBLE_DEVICES=2,3", upstream_env)
@@ -119,7 +129,10 @@ class ConfigureCustomRuntimeTests(unittest.TestCase):
             bridge_env = (
                 root / "runtime" / "config" / "fish_speech_bridge.env"
             ).read_text(encoding="utf-8")
-            self.assertIn(f"OPENAI_SPEECH_PYTHON='{custom_python}'", bridge_env)
+            self.assertEqual(
+                _env_value(bridge_env, "OPENAI_SPEECH_PYTHON"),
+                str(custom_python),
+            )
 
     def test_fish_http_and_bridge_ports_must_differ(self):
         with tempfile.TemporaryDirectory() as directory:
