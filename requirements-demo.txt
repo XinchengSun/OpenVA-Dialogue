@@ -1,0 +1,21 @@
+# Tested realtime demo environment on the AutoDL instance used for delivery.
+numpy==1.26.4
+aiohttp
+websockets
+python-dotenv
+soundfile
+scipy
+librosa
+opencv-python
+Pillow
+gradio
+omegaconf
+diffusers==0.35.2
+torch-ema
+transformers
+torchvision
+torchmetrics
+pytorch-lightning
+einops
+imageio
+imageio-ffmpeg

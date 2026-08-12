@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COMMAND="${1:-help}"
+if (($#)); then
+  shift
+fi
+
+DATA_ROOT="${FLASHAV2AV_DATA_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/flashav2av}"
+GENERATED_ENV="$DATA_ROOT/config/custom_cascade.env"
+if [[ -n "${ENV_FILE:-}" ]]; then
+  ENV_FILE="$ENV_FILE"
+elif [[ -f "$GENERATED_ENV" ]]; then
+  ENV_FILE="$GENERATED_ENV"
+else
+  ENV_FILE="$ROOT_DIR/.env"
+fi
+PIPECAT_VENV="${PIPECAT_VENV:-$DATA_ROOT/venvs/pipecat}"
+PYTHON_BOOTSTRAP="${FLASHAV2AV_PYTHON:-python3.11}"
+
+usage() {
+  cat <<'EOF'
+Usage: bash scripts/flashav2av <command>
+
+Commands:
+  setup [--check-only]  Prepare dependencies and check external model assets.
+  configure ARGS        Create private custom-cascade/VoxCPM2 runtime envs.
+  start                 Start FlashAV2AV and run health/media checks.
+  status                Validate the managed service and media readiness.
+  restart               Restart only the managed FlashAV2AV services.
+  stop                  Stop only the managed FlashAV2AV services.
+  help                  Show this message.
+
+Environment:
+  ENV_FILE                 Private runtime env (default: .env).
+  FLASHAV2AV_DATA_ROOT     Models, venvs and caches outside Git.
+  FLASHAV2AV_PYTHON        Python 3.11 bootstrap executable.
+  PIPECAT_VENV             Override the Pipecat virtual environment.
+  VOXCPM2_PYTHON_BOOTSTRAP Python 3.11 used by the VoxCPM2 installer.
+EOF
+}
+
+die() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+require_linux() {
+  [[ "$(uname -s)" == "Linux" ]] || die "FlashAV2AV runtime requires Linux"
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "missing command: $1"
+}
+
+show_asset_status() {
+  local missing=0
+  local asset=""
+  local -a assets=(
+    "$ROOT_DIR/checkpoints/last.ckpt"
+    "$ROOT_DIR/tools/pretrained_model/epoch=0-step=312000.ckpt"
+    "$ROOT_DIR/tools/hf_models/wav2vec2-base-960h/pytorch_model.bin"
+  )
+
+  for asset in "${assets[@]}"; do
+    if [[ -f "$asset" ]]; then
+      echo "ASSET_OK ${asset#$ROOT_DIR/}"
+    else
+      echo "ASSET_MISSING ${asset#$ROOT_DIR/}" >&2
+      missing=1
+    fi
+  done
+  return "$missing"
+}
+
+show_private_config_status() {
+  if [[ -n "${DYSTREAM_REF_IMAGE:-}" && -f "${DYSTREAM_REF_IMAGE}" ]]; then
+    echo "PRIVATE_ASSET_OK avatar"
+    return 0
+  fi
+  echo "PRIVATE_ASSET_NEEDS_CONFIG set DYSTREAM_REF_IMAGE in $ENV_FILE" >&2
+  return 1
+}
+
+setup_project() {
+  local mode="${1:-}"
+  local check_failed=0
+  [[ -z "$mode" || "$mode" == "--check-only" ]] \
+    || die "usage: bash scripts/flashav2av setup [--check-only]"
+  require_linux
+
+  if [[ -f "$ENV_FILE" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$ENV_FILE"
+    set +a
+  fi
+
+  for command_name in bash curl ffmpeg ffprobe flock ln nvidia-smi; do
+    require_command "$command_name"
+  done
+
+  if [[ "$mode" == "--check-only" ]]; then
+    if [[ -f "$ENV_FILE" ]]; then
+      echo "ENV_OK $ENV_FILE"
+    else
+      echo "ENV_MISSING $ENV_FILE" >&2
+      check_failed=1
+    fi
+    if [[ -x "$PIPECAT_VENV/bin/python" ]]; then
+      echo "PIPECAT_ENV_OK $PIPECAT_VENV"
+    else
+      echo "PIPECAT_ENV_MISSING $PIPECAT_VENV" >&2
+      check_failed=1
+    fi
+    show_asset_status || check_failed=1
+    show_private_config_status || check_failed=1
+    return "$check_failed"
+  fi
+
+  [[ -f "$ROOT_DIR/.env.example" ]] || die "missing .env.example"
+  if [[ ! -f "$ENV_FILE" ]]; then
+    [[ "$ENV_FILE" == "$ROOT_DIR/.env" ]] \
+      || die "custom ENV_FILE does not exist: $ENV_FILE"
+    install -m 600 "$ROOT_DIR/.env.example" "$ENV_FILE"
+    echo "ENV_CREATED $ENV_FILE"
+    echo "Edit the private env before starting FlashAV2AV."
+  else
+    chmod 600 "$ENV_FILE"
+    echo "ENV_OK $ENV_FILE"
+  fi
+
+  require_command "$PYTHON_BOOTSTRAP"
+  mkdir -p "$DATA_ROOT/venvs" "$DATA_ROOT/cache"
+
+  BASE_PYTHON="${BASE_PYTHON:-$(command -v "$PYTHON_BOOTSTRAP")}" \
+  PIPECAT_VENV="$PIPECAT_VENV" \
+  NLTK_DATA="${NLTK_DATA:-$DATA_ROOT/cache/nltk_data}" \
+  PIP_CACHE_DIR="${PIP_CACHE_DIR:-$DATA_ROOT/cache/pip}" \
+    bash "$ROOT_DIR/scripts/install_pipecat_env.sh"
+
+  # Keep the multi-gigabyte model files outside Git while making a fresh clone
+  # self-contained to install. The downloader uses the pinned upstream sources
+  # in weights-manifest.json and resumes through the Hugging Face cache.
+  local weights_root="$DATA_ROOT/models/dystream-official"
+  HF_HOME="${HF_HOME:-$DATA_ROOT/cache/huggingface}" \
+  MODELSCOPE_CACHE="${MODELSCOPE_CACHE:-$DATA_ROOT/cache/modelscope}" \
+  HF_XET_HIGH_PERFORMANCE="${HF_XET_HIGH_PERFORMANCE:-1}" \
+    "$PIPECAT_VENV/bin/python" "$ROOT_DIR/scripts/setup_weights.py" \
+      --root "$weights_root" \
+      --model dystream-motion \
+      --model dystream-lia-renderer \
+      --model wav2vec2-base-960h \
+      download
+
+  mkdir -p \
+    "$ROOT_DIR/checkpoints" \
+    "$ROOT_DIR/tools/pretrained_model" \
+    "$ROOT_DIR/tools/hf_models/wav2vec2-base-960h"
+  ln -sfn "$weights_root/checkpoints/last.ckpt" \
+    "$ROOT_DIR/checkpoints/last.ckpt"
+  ln -sfn "$weights_root/tools/pretrained_model/epoch=0-step=312000.ckpt" \
+    "$ROOT_DIR/tools/pretrained_model/epoch=0-step=312000.ckpt"
+  ln -sfn "$weights_root/tools/hf_models/wav2vec2-base-960h/pytorch_model.bin" \
+    "$ROOT_DIR/tools/hf_models/wav2vec2-base-960h/pytorch_model.bin"
+
+  VOXCPM2_DATA_ROOT="$DATA_ROOT" \
+  VOXCPM2_PYTHON_BOOTSTRAP="${VOXCPM2_PYTHON_BOOTSTRAP:-$PYTHON_BOOTSTRAP}" \
+    bash "$ROOT_DIR/voice_service/setup_voxcpm2.sh" --data-root "$DATA_ROOT"
+
+  CUSTOM_CASCADE_DATA_ROOT="$DATA_ROOT" \
+  PIPECAT_PYTHON="$PIPECAT_VENV/bin/python" \
+  PIPECAT_ASR_MODEL="${PIPECAT_ASR_MODEL:-paraformer-zh-streaming}" \
+    bash "$ROOT_DIR/scripts/prefetch_custom_asr.sh" --data-root "$DATA_ROOT"
+
+  if ! show_asset_status; then
+    cat >&2 <<'EOF'
+SETUP_INCOMPLETE: install the three licensed DyStream assets listed above,
+then run `bash scripts/flashav2av setup --check-only`.
+EOF
+    return 2
+  fi
+  echo "SETUP_READY data_root=$DATA_ROOT env_file=$ENV_FILE"
+  echo "NEXT: fill private credentials and media, then run configure and start."
+}
+
+configure_project() {
+  require_linux
+  [[ -x "$PIPECAT_VENV/bin/python" ]] \
+    || die "missing Pipecat environment: $PIPECAT_VENV; run setup first"
+  FLASHAV2AV_DATA_ROOT="$DATA_ROOT" \
+    "$PIPECAT_VENV/bin/python" "$ROOT_DIR/scripts/configure_custom_runtime.py" \
+      --repo-root "$ROOT_DIR" \
+      --runtime-root "$DATA_ROOT" \
+      "$@"
+  echo "CONFIGURE_READY env_file=$GENERATED_ENV"
+}
+
+run_lifecycle() {
+  local action="$1"
+  [[ -f "$ENV_FILE" ]] \
+    || die "missing private env: $ENV_FILE; run setup first"
+  [[ -f "$ROOT_DIR/scripts/run_demo.sh" ]] \
+    || die "missing internal lifecycle script: scripts/run_demo.sh"
+
+  if [[ -z "${PIPECAT_PYTHON:-}" && -x "$PIPECAT_VENV/bin/python" ]]; then
+    export PIPECAT_PYTHON="$PIPECAT_VENV/bin/python"
+  fi
+  export PIPECAT_CACHE_ROOT="${PIPECAT_CACHE_ROOT:-$DATA_ROOT/cache/pipecat}"
+  export FLASHAV2AV_DATA_ROOT="$DATA_ROOT"
+  export TORCH_HOME="${TORCH_HOME:-$DATA_ROOT/cache/torch}"
+  export NLTK_DATA="${NLTK_DATA:-$DATA_ROOT/cache/nltk_data}"
+
+  ENV_FILE="$ENV_FILE" bash "$ROOT_DIR/scripts/run_demo.sh" "$action"
+}
+
+case "$COMMAND" in
+  setup)
+    (($# <= 1)) || die "usage: bash scripts/flashav2av setup [--check-only]"
+    setup_project "${1:-}"
+    ;;
+  configure)
+    configure_project "$@"
+    ;;
+  start | status | restart | stop)
+    (($# == 0)) || die "command '$COMMAND' does not accept arguments"
+    require_linux
+    run_lifecycle "$COMMAND"
+    ;;
+  help | --help | -h)
+    usage
+    ;;
+  *)
+    usage >&2
+    die "unknown command: $COMMAND"
+    ;;
+esac

@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "weights_are_git_ignored": true,
+    "private_reference_media_is_not_managed": true,
+    "notes": "Download only from the named upstream repositories. This project does not mirror third-party weights."
+  },
+  "models": [
+    {
+      "id": "dystream-motion",
+      "required": true,
+      "provider": "huggingface",
+      "repo_id": "robinwitch/DyStream",
+      "revision": "9ad5b1d3b0ef7aece4b9855d972c1f819f04dfbb",
+      "license": "unknown-no-upstream-license-file",
+      "redistribution": "upstream-only",
+      "files": [
+        {
+          "source": "checkpoints/last.ckpt",
+          "target": "checkpoints/last.ckpt",
+          "size_bytes": 7730126719,
+          "sha256": null
+        }
+      ]
+    },
+    {
+      "id": "dystream-lia-renderer",
+      "required": true,
+      "provider": "huggingface",
+      "repo_id": "robinwitch/DyStream",
+      "revision": "9ad5b1d3b0ef7aece4b9855d972c1f819f04dfbb",
+      "license": "unknown-no-upstream-license-file",
+      "redistribution": "upstream-only",
+      "files": [
+        {
+          "source": "tools/pretrained_model/epoch=0-step=312000.ckpt",
+          "target": "tools/pretrained_model/epoch=0-step=312000.ckpt",
+          "size_bytes": 1579672001,
+          "sha256": null
+        }
+      ]
+    },
+    {
+      "id": "wav2vec2-base-960h",
+      "required": true,
+      "provider": "huggingface",
+      "repo_id": "facebook/wav2vec2-base-960h",
+      "revision": "22aad52d435eb6dbaf354bdad9b0da84ce7d6156",
+      "license": "Apache-2.0",
+      "redistribution": "download-from-upstream",
+      "files": [
+        {
+          "source": "pytorch_model.bin",
+          "target": "tools/hf_models/wav2vec2-base-960h/pytorch_model.bin",
+          "size_bytes": 377667514,
+          "sha256": null
+        },
+        {
+          "source": "config.json",
+          "target": "tools/hf_models/wav2vec2-base-960h/config.json",
+          "size_bytes": null,
+          "sha256": null
+        },
+        {
+          "source": "preprocessor_config.json",
+          "target": "tools/hf_models/wav2vec2-base-960h/preprocessor_config.json",
+          "size_bytes": null,
+          "sha256": null
+        },
+        {
+          "source": "special_tokens_map.json",
+          "target": "tools/hf_models/wav2vec2-base-960h/special_tokens_map.json",
+          "size_bytes": null,
+          "sha256": null
+        },
+        {
+          "source": "tokenizer_config.json",
+          "target": "tools/hf_models/wav2vec2-base-960h/tokenizer_config.json",
+          "size_bytes": null,
+          "sha256": null
+        },
+        {
+          "source": "vocab.json",
+          "target": "tools/hf_models/wav2vec2-base-960h/vocab.json",
+          "size_bytes": null,
+          "sha256": null
+        }
+      ]
+    },
+    {
+      "id": "sensevoice-small",
+      "required": false,
+      "provider": "modelscope",
+      "repo_id": "iic/SenseVoiceSmall",
+      "revision": null,
+      "license": "Apache-2.0",
+      "redistribution": "download-from-upstream",
+      "directory_target": "runtime/custom_cascade/cache/pipecat/modelscope/manual/SenseVoiceSmall",
+      "required_files": [
+        "model.pt"
+      ],
+      "files": []
+    },
+    {
+      "id": "fish-audio-s2-pro",
+      "required": false,
+      "role": "tts-candidate-not-production-default",
+      "provider": "huggingface",
+      "repo_id": "fishaudio/s2-pro",
+      "revision": "15765083472df91a268805e2c5a99c5cddce5f7f",
+      "license": "Fish Audio Research License",
+      "redistribution": "upstream-only-research-and-non-commercial",
+      "directory_target": "runtime/custom_cascade/candidates/fish-s2-pro/models/fishaudio-s2-pro",
+      "required_files": [
+        "config.json",
+        "model.safetensors.index.json",
+        "model-00001-of-00002.safetensors",
+        "model-00002-of-00002.safetensors"
+      ],
+      "files": []
+    }
+  ]
+}

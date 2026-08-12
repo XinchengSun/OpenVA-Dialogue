@@ -1,0 +1,9 @@
+# Pipecat is pinned to the verified v1.6.0 release.
+# Keep the delivered DyStream NumPy ABI; newer OpenCV wheels require NumPy 2.x.
+numpy==1.26.4
+opencv-python-headless==4.11.0.86
+dashscope==1.26.4
+huggingface-hub==0.36.0
+pipecat-ai[funasr,runner,webrtc]==1.6.0
+torchaudio==2.8.0
+websockets==14.1

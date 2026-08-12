@@ -1,0 +1,23 @@
+config_cls: S2ProPipelineConfig
+model_path: fishaudio/s2-pro
+
+# Experimental single-user RTX 4090 profile.
+# Keep the verified memory-safe engine settings, but emit the first vocoder
+# block after 10 semantic tokens instead of the upstream default of 40.
+# This is an A/B candidate, not an upstream-guaranteed quality preset.
+runtime_overrides:
+  tts_engine:
+    server_args_overrides:
+      mem_fraction_static: 0.60
+      max_running_requests: 1
+      max_total_tokens: 8192
+      disable_cuda_graph: false
+      cuda_graph_bs: [1]
+      cuda_graph_max_bs: 1
+  vocoder:
+    stream_stride: 10
+    stream_followup_stride: 45
+    stream_overlap_tokens: 20
+    stream_crossfade_samples: 512
+    max_batch_size: 1
+    max_batch_wait_ms: 0

@@ -1,0 +1,1389 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>FlashAV2AV · 实时数字人</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07090e;
+      --panel: #0f131c;
+      --panel2: #151b27;
+      --line: #283043;
+      --text: #f7f8fb;
+      --muted: #8f9ab0;
+      --accent: #6d7cff;
+      --accent2: #8e68ff;
+      --green: #45d49c;
+      --red: #ff6b78;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 12% -10%, rgba(109, 124, 255, .17), transparent 34rem),
+        radial-gradient(circle at 88% 110%, rgba(142, 104, 255, .12), transparent 32rem),
+        var(--bg);
+      color: var(--text);
+      font: 15px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .wrap { width: min(820px, calc(100% - 32px)); margin: 0 auto; padding: 28px 0 52px; }
+    .topbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 18px; }
+    .eyebrow { color: #9da9ff; font-size: 11px; font-weight: 800; letter-spacing: .15em; text-transform: uppercase; }
+    h1 { margin: 3px 0 2px; font-size: clamp(25px, 5vw, 34px); line-height: 1.1; letter-spacing: -.035em; }
+    .subtitle { margin: 0; color: var(--muted); font-size: 14px; }
+    .topActions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; flex-wrap: wrap; }
+    .customizeLink, button {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-height: 42px; padding: 0 16px; border: 1px solid var(--line); border-radius: 11px;
+      color: var(--text); background: var(--panel2); text-decoration: none; font: 650 14px/1 inherit;
+      cursor: pointer; transition: transform .16s ease, border-color .16s ease, background .16s ease;
+    }
+    .customizeLink:hover, button:hover { transform: translateY(-1px); border-color: #46516c; background: #1a2130; }
+    .status {
+      display: inline-flex; align-items: center; gap: 8px; min-height: 34px; padding: 0 11px;
+      border: 1px solid var(--line); border-radius: 999px; color: #c7cfdd; background: rgba(15,19,28,.85);
+      font-size: 12px; white-space: nowrap;
+    }
+    .status::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: #687188; }
+    .status[data-state="ready"]::before { background: var(--green); box-shadow: 0 0 11px rgba(69,212,156,.75); }
+    .status[data-state="working"]::before { background: #ffc55f; box-shadow: 0 0 11px rgba(255,197,95,.5); }
+    .status[data-state="error"]::before { background: var(--red); }
+    .videoBox {
+      background: #000; border: 1px solid #222a39; border-radius: 20px; overflow: hidden;
+      box-shadow: 0 28px 90px rgba(0,0,0,.42);
+    }
+    .avatarStage {
+      position: relative;
+      width: min(514px, 100%);
+      margin-inline: auto;
+      aspect-ratio: 1 / 1;
+      background: #000;
+    }
+    .avatarLayer {
+      position: absolute;
+      inset: 0;
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #000;
+      pointer-events: none;
+      transition: opacity 900ms ease, filter 900ms ease;
+    }
+    .idleLayer {
+      opacity: 1;
+      filter: saturate(1.02) contrast(1.02);
+    }
+    .liveLayer {
+      opacity: 0;
+      filter: saturate(0.98);
+      transition: opacity 50ms linear, filter 50ms linear;
+    }
+    .avatarStage.showLive .idleLayer {
+      opacity: 0.08;
+      filter: blur(0.5px) saturate(0.95);
+    }
+    .avatarStage.showLive .liveLayer.liveActive {
+      opacity: 1;
+      filter: saturate(1);
+    }
+    /* AV2AV Listener is rendered by the same recurrent DyStream stream. */
+    .avatarStage .idleLayer {
+      display: none !important;
+    }
+    .avatarStage .liveLayer.liveActive {
+      opacity: 1;
+      filter: saturate(1);
+    }
+    .controls { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; margin: 16px 0 12px; }
+    button.primary { border-color: transparent; background: linear-gradient(135deg, var(--accent), var(--accent2)); box-shadow: 0 12px 30px rgba(109,124,255,.23); }
+    button.primary:hover { background: linear-gradient(135deg, #7b89ff, #9a78ff); }
+    button.danger { color: #ffb6bd; border-color: rgba(255,107,120,.34); background: rgba(104,36,45,.35); }
+    button:disabled { cursor: not-allowed; opacity: .5; transform: none; }
+    details { margin-top: 10px; border: 1px solid var(--line); border-radius: 13px; background: rgba(15,19,28,.72); }
+    summary { padding: 12px 15px; color: #b8c1d1; cursor: pointer; user-select: none; font-size: 13px; }
+    .settingsBody { padding: 0 15px 15px; }
+    .settingsBody label { display: block; margin-bottom: 7px; color: var(--muted); font-size: 12px; }
+    input {
+      width: 100%; padding: 11px 12px; border-radius: 10px; border: 1px solid var(--line);
+      background: #0a0d13; color: var(--text); font: inherit;
+    }
+    pre {
+      height: 220px; margin: 0 12px 12px; overflow: auto; background: #05070a;
+      border: 1px solid #202637; border-radius: 9px; padding: 11px; color: #9ca8ba;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap;
+    }
+    @media (max-width: 650px) {
+      .wrap { width: min(100% - 20px, 820px); padding-top: 16px; }
+      .topbar { align-items: stretch; flex-direction: column; }
+      .topActions { justify-content: space-between; }
+      .controls { grid-template-columns: 1fr 1fr; }
+      .controls .primary { grid-column: 1 / -1; }
+      .videoBox { border-radius: 15px; }
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header class="topbar">
+    <div>
+      <div class="eyebrow">FlashAV2AV</div>
+      <h1>实时音视频对话</h1>
+      <p class="subtitle">点击开始，与定制数字人自然交谈</p>
+    </div>
+    <div class="topActions">
+      <div class="status" id="status">未连接</div>
+      <a class="customizeLink" href="/customize?new=1">更换数字人</a>
+    </div>
+  </header>
+  <div class="videoBox avatarStage" id="avatarStage">
+    <video id="idleVideo" class="avatarLayer idleLayer" muted playsinline preload="none"></video>
+    <video id="videoA" class="avatarLayer liveLayer liveActive" muted playsinline></video>
+    <video id="videoB" class="avatarLayer liveLayer" muted playsinline></video>
+  </div>
+  <div class="controls">
+    <button id="startBtn" class="primary">开始对话</button>
+    <button id="stopBtn" title="结束采集，模型保持热加载">结束对话</button>
+    <button id="interruptBtn" class="danger">打断回复</button>
+  </div>
+  <details>
+    <summary>对话设置</summary>
+    <div class="settingsBody">
+      <label for="instruction">回答风格</label>
+      <input id="instruction" value="请用自然口语直接回答，默认一到三句；只有我明确要求时才详细展开。" />
+    </div>
+  </details>
+  <details class="debugPanel">
+    <summary>运行日志</summary>
+    <pre id="log"></pre>
+  </details>
+</div>
+<script>
+const videoA = document.getElementById('videoA');
+const videoB = document.getElementById('videoB');
+const liveVideos = [videoA, videoB];
+const idleVideo = document.getElementById('idleVideo');
+const avatarStage = document.getElementById('avatarStage');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const interruptBtn = document.getElementById('interruptBtn');
+const instructionEl = document.getElementById('instruction');
+const logEl = document.getElementById('log');
+const statusEl = document.getElementById('status');
+
+let mediaWs = null, logWs = null, micWs = null, currentMime = null;
+let audioCtx = null, processor = null, micStream = null, zeroGain = null;
+let appStarted = false, startInProgress = false, liveVisible = false;
+let micPending16 = new Float32Array(0);
+let micResampleSourceRate = 0;
+let micResampleWeightedSum = 0;
+let micResampleWeight = 0;
+let mseGeneration = 0;
+let mediaWsGeneration = 0;
+let logWsGeneration = 0;
+let micLifecycleGeneration = 0;
+let activeSlot = null;
+let ingestSlot = null;
+let liveAudioHeld = true;
+let currentStreamEpoch = 0;
+let expectedStreamGeneration = -1;
+let assistantResponseArmed = false;
+let activeAssistantTurn = null;
+let pendingAssistantBoundary = null;
+let pendingAssistantEndBoundary = null;
+let visibleAssistantTurn = null;
+let releasedAssistantTurnKey = null;
+const deferredAssistantBoundaries = new Map();
+let highestAssistantTurnId = -1;
+let lastBoundaryEventSeq = -1;
+const slotByVideo = new Map();
+
+// The encoder emits a fragment every ~240 ms (PIPE_GOP=3 at 12.5 fps).
+// Keep more than two complete fragments buffered so one late packet does not
+// immediately starve playback.
+const START_BUFFER_SEC = 0.60;
+const HANDOFF_BUFFER_SEC = 0.16;
+// Keep two complete GOPs behind the live edge. Startup already waits for
+// 0.60 s, so this retains the reserve instead of seeking most of it away.
+const TARGET_LATENCY_SEC = 0.48;
+const HANDOFF_TARGET_LATENCY_SEC = 0.08;
+const LOW_BUFFER_ENTER_SEC = 0.32;
+const LOW_BUFFER_EXIT_SEC = 0.48;
+const LOW_BUFFER_PLAYBACK_RATE = 0.96;
+const SOFT_CATCHUP_SEC = 0.80;
+const FAST_CATCHUP_SEC = 1.30;
+const HARD_CATCHUP_SEC = 2.50;
+const LIVE_TAIL_SEEK_INTERVAL_MS = 5000;
+const BUFFER_RETENTION_SEC = 12;
+const BUFFER_TRIM_INTERVAL_MS = 5000;
+// Qwen Audio Realtime recommends continuous 20-40 ms PCM chunks. Forty
+// milliseconds keeps browser/WebSocket overhead low while removing the old
+// packetization wait of up to 100 ms.
+const MIC_SEND_SAMPLES = 640;
+const LOG_MAX_LINES = 800;
+const LOG_TRIM_TO_LINES = 400;
+let logLineCount = 0;
+
+function log(line) {
+  const t = new Date().toLocaleTimeString();
+  logEl.append(document.createTextNode(`[${t}] ${line}\n`));
+  logLineCount += 1;
+  if (logLineCount > LOG_MAX_LINES) {
+    const lines = logEl.textContent.split('\n');
+    const kept = lines.slice(-LOG_TRIM_TO_LINES - 1);
+    logEl.textContent = kept.join('\n');
+    logLineCount = Math.max(0, kept.length - 1);
+  }
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setStatus(s) {
+  s = String(s || '');
+  let label = s || '未连接';
+  let state = 'idle';
+  if (s === 'listening' || s.startsWith('listening') || s.startsWith('running')) {
+    label = '聆听中'; state = 'ready';
+  } else if (s.includes('assistant starting') || s.includes('assistant preparing')) {
+    label = '正在思考'; state = 'working';
+  } else if (s.includes('assistant speaking')) {
+    label = '正在回复'; state = 'ready';
+  } else if (s.includes('interrupted: listening')) {
+    label = '聆听中'; state = 'ready';
+  } else if (s.includes('interrupt')) {
+    label = '正在停止'; state = 'working';
+  } else if (s === 'media connected') {
+    label = '画面已连接'; state = 'ready';
+  } else if (s === 'mic stopped' || s === 'media closed') {
+    label = '已停止';
+  } else if (s.includes('error')) {
+    label = '连接异常'; state = 'error';
+  }
+  statusEl.dataset.state = state;
+  statusEl.textContent = label;
+}
+
+function setLiveVisible(show, reason = '') {
+  show = !!show;
+  if (liveVisible === show) return;
+  liveVisible = show;
+  avatarStage.classList.toggle('showLive', show);
+  if (reason) log(`avatar ${show ? 'live' : 'idle'} ${reason}`);
+}
+
+function ensureIdlePlaying() {
+  // Recorded Listener playback is intentionally disabled. The current
+  // liveActive DyStream slot remains visible through listen/speak transitions.
+}
+
+function wsUrl(path) {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${location.host}${path}`;
+}
+
+function isCurrentSlot(slot) {
+  return !!(
+    slot
+    && !slot.disposed
+    && slot.generation === mseGeneration
+    && slotByVideo.get(slot.video) === slot
+  );
+}
+
+function describeBuffered(slot = ingestSlot || activeSlot) {
+  const sourceBuffer = slot && slot.sourceBuffer;
+  if (!sourceBuffer || !sourceBuffer.buffered) return 'no sourceBuffer';
+  const ranges = [];
+  for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+    ranges.push(sourceBuffer.buffered.start(i).toFixed(2) + '-' + sourceBuffer.buffered.end(i).toFixed(2));
+  }
+  return ranges.length ? ranges.join(', ') : 'empty';
+}
+
+function bufferedEnd(slot) {
+  const sourceBuffer = slot && slot.sourceBuffer;
+  if (!sourceBuffer || sourceBuffer.buffered.length === 0) return 0;
+  return sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+}
+
+function bufferedAhead(slot) {
+  return Math.max(0, bufferedEnd(slot) - slot.video.currentTime);
+}
+
+function holdLiveAudio(reason = '') {
+  const changed = !liveAudioHeld;
+  liveAudioHeld = true;
+  if (ingestSlot) ingestSlot.assistantMediaReady = false;
+  liveVideos.forEach(item => { item.muted = true; });
+  if (changed && reason) log(`live audio held: ${reason}`);
+}
+
+function assistantTurnKey(streamEpoch, generation, turnId) {
+  return `${streamEpoch}:${generation}:${turnId}`;
+}
+
+function cacheDeferredAssistantBoundary(boundary) {
+  const key = assistantTurnKey(
+    boundary.streamEpoch,
+    boundary.generation,
+    boundary.turnId,
+  );
+  deferredAssistantBoundaries.set(key, boundary);
+  while (deferredAssistantBoundaries.size > 8) {
+    deferredAssistantBoundaries.delete(
+      deferredAssistantBoundaries.keys().next().value
+    );
+  }
+}
+
+function resetAssistantAudioGate(reason = '') {
+  holdLiveAudio(reason);
+  setLiveVisible(false, reason || 'assistant gate reset');
+  ensureIdlePlaying();
+  assistantResponseArmed = false;
+  activeAssistantTurn = null;
+  pendingAssistantBoundary = null;
+  pendingAssistantEndBoundary = null;
+  visibleAssistantTurn = null;
+  releasedAssistantTurnKey = null;
+  deferredAssistantBoundaries.clear();
+}
+
+function armAssistantTurn(streamEpoch, generation, turnId) {
+  if (
+    !Number.isFinite(streamEpoch)
+    || !Number.isFinite(generation)
+    || !Number.isFinite(turnId)
+    || streamEpoch < 0
+    || generation < 0
+    || turnId < 0
+    || streamEpoch !== currentStreamEpoch
+    || (
+      expectedStreamGeneration >= 0
+      && generation < expectedStreamGeneration
+    )
+  ) {
+    log(
+      `stale assistant turn ignored epoch=${streamEpoch} ` +
+      `generation=${generation} turn=${turnId}`
+    );
+    return;
+  }
+  const key = assistantTurnKey(streamEpoch, generation, turnId);
+  if (key === releasedAssistantTurnKey) {
+    log(`duplicate released assistant turn ignored key=${key}`);
+    return;
+  }
+  if (turnId < highestAssistantTurnId) {
+    log(`out-of-order assistant turn ignored key=${key}`);
+    return;
+  }
+  if (
+    activeAssistantTurn
+    && generation === activeAssistantTurn.generation
+    && turnId === activeAssistantTurn.turnId
+  ) {
+    log(`duplicate active assistant turn ignored key=${key}`);
+    return;
+  }
+  if (
+    activeAssistantTurn
+    && turnId === highestAssistantTurnId
+    && (
+      generation !== activeAssistantTurn.generation
+      || turnId !== activeAssistantTurn.turnId
+    )
+  ) {
+    log(`conflicting assistant turn ignored key=${key}`);
+    return;
+  }
+  highestAssistantTurnId = Math.max(highestAssistantTurnId, turnId);
+  expectedStreamGeneration = Math.max(
+    expectedStreamGeneration,
+    generation,
+  );
+  holdLiveAudio('typed assistant turn');
+  setLiveVisible(false, 'waiting for assistant media');
+  ensureIdlePlaying();
+  activeAssistantTurn = {
+    streamEpoch,
+    generation,
+    turnId,
+  };
+  assistantResponseArmed = true;
+  pendingAssistantBoundary = null;
+  pendingAssistantEndBoundary = null;
+  releasedAssistantTurnKey = null;
+  for (const cachedKey of Array.from(deferredAssistantBoundaries.keys())) {
+    if (cachedKey !== key) deferredAssistantBoundaries.delete(cachedKey);
+  }
+  const deferred = deferredAssistantBoundaries.get(key);
+  if (deferred) {
+    pendingAssistantBoundary = deferred;
+    deferredAssistantBoundaries.delete(key);
+    log(
+      `deferred media boundary matched generation=${generation} ` +
+      `turn=${turnId}`
+    );
+  }
+  log(
+    `assistant turn armed epoch=${streamEpoch} generation=${generation} ` +
+    `turn=${turnId}`
+  );
+  maybeReleaseLiveAudioAtBoundary();
+}
+
+function releaseLiveAudio(turn, reason = '') {
+  if (!appStarted || !activeSlot || ingestSlot !== activeSlot) return;
+  liveVideos.forEach(item => { item.muted = true; });
+  activeSlot.video.muted = false;
+  visibleAssistantTurn = { ...turn };
+  setLiveVisible(true, 'assistant media started');
+  const changed = liveAudioHeld;
+  liveAudioHeld = false;
+  if (changed && reason) log(`live audio released: ${reason}`);
+}
+
+function maybeReleaseLiveAudioAtBoundary() {
+  const boundary = pendingAssistantBoundary;
+  const slot = activeSlot;
+  if (
+    !boundary
+    || !assistantResponseArmed
+    || !activeAssistantTurn
+    || !slot
+    || ingestSlot !== slot
+    || !isCurrentSlot(slot)
+    || slot.streamEpoch !== boundary.streamEpoch
+    || slot.timelineOrigin === null
+  ) return;
+  if (
+    boundary.streamEpoch !== activeAssistantTurn.streamEpoch
+    || boundary.generation !== activeAssistantTurn.generation
+    || boundary.turnId !== activeAssistantTurn.turnId
+  ) return;
+  if (
+    expectedStreamGeneration >= 0
+    && boundary.generation < expectedStreamGeneration
+  ) return;
+  const safeTime = slot.timelineOrigin + boundary.safeMediaTimeSec;
+  if (slot.video.currentTime + 0.005 < safeTime) return;
+  const overshootMs = Math.max(0, (slot.video.currentTime - safeTime) * 1000);
+  const releasedKey = assistantTurnKey(
+    boundary.streamEpoch,
+    boundary.generation,
+    boundary.turnId,
+  );
+  pendingAssistantBoundary = null;
+  assistantResponseArmed = false;
+  activeAssistantTurn = null;
+  releasedAssistantTurnKey = releasedKey;
+  releaseLiveAudio(
+    boundary,
+    `media boundary generation=${boundary.generation} turn=${boundary.turnId} ` +
+    `overshoot_ms=${overshootMs.toFixed(1)}`
+  );
+}
+
+function maybeReturnToListenerAtBoundary() {
+  const boundary = pendingAssistantEndBoundary;
+  const turn = visibleAssistantTurn;
+  const slot = activeSlot;
+  if (
+    !boundary
+    || !turn
+    || !slot
+    || ingestSlot !== slot
+    || !isCurrentSlot(slot)
+    || slot.streamEpoch !== boundary.streamEpoch
+    || slot.timelineOrigin === null
+  ) return;
+  if (
+    boundary.streamEpoch !== turn.streamEpoch
+    || boundary.generation !== turn.generation
+    || boundary.turnId !== turn.turnId
+  ) return;
+  const safeTime = slot.timelineOrigin + boundary.safeMediaTimeSec;
+  if (slot.video.currentTime + 0.005 < safeTime) return;
+  const overshootMs = Math.max(0, (slot.video.currentTime - safeTime) * 1000);
+  pendingAssistantEndBoundary = null;
+  visibleAssistantTurn = null;
+  holdLiveAudio(
+    `assistant media ended generation=${boundary.generation} ` +
+    `turn=${boundary.turnId}`
+  );
+  setLiveVisible(
+    false,
+    `assistant media ended overshoot_ms=${overshootMs.toFixed(1)}`
+  );
+  ensureIdlePlaying();
+  setStatus('listening');
+}
+
+function disposeSlot(slot) {
+  if (!slot || slot.disposed) return;
+  slot.disposed = true;
+  slot.pendingSegments = [];
+  if (slot.activationTimer) {
+    clearTimeout(slot.activationTimer);
+    slot.activationTimer = null;
+  }
+  try {
+    if (
+      slot.sourceBuffer
+      && slot.mediaSource
+      && slot.mediaSource.readyState === 'open'
+    ) {
+      slot.sourceBuffer.abort();
+    }
+  } catch (e) {}
+  slot.video.pause();
+  slot.video.playbackRate = 1.0;
+  slot.video.muted = true;
+  slot.video.removeAttribute('src');
+  slot.video.load();
+  if (slot.objectUrl) URL.revokeObjectURL(slot.objectUrl);
+  if (slotByVideo.get(slot.video) === slot) slotByVideo.delete(slot.video);
+  if (ingestSlot === slot) ingestSlot = null;
+  if (activeSlot === slot) activeSlot = null;
+}
+
+function activateSlot(slot, reason) {
+  if (!isCurrentSlot(slot) || ingestSlot !== slot || slot.activated) return;
+  slot.activated = true;
+  if (slot.activationTimer) {
+    clearTimeout(slot.activationTimer);
+    slot.activationTimer = null;
+  }
+  const retiringSlot = activeSlot;
+  liveVideos.forEach(item => item.classList.remove('liveActive'));
+  slot.video.classList.add('liveActive');
+  activeSlot = slot;
+  setLiveVisible(false, slot.replacing ? 'media slot handoff' : 'media slot ready');
+  liveVideos.forEach(item => { item.muted = true; });
+  maybeReleaseLiveAudioAtBoundary();
+  maybeReturnToListenerAtBoundary();
+  log(`live slot activated generation=${slot.generation} reason=${reason}`);
+  if (retiringSlot && retiringSlot !== slot) {
+    setTimeout(() => {
+      if (activeSlot !== retiringSlot && ingestSlot !== retiringSlot) {
+        disposeSlot(retiringSlot);
+      }
+    }, 80);
+  }
+}
+
+function armSlotActivation(slot) {
+  if (!isCurrentSlot(slot) || slot.activationArmed) return;
+  slot.activationArmed = true;
+  if (typeof slot.video.requestVideoFrameCallback === 'function') {
+    slot.video.requestVideoFrameCallback(() => {
+      activateSlot(slot, 'decoded-frame');
+    });
+  } else {
+    slot.video.addEventListener(
+      'playing',
+      () => activateSlot(slot, 'playing-fallback'),
+      { once: true },
+    );
+  }
+  slot.activationTimer = setTimeout(() => {
+    if (isCurrentSlot(slot) && slot.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+      activateSlot(slot, 'ready-state-fallback');
+    }
+  }, 1500);
+}
+
+function maybePlay(slot) {
+  if (!isCurrentSlot(slot)) return;
+  const sourceBuffer = slot.sourceBuffer;
+  if (!sourceBuffer || sourceBuffer.buffered.length === 0) return;
+  const ahead = bufferedAhead(slot);
+  const startBufferSec = slot.replacing ? HANDOFF_BUFFER_SEC : START_BUFFER_SEC;
+  if (!slot.playbackStarted && ahead < startBufferSec) {
+    const now = Date.now();
+    if (now - slot.lastPrebufferLogAt > 1000) {
+      log(`prebuffering generation=${slot.generation} ${ahead.toFixed(2)}s/${startBufferSec.toFixed(2)}s`);
+      slot.lastPrebufferLogAt = now;
+    }
+    return;
+  }
+  if (!slot.playbackStarted) {
+    slot.playbackStarted = true;
+    const targetLatencySec = slot.replacing
+      ? HANDOFF_TARGET_LATENCY_SEC
+      : TARGET_LATENCY_SEC;
+    const end = bufferedEnd(slot);
+    if (end > targetLatencySec) {
+      slot.video.currentTime = Math.max(0, end - targetLatencySec);
+    }
+    log(`playback start generation=${slot.generation} buffered=${ahead.toFixed(2)}s targetLatency=${targetLatencySec.toFixed(2)}s`);
+    armSlotActivation(slot);
+  }
+  slot.video.play().catch(e => log('video play blocked: ' + e));
+}
+
+function liveTail(slot) {
+  if (!isCurrentSlot(slot)) return;
+  const sourceBuffer = slot.sourceBuffer;
+  const video = slot.video;
+  if (!sourceBuffer || sourceBuffer.buffered.length === 0) return;
+  const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+  const latency = end - video.currentTime;
+  const now = Date.now();
+
+  if (slot.playbackStarted) {
+    let desiredRate = 1.0;
+    if (latency < LOW_BUFFER_ENTER_SEC) slot.lowBufferRecovery = true;
+    else if (latency >= LOW_BUFFER_EXIT_SEC) slot.lowBufferRecovery = false;
+
+    if (slot.lowBufferRecovery) desiredRate = LOW_BUFFER_PLAYBACK_RATE;
+    if (latency > FAST_CATCHUP_SEC) {
+      slot.lowBufferRecovery = false;
+      desiredRate = 1.10;
+    } else if (latency > SOFT_CATCHUP_SEC) {
+      slot.lowBufferRecovery = false;
+      desiredRate = 1.06;
+    }
+
+    if (latency > HARD_CATCHUP_SEC && now - slot.lastTailSeekAt > LIVE_TAIL_SEEK_INTERVAL_MS) {
+      video.currentTime = Math.max(0, end - TARGET_LATENCY_SEC);
+      video.playbackRate = 1.0;
+      slot.lowBufferRecovery = false;
+      slot.lastTailSeekAt = now;
+      log(`live-tail hard catch-up latency=${latency.toFixed(2)}s target=${video.currentTime.toFixed(2)}`);
+    } else if (Math.abs(video.playbackRate - desiredRate) > 0.001) {
+      video.playbackRate = desiredRate;
+      log(`live-tail playbackRate=${desiredRate.toFixed(2)} latency=${latency.toFixed(2)}s`);
+    }
+  }
+
+  if (
+    !sourceBuffer.updating
+    && sourceBuffer.buffered.length > 0
+    && now - slot.lastBufferTrimAt > BUFFER_TRIM_INTERVAL_MS
+  ) {
+    try {
+      const safeRemoveEnd = Math.max(0, video.currentTime - BUFFER_RETENTION_SEC);
+      if (
+        safeRemoveEnd > 1
+        && sourceBuffer.buffered.start(0) < safeRemoveEnd - 0.25
+      ) {
+        sourceBuffer.remove(0, safeRemoveEnd);
+        slot.lastBufferTrimAt = now;
+      }
+    } catch (e) {}
+  }
+}
+
+function teardownMSE() {
+  mseGeneration += 1;
+  holdLiveAudio('mse teardown');
+  const slots = Array.from(slotByVideo.values());
+  ingestSlot = null;
+  activeSlot = null;
+  slots.forEach(disposeSlot);
+  liveVideos.forEach(item => item.classList.remove('liveActive'));
+  videoA.classList.add('liveActive');
+  setLiveVisible(false, 'mse reset');
+}
+
+function buildMSE(mime, replacing) {
+  currentMime = mime;
+  const oldActive = activeSlot;
+  const oldIngest = ingestSlot;
+  mseGeneration += 1;
+  if (oldIngest && oldIngest !== oldActive) disposeSlot(oldIngest);
+  if (!replacing) {
+    Array.from(slotByVideo.values()).forEach(disposeSlot);
+    activeSlot = null;
+    setLiveVisible(false, 'initial mse build');
+  } else if (oldActive) {
+    holdLiveAudio('encoder epoch handoff');
+    // Keep the last official stream moving while the emergency replacement
+    // epoch initializes. Normal barge-in no longer enters this branch.
+    oldActive.video.play().catch(() => {});
+  }
+
+  const targetVideo = oldActive && replacing
+    ? (oldActive.video === videoA ? videoB : videoA)
+    : videoA;
+  const previousTargetSlot = slotByVideo.get(targetVideo);
+  if (previousTargetSlot && previousTargetSlot !== oldActive) {
+    disposeSlot(previousTargetSlot);
+  }
+  targetVideo.muted = true;
+  if (!oldActive || targetVideo !== oldActive.video) {
+    targetVideo.classList.remove('liveActive');
+  }
+  const slot = {
+    video: targetVideo,
+    mediaSource: null,
+    sourceBuffer: null,
+    objectUrl: null,
+    pendingSegments: [],
+    generation: mseGeneration,
+    replacing: !!(replacing && oldActive),
+    playbackStarted: false,
+    lastPrebufferLogAt: 0,
+    lastTailSeekAt: 0,
+    lastBufferTrimAt: 0,
+    lowBufferRecovery: false,
+    mediaChunkCount: 0,
+    activationArmed: false,
+    activationTimer: null,
+    activated: false,
+    assistantMediaReady: false,
+    streamEpoch: currentStreamEpoch,
+    timelineOrigin: null,
+    disposed: false,
+  };
+  slotByVideo.set(targetVideo, slot);
+  ingestSlot = slot;
+
+  log('MediaSource supported=' + (!!window.MediaSource));
+  log('MIME supported=' + MediaSource.isTypeSupported(mime));
+  const nextMediaSource = new MediaSource();
+  slot.mediaSource = nextMediaSource;
+  slot.objectUrl = URL.createObjectURL(nextMediaSource);
+  targetVideo.src = slot.objectUrl;
+  targetVideo.onloadedmetadata = () => {
+    if (isCurrentSlot(slot)) log('video loadedmetadata duration=' + targetVideo.duration);
+  };
+  targetVideo.onplaying = () => {
+    if (isCurrentSlot(slot)) log('video playing currentTime=' + targetVideo.currentTime.toFixed(2));
+  };
+  targetVideo.onwaiting = () => {
+    if (isCurrentSlot(slot)) log('video waiting currentTime=' + targetVideo.currentTime.toFixed(2));
+  };
+  targetVideo.onerror = () => {
+    if (!isCurrentSlot(slot)) return;
+    const e = targetVideo.error;
+    log('VIDEO ERROR code=' + (e ? e.code : 'null') + ' message=' + (e ? e.message : ''));
+  };
+  nextMediaSource.addEventListener('sourceopen', () => {
+    if (!isCurrentSlot(slot) || slot.mediaSource !== nextMediaSource) return;
+    log('MediaSource sourceopen readyState=' + nextMediaSource.readyState);
+    try {
+      const nextSourceBuffer = nextMediaSource.addSourceBuffer(mime);
+      slot.sourceBuffer = nextSourceBuffer;
+      nextSourceBuffer.mode = 'sequence';
+      log('SourceBuffer created mode=' + nextSourceBuffer.mode);
+      nextSourceBuffer.addEventListener('updateend', () => {
+        if (
+          !isCurrentSlot(slot)
+          || slot.mediaSource !== nextMediaSource
+          || slot.sourceBuffer !== nextSourceBuffer
+        ) return;
+        if (
+          slot.timelineOrigin === null
+          && nextSourceBuffer.buffered.length > 0
+        ) {
+          slot.timelineOrigin = nextSourceBuffer.buffered.start(0);
+          log(`media timeline origin=${slot.timelineOrigin.toFixed(3)} epoch=${slot.streamEpoch}`);
+        }
+        appendNextSegment(slot);
+        liveTail(slot);
+        maybePlay(slot);
+        maybeReleaseLiveAudioAtBoundary();
+      });
+      nextSourceBuffer.addEventListener('error', () => {
+        if (!isCurrentSlot(slot) || slot.sourceBuffer !== nextSourceBuffer) return;
+        log('SOURCEBUFFER ERROR buffered=' + describeBuffered(slot));
+      });
+    } catch (e) {
+      log('addSourceBuffer ERROR: ' + e);
+      return;
+    }
+    appendNextSegment(slot);
+    maybePlay(slot);
+  }, { once: true });
+}
+
+function setupMSE(mime) {
+  const preserveActive = !!(activeSlot && isCurrentSlot(activeSlot));
+  buildMSE(mime, preserveActive);
+}
+
+function handoffMSE() {
+  if (!currentMime) return;
+  if (!activeSlot || !isCurrentSlot(activeSlot)) {
+    buildMSE(currentMime, false);
+    return;
+  }
+  buildMSE(currentMime, true);
+}
+
+function appendNextSegment(slot) {
+  if (!isCurrentSlot(slot)) return;
+  const sourceBuffer = slot.sourceBuffer;
+  if (
+    !sourceBuffer
+    || sourceBuffer.updating
+    || slot.pendingSegments.length === 0
+  ) return;
+  const seg = slot.pendingSegments.shift();
+  try {
+    sourceBuffer.appendBuffer(seg);
+  } catch (e) {
+    log('appendBuffer ERROR: ' + e + ' buffered=' + describeBuffered(slot));
+  }
+}
+
+function handleServerLog(message) {
+  if (message.includes('[ENGINE STATE] WARMUP_IDLE')) setStatus('listening: model idle');
+  else if (message.includes('[ENGINE STATE] ASSISTANT_ACTIVE')) {
+    setStatus('assistant starting');
+  }
+  else if (
+    message.includes('[MIC] interrupt')
+    || message.includes('[ENGINE STATE] interrupt')
+  ) {
+    setStatus('interrupted: assistant stopping');
+  }
+  else if (message.includes('[PIPECAT S2S] speech started')) {
+    setStatus('listening: speech detected');
+  }
+  else if (message.includes('[PIPECAT S2S] response created')) {
+    setStatus('assistant preparing');
+  }
+  else if (message.includes('[PIPECAT S2S] first audio')) {
+    setStatus('assistant speaking');
+  }
+  else if (message.includes('[DOUBAO ASR_INFO]')) setStatus('listening: speech detected');
+  else if (message.includes('[DOUBAO TTS] sentence start')) {
+    setStatus('assistant speaking');
+  }
+}
+
+function handleMediaControl(obj) {
+  if (obj.type === 'assistant_turn_started') {
+    const generation = Number(obj.generation ?? -1);
+    const turnId = Number(obj.turn_id ?? -1);
+    armAssistantTurn(
+      currentStreamEpoch,
+      generation,
+      turnId,
+    );
+    setStatus('assistant preparing');
+    return true;
+  }
+  if (obj.type === 'assistant_interrupted') {
+    expectedStreamGeneration = Math.max(
+      expectedStreamGeneration,
+      Number(obj.generation ?? -1),
+    );
+    const graceful = obj.graceful === true;
+    const keepVisibleTail = !!(
+      graceful
+      && visibleAssistantTurn
+      && !liveAudioHeld
+    );
+    if (keepVisibleTail) {
+      assistantResponseArmed = false;
+      activeAssistantTurn = null;
+      pendingAssistantBoundary = null;
+      pendingAssistantEndBoundary = null;
+      deferredAssistantBoundaries.clear();
+      setStatus('interrupted: assistant stopping');
+      log(
+        `graceful interrupt keeps paired A/V until media end ` +
+        `generation=${obj.generation ?? -1} turn=${obj.turn_id ?? -1} ` +
+        `grace=${Number(obj.grace_sec ?? 0).toFixed(3)}s`
+      );
+    } else {
+      resetAssistantAudioGate('interrupt before assistant media became visible');
+      setStatus('interrupted: listening');
+    }
+    return true;
+  }
+  if (obj.type === 'assistant_media_boundary') {
+    const eventSeq = Number(obj.event_seq ?? -1);
+    if (eventSeq <= lastBoundaryEventSeq) {
+      log(`stale media boundary ignored event_seq=${eventSeq}`);
+      return true;
+    }
+    lastBoundaryEventSeq = eventSeq;
+    const generation = Number(obj.generation ?? -1);
+    const streamEpoch = Number(obj.stream_epoch ?? -1);
+    const turnId = Number(obj.turn_id ?? -1);
+    const boundary = {
+      streamEpoch,
+      generation,
+      turnId,
+      safeMediaTimeSec: Number(obj.safe_media_time_s ?? 0),
+      eventSeq,
+    };
+    const boundaryKey = assistantTurnKey(
+      streamEpoch,
+      generation,
+      turnId,
+    );
+    if (
+      !Number.isFinite(turnId)
+      || turnId < 0
+      || streamEpoch !== currentStreamEpoch
+      || (
+        expectedStreamGeneration >= 0
+        && generation < expectedStreamGeneration
+      )
+    ) {
+      log(
+        `stale media boundary discarded epoch=${streamEpoch} ` +
+        `generation=${generation} turn=${turnId}`
+      );
+      return true;
+    }
+    if (boundaryKey === releasedAssistantTurnKey) {
+      log(`released media boundary ignored key=${boundaryKey}`);
+      return true;
+    }
+    const activeKey = activeAssistantTurn
+      ? assistantTurnKey(
+          activeAssistantTurn.streamEpoch,
+          activeAssistantTurn.generation,
+          activeAssistantTurn.turnId,
+        )
+      : null;
+    if (activeKey !== boundaryKey) {
+      const definitelyOld = !!(
+        activeAssistantTurn
+        && (
+          generation < activeAssistantTurn.generation
+          || (
+            generation === activeAssistantTurn.generation
+            && turnId < activeAssistantTurn.turnId
+          )
+        )
+      );
+      if (definitelyOld) {
+        log(`old media boundary discarded key=${boundaryKey}`);
+      } else {
+        cacheDeferredAssistantBoundary(boundary);
+        log(`media boundary deferred until typed turn start key=${boundaryKey}`);
+      }
+      return true;
+    }
+    pendingAssistantBoundary = boundary;
+    log(
+      `assistant media boundary epoch=${streamEpoch} generation=${generation} ` +
+      `turn=${pendingAssistantBoundary.turnId} safe=${pendingAssistantBoundary.safeMediaTimeSec.toFixed(3)}s`
+    );
+    maybeReleaseLiveAudioAtBoundary();
+    return true;
+  }
+  if (obj.type === 'assistant_media_ended') {
+    const eventSeq = Number(obj.event_seq ?? -1);
+    if (eventSeq <= lastBoundaryEventSeq) {
+      log(`stale assistant end ignored event_seq=${eventSeq}`);
+      return true;
+    }
+    lastBoundaryEventSeq = eventSeq;
+    const boundary = {
+      streamEpoch: Number(obj.stream_epoch ?? -1),
+      generation: Number(obj.generation ?? -1),
+      turnId: Number(obj.turn_id ?? -1),
+      safeMediaTimeSec: Number(obj.safe_media_time_s ?? 0),
+      eventSeq,
+    };
+    if (
+      boundary.streamEpoch !== currentStreamEpoch
+      || boundary.turnId < 0
+      || (
+        expectedStreamGeneration >= 0
+        && boundary.generation < expectedStreamGeneration
+      )
+    ) {
+      log(
+        `stale assistant end discarded epoch=${boundary.streamEpoch} ` +
+        `generation=${boundary.generation} turn=${boundary.turnId}`
+      );
+      return true;
+    }
+    pendingAssistantEndBoundary = boundary;
+    log(
+      `assistant media end epoch=${boundary.streamEpoch} ` +
+      `generation=${boundary.generation} turn=${boundary.turnId} ` +
+      `safe=${boundary.safeMediaTimeSec.toFixed(3)}s`
+    );
+    maybeReturnToListenerAtBoundary();
+    return true;
+  }
+  return false;
+}
+
+function connectLogs() {
+  if (logWs && (
+    logWs.readyState === WebSocket.OPEN
+    || logWs.readyState === WebSocket.CONNECTING
+  )) return logWs;
+  const ws = new WebSocket(wsUrl('/ws/logs'));
+  const generation = ++logWsGeneration;
+  logWs = ws;
+  ws.onopen = () => {
+    if (logWs !== ws || generation !== logWsGeneration) return;
+    log('control/log ws connected');
+  };
+  ws.onclose = () => {
+    if (logWs !== ws || generation !== logWsGeneration) return;
+    logWs = null;
+    log('control/log ws closed; media control fallback active');
+  };
+  ws.onerror = () => {};
+  ws.onmessage = ev => {
+    if (logWs !== ws || generation !== logWsGeneration) return;
+    let obj = null;
+    try { obj = JSON.parse(ev.data); } catch (e) {}
+    if (obj && obj.message) {
+      handleServerLog(obj.message);
+      log(obj.message);
+    }
+  };
+  return ws;
+}
+
+function connectMedia() {
+  if (mediaWs && (mediaWs.readyState === WebSocket.OPEN || mediaWs.readyState === WebSocket.CONNECTING)) return mediaWs;
+  const ws = new WebSocket(wsUrl('/ws/media'));
+  const generation = ++mediaWsGeneration;
+  mediaWs = ws;
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => {
+    if (mediaWs !== ws || generation !== mediaWsGeneration) return;
+    currentStreamEpoch = 0;
+    highestAssistantTurnId = -1;
+    lastBoundaryEventSeq = -1;
+    resetAssistantAudioGate('new media websocket');
+    log('media ws connected');
+    setStatus('media connected');
+    ensureIdlePlaying();
+  };
+  ws.onclose = () => {
+    if (mediaWs !== ws || generation !== mediaWsGeneration) return;
+    mediaWs = null;
+    log('media ws closed');
+    setStatus('media closed');
+    teardownMSE();
+  };
+  ws.onerror = () => {
+    if (mediaWs !== ws || generation !== mediaWsGeneration) return;
+    log('media ws error');
+  };
+  ws.onmessage = ev => {
+    if (mediaWs !== ws || generation !== mediaWsGeneration) return;
+    if (typeof ev.data === 'string') {
+      let obj = null;
+      try { obj = JSON.parse(ev.data); } catch (e) {}
+      if (obj && obj.type === 'mime') {
+        log('MSE mime: ' + obj.mime);
+        setupMSE(obj.mime);
+      } else if (obj && obj.type === 'stream_reset') {
+        currentStreamEpoch = Number(obj.epoch ?? (currentStreamEpoch + 1));
+        resetAssistantAudioGate('stream reset');
+        log(`stream reset epoch=${obj.epoch ?? 'unknown'}: preparing hidden live slot`);
+        handoffMSE();
+      } else if (obj && handleMediaControl(obj)) {
+        // Typed media controls are handled above.
+      } else if (obj && obj.message) {
+        if (!logWs || logWs.readyState !== WebSocket.OPEN) {
+          handleServerLog(obj.message);
+          log(obj.message);
+        }
+      } else {
+        log(ev.data);
+      }
+      return;
+    }
+    const slot = ingestSlot;
+    if (!slot || !isCurrentSlot(slot)) {
+      log(`media segment dropped without current slot bytes=${ev.data.byteLength}`);
+      return;
+    }
+    slot.mediaChunkCount++;
+    if (slot.mediaChunkCount % 20 === 1) {
+      log(`media segment received generation=${slot.generation} #${slot.mediaChunkCount} bytes=${ev.data.byteLength} buffered=${describeBuffered(slot)}`);
+    }
+    slot.pendingSegments.push(ev.data);
+    appendNextSegment(slot);
+    maybePlay(slot);
+  };
+  return ws;
+}
+
+function connectMicWS(generation) {
+  if (micWs && (micWs.readyState === WebSocket.OPEN || micWs.readyState === WebSocket.CONNECTING)) return micWs;
+  const ws = new WebSocket(wsUrl('/ws/mic'));
+  micWs = ws;
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => {
+    if (micWs !== ws || generation !== micLifecycleGeneration) return;
+    log('mic ws connected');
+    ws.send(JSON.stringify({ type: 'config', instruction: instructionEl.value || '' }));
+  };
+  ws.onclose = () => {
+    if (micWs !== ws) return;
+    micWs = null;
+    resetMicPending16();
+    if (generation !== micLifecycleGeneration) return;
+    log('mic ws closed');
+  };
+  ws.onerror = () => {
+    if (micWs !== ws || generation !== micLifecycleGeneration) return;
+    log('mic ws error');
+  };
+  ws.onmessage = ev => {
+    if (micWs !== ws || generation !== micLifecycleGeneration) return;
+    log('mic ws: ' + ev.data);
+  };
+  return ws;
+}
+
+function floatToPcm16LE(x) {
+  const out = new ArrayBuffer(x.length * 2);
+  const v = new DataView(out);
+  for (let i = 0; i < x.length; i++) {
+    let s = Math.max(-1, Math.min(1, x[i]));
+    v.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return out;
+}
+
+function resetMicPending16() {
+  micPending16 = new Float32Array(0);
+  micResampleSourceRate = 0;
+  micResampleWeightedSum = 0;
+  micResampleWeight = 0;
+}
+
+function sendMic16k(x16) {
+  if (!micWs || micWs.readyState !== WebSocket.OPEN) {
+    resetMicPending16();
+    return;
+  }
+  const merged = new Float32Array(micPending16.length + x16.length);
+  merged.set(micPending16, 0);
+  merged.set(x16, micPending16.length);
+  let offset = 0;
+  while (merged.length - offset >= MIC_SEND_SAMPLES) {
+    if (!micWs || micWs.readyState !== WebSocket.OPEN) {
+      resetMicPending16();
+      return;
+    }
+    micWs.send(
+      floatToPcm16LE(merged.subarray(offset, offset + MIC_SEND_SAMPLES))
+    );
+    offset += MIC_SEND_SAMPLES;
+  }
+  micPending16 = merged.slice(offset);
+}
+
+function downsampleTo16k(input, inputSr) {
+  if (!Number.isFinite(inputSr) || inputSr <= 0) {
+    throw new Error(`invalid microphone sample rate: ${inputSr}`);
+  }
+  if (inputSr === 16000) {
+    if (micResampleSourceRate !== inputSr) {
+      micResampleSourceRate = inputSr;
+      micResampleWeightedSum = 0;
+      micResampleWeight = 0;
+    }
+    return input;
+  }
+  if (micResampleSourceRate !== inputSr) {
+    micResampleSourceRate = inputSr;
+    micResampleWeightedSum = 0;
+    micResampleWeight = 0;
+  }
+
+  // Treat every source sample as a constant-width area and integrate it into
+  // exact 16 kHz output bins. Keeping the partial bin across callbacks avoids
+  // the cumulative floor() drift of chunk-local nearest-neighbour sampling.
+  const sourceWeight = 16000 / inputSr;
+  const capacity = Math.ceil(micResampleWeight + input.length * sourceWeight) + 1;
+  const out = new Float32Array(capacity);
+  let outLen = 0;
+  const epsilon = 1e-12;
+  for (let index = 0; index < input.length; index++) {
+    let remaining = sourceWeight;
+    while (remaining > epsilon) {
+      const take = Math.min(remaining, 1 - micResampleWeight);
+      micResampleWeightedSum += input[index] * take;
+      micResampleWeight += take;
+      remaining -= take;
+      if (micResampleWeight >= 1 - epsilon) {
+        out[outLen++] = micResampleWeightedSum / micResampleWeight;
+        micResampleWeightedSum = 0;
+        micResampleWeight = 0;
+      }
+    }
+  }
+  return out.subarray(0, outLen);
+}
+
+async function waitForMicOpen(ws, generation, timeoutMs = 5000) {
+  const startedAt = performance.now();
+  while (true) {
+    if (generation !== micLifecycleGeneration || micWs !== ws) {
+      throw new Error('mic start cancelled');
+    }
+    if (ws.readyState === WebSocket.OPEN) return;
+    if (ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
+      throw new Error('mic websocket closed before open');
+    }
+    if (performance.now() - startedAt >= timeoutMs) {
+      throw new Error(`mic websocket open timeout after ${timeoutMs}ms`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+}
+
+async function startMic(generation) {
+  if (processor && micStream && audioCtx && audioCtx.state !== 'closed') {
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+    if (generation !== micLifecycleGeneration) throw new Error('mic start cancelled');
+    log('mic already running; ignore duplicate start');
+    return;
+  }
+  resetMicPending16();
+  const ws = connectMicWS(generation);
+  let nextAudioCtx = null;
+  let nextStream = null;
+  let nextProcessor = null;
+  let nextZeroGain = null;
+  try {
+    await waitForMicOpen(ws, generation);
+    nextAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    nextStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      video: false,
+    });
+    if (generation !== micLifecycleGeneration || micWs !== ws) {
+      throw new Error('mic start cancelled');
+    }
+    const src = nextAudioCtx.createMediaStreamSource(nextStream);
+    nextProcessor = nextAudioCtx.createScriptProcessor(2048, 1, 1);
+    src.connect(nextProcessor);
+    nextZeroGain = nextAudioCtx.createGain();
+    nextZeroGain.gain.value = 0;
+    nextProcessor.connect(nextZeroGain);
+    nextZeroGain.connect(nextAudioCtx.destination);
+    nextProcessor.onaudioprocess = e => {
+      if (
+        generation !== micLifecycleGeneration
+        || micWs !== ws
+        || ws.readyState !== WebSocket.OPEN
+      ) return;
+      const input = e.inputBuffer.getChannelData(0);
+      const x16 = downsampleTo16k(input, nextAudioCtx.sampleRate);
+      sendMic16k(x16);
+    };
+    audioCtx = nextAudioCtx;
+    micStream = nextStream;
+    processor = nextProcessor;
+    zeroGain = nextZeroGain;
+    setStatus('running: speak directly');
+    ensureIdlePlaying();
+    log(`mic started continuous browser_sr=${audioCtx.sampleRate}`);
+  } catch (e) {
+    if (nextProcessor) nextProcessor.disconnect();
+    if (nextZeroGain) nextZeroGain.disconnect();
+    if (nextStream) nextStream.getTracks().forEach(t => t.stop());
+    if (nextAudioCtx && nextAudioCtx.state !== 'closed') {
+      nextAudioCtx.close().catch(() => {});
+    }
+    if (micWs === ws && ws.readyState < WebSocket.CLOSING) ws.close();
+    throw e;
+  }
+}
+
+function stopMic() {
+  micLifecycleGeneration += 1;
+  startInProgress = false;
+  if (processor) {
+    processor.onaudioprocess = null;
+    processor.disconnect();
+    processor = null;
+  }
+  if (zeroGain) { zeroGain.disconnect(); zeroGain = null; }
+  if (micStream) {
+    micStream.getTracks().forEach(t => t.stop());
+    micStream = null;
+  }
+  const oldAudioCtx = audioCtx;
+  audioCtx = null;
+  if (oldAudioCtx && oldAudioCtx.state !== 'closed') {
+    oldAudioCtx.close().catch(() => {});
+  }
+  resetMicPending16();
+  const oldMicWs = micWs;
+  micWs = null;
+  if (oldMicWs && oldMicWs.readyState < WebSocket.CLOSING) oldMicWs.close();
+  appStarted = false;
+  holdLiveAudio('mic stopped');
+  startBtn.disabled = false;
+  startBtn.textContent = '开始对话';
+  setLiveVisible(false, 'mic stopped');
+  setStatus('mic stopped');
+  log('mic stopped');
+}
+
+startBtn.onclick = async () => {
+  if (startInProgress) return;
+  if (appStarted) {
+    log('already running; do not click again');
+    ensureIdlePlaying();
+    if (activeSlot) {
+      activeSlot.video.play().catch(e => log('play already-running: ' + e));
+    }
+    return;
+  }
+  const generation = ++micLifecycleGeneration;
+  startInProgress = true;
+  startBtn.disabled = true;
+  startBtn.textContent = '对话中';
+  try {
+    ensureIdlePlaying();
+    connectLogs();
+    connectMedia();
+    await startMic(generation);
+    if (generation !== micLifecycleGeneration) throw new Error('mic start cancelled');
+    appStarted = true;
+    setLiveVisible(false, 'system ready; listener until assistant speaks');
+    ensureIdlePlaying();
+    if (activeSlot) {
+      activeSlot.video.play().catch(e => log('play after mic start: ' + e));
+    }
+    log('system ready: speak directly, no need to click again');
+  } catch (e) {
+    if (generation !== micLifecycleGeneration) {
+      log('start cancelled');
+      return;
+    }
+    appStarted = false;
+    startBtn.disabled = false;
+    startBtn.textContent = '开始对话';
+    log('start error: ' + e);
+  } finally {
+    if (generation === micLifecycleGeneration) startInProgress = false;
+  }
+};
+
+stopBtn.onclick = stopMic;
+interruptBtn.onclick = () => {
+  if (micWs && micWs.readyState === WebSocket.OPEN) {
+    micWs.send(JSON.stringify({ type: 'interrupt' }));
+    setStatus('interrupt sent: assistant stopping');
+    log('interrupt sent; waiting for paired A/V tail');
+  }
+};
+
+setInterval(() => {
+  maybeReleaseLiveAudioAtBoundary();
+  maybeReturnToListenerAtBoundary();
+}, 20);
+ensureIdlePlaying();
+</script>
+</body>
+</html>

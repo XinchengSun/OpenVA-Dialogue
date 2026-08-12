@@ -1,0 +1,31 @@
+{
+  "date": "2026-08-11",
+  "hardware": "8x RTX 4090 host; candidate used physical GPUs 5 and 6",
+  "warm_samples_per_profile": 60,
+  "sentences_per_round": 3,
+  "discarded_warmup_samples_per_profile": 3,
+  "profiles": {
+    "single_gpu_20_10": {
+      "first_pcm_ms": {"p50": 1258.8442, "p95": 1297.8877},
+      "audible_ttfa_ms": {"p50": 1262.4862, "p95": 1392.4771},
+      "rtf": {"p50": 0.59242, "p95": 0.61195, "max": 0.62196},
+      "starved_rows": 0,
+      "minimum_pcm_chunks": 7
+    },
+    "dual_gpu_20_10": {
+      "first_pcm_ms": {"p50": 666.2097, "p95": 692.2203},
+      "audible_ttfa_ms": {"p50": 671.5917, "p95": 762.6243},
+      "rtf": {"p50": 0.56094, "p95": 0.58384, "max": 0.60875},
+      "starved_rows": 0,
+      "minimum_pcm_chunks": 7
+    },
+    "dual_gpu_10_10": {
+      "first_pcm_ms": {"p50": 425.6111, "p95": 435.5219},
+      "audible_ttfa_ms": {"p50": 430.8428, "p95": 579.0123},
+      "rtf": {"p50": 0.56368, "p95": 0.58352, "max": 0.59256},
+      "starved_rows": 0,
+      "minimum_pcm_chunks": 7
+    }
+  },
+  "scope": "Warm single-request TTS bridge only; not ASR+LLM+DyStream+browser E2E"
+}

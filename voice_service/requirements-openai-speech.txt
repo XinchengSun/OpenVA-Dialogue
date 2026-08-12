@@ -1,0 +1,3 @@
+# Lightweight sidecar only. The Fish/SGLang model server has its own venv.
+httpx>=0.27,<1
+websockets==14.1

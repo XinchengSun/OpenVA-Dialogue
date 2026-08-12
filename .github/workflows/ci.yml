@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  release-surface:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate Python sources
+        run: python -m compileall -q .
+      - name: Validate shell launchers
+        run: |
+          while IFS= read -r -d '' script; do
+            bash -n "$script"
+          done < <(find . -type f \( -name '*.sh' -o -path './scripts/flashav2av' \) -print0)
+      - name: Validate weight manifest and downloader
+        run: python -m unittest tests.test_weights_manifest -v
+      - name: Validate release CLI
+        run: bash scripts/flashav2av help
+      - name: Reject committed model weights and credentials
+        shell: bash
+        run: |
+          if git ls-files -z '*.ckpt' '*.pth' '*.pt' '*.safetensors' '*.bin' '*.onnx' '*.engine' | grep -qz .; then
+            echo 'Model weight file is tracked by Git.' >&2
+            exit 1
+          fi
+          if git ls-files -z '*.pem' '*.key' '*.p12' '*.pfx' 'id_rsa*' 'id_ed25519*' | grep -qz .; then
+            echo 'Credential file is tracked by Git.' >&2
+            exit 1
+          fi
+          oversized="$(find . -path ./.git -prune -o -type f -size +99M -print)"
+          if [[ -n "$oversized" ]]; then
+            echo "Tracked release surface contains files near GitHub's 100 MB limit:" >&2
+            echo "$oversized" >&2
+            exit 1
+          fi

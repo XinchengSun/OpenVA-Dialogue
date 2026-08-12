@@ -1,0 +1,22 @@
+config_cls: S2ProPipelineConfig
+model_path: fishaudio/s2-pro
+
+# Experimental single-user RTX 4090 profile for low TTFA without starving
+# playback after the short first block.  The real codec yields about 46.4 ms
+# per semantic token, so both first and follow-up blocks use 10 tokens.
+runtime_overrides:
+  tts_engine:
+    server_args_overrides:
+      mem_fraction_static: 0.60
+      max_running_requests: 1
+      max_total_tokens: 8192
+      disable_cuda_graph: false
+      cuda_graph_bs: [1]
+      cuda_graph_max_bs: 1
+  vocoder:
+    stream_stride: 10
+    stream_followup_stride: 10
+    stream_overlap_tokens: 20
+    stream_crossfade_samples: 512
+    max_batch_size: 1
+    max_batch_wait_ms: 0

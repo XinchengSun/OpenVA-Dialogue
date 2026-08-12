@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DyStream Pipecat WebRTC</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #111827; }
+    main { width: min(92vw, 720px); text-align: center; }
+    .avatar { position: relative; width: min(82vw, 512px); aspect-ratio: 1; margin: auto; overflow: hidden; border-radius: 18px; background: #020617; }
+    .avatar video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transition: opacity 160ms ease; }
+    #idleVideo { opacity: 1; }
+    #video { opacity: 0; }
+    .avatar.showLive #idleVideo { opacity: 0; }
+    .avatar.showLive #video { opacity: 1; }
+    button { margin-top: 18px; padding: 12px 28px; border: 0; border-radius: 999px; font-size: 16px; cursor: pointer; }
+    #status { min-height: 24px; color: #cbd5e1; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>DyStream &#20840;&#21452;&#24037;&#35821;&#38899;</h1>
+    <p id="status">&#26410;&#36830;&#25509;</p>
+    <div id="avatar" class="avatar">
+      <video id="idleVideo" autoplay muted loop playsinline poster="/static/idle_avatar_poster.png">
+        <source src="/static/idle_avatar_loop.mp4" type="video/mp4">
+      </video>
+      <video id="video" autoplay playsinline></video>
+    </div>
+    <audio id="audio" autoplay></audio>
+    <br>
+    <button id="connect">&#36830;&#25509;&#40614;&#20811;&#39118;</button>
+  </main>
+  <script>
+    const statusEl = document.querySelector('#status');
+    const buttonEl = document.querySelector('#connect');
+    const audioEl = document.querySelector('#audio');
+    const avatarEl = document.querySelector('#avatar');
+    const idleVideoEl = document.querySelector('#idleVideo');
+    const videoEl = document.querySelector('#video');
+    let pc = null;
+    let localStream = null;
+
+    async function sendCandidate(connection, candidate) {
+      await fetch('/api/offer', {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          pc_id: connection.pc_id,
+          candidates: [{
+            candidate: candidate.candidate,
+            sdp_mid: candidate.sdpMid,
+            sdp_mline_index: candidate.sdpMLineIndex
+          }]
+        })
+      });
+    }
+
+    function disconnect(status = '\u5df2\u65ad\u5f00') {
+      if (pc) pc.close();
+      pc = null;
+      if (localStream) localStream.getTracks().forEach(track => track.stop());
+      localStream = null;
+      audioEl.srcObject = null;
+      videoEl.srcObject = null;
+      avatarEl.classList.remove('showLive');
+      idleVideoEl.play().catch(() => {});
+      statusEl.textContent = status;
+      buttonEl.textContent = '\u8fde\u63a5\u9ea6\u514b\u98ce';
+    }
+
+    async function connect() {
+      statusEl.textContent = '\u6b63\u5728\u8bf7\u6c42\u9ea6\u514b\u98ce\u2026';
+      localStream = await navigator.mediaDevices.getUserMedia({
+        audio: {echoCancellation: true, noiseSuppression: true, autoGainControl: true}
+      });
+      const iceResponse = await fetch('/api/ice-config');
+      if (!iceResponse.ok) throw new Error(`ICE config HTTP ${iceResponse.status}`);
+      const iceConfiguration = await iceResponse.json();
+      const connection = new RTCPeerConnection(iceConfiguration);
+      pc = connection;
+      connection.pc_id = null;
+      connection.pendingCandidates = [];
+      connection.ontrack = event => {
+        const target = event.track.kind === 'video' ? videoEl : audioEl;
+        target.srcObject = new MediaStream([event.track]);
+        if (event.track.kind === 'video') {
+          target.addEventListener('playing', () => avatarEl.classList.add('showLive'), {once: true});
+        }
+        target.play().catch(() => {});
+      };
+      connection.onicecandidate = async event => {
+        if (pc !== connection || !event.candidate) return;
+        if (connection.pc_id) await sendCandidate(connection, event.candidate);
+        else connection.pendingCandidates.push(event.candidate);
+      };
+      connection.onconnectionstatechange = () => {
+        if (pc !== connection) return;
+        statusEl.textContent = connection.connectionState === 'connected'
+          ? '\u5df2\u8fde\u63a5\uff0c\u53ef\u4ee5\u5f00\u59cb\u8bf4\u8bdd'
+          : connection.connectionState;
+        if (['failed', 'closed'].includes(connection.connectionState)) disconnect();
+      };
+      connection.addTransceiver(localStream.getAudioTracks()[0], {direction: 'sendrecv'});
+      connection.addTransceiver('video', {direction: 'recvonly'});
+      await connection.setLocalDescription(await connection.createOffer());
+      const response = await fetch('/api/offer', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({sdp: connection.localDescription.sdp, type: connection.localDescription.type})
+      });
+      if (!response.ok) throw new Error((await response.json()).detail || `HTTP ${response.status}`);
+      const answer = await response.json();
+      connection.pc_id = answer.pc_id;
+      await connection.setRemoteDescription(answer);
+      for (const candidate of connection.pendingCandidates) {
+        await sendCandidate(connection, candidate);
+      }
+      connection.pendingCandidates = [];
+      buttonEl.textContent = '\u65ad\u5f00';
+    }
+
+    idleVideoEl.play().catch(() => {});
+    buttonEl.addEventListener('click', async () => {
+      if (pc) return disconnect();
+      try {
+        await connect();
+      } catch (error) {
+        console.error(error);
+        disconnect(`\u8fde\u63a5\u5931\u8d25\uff1a${error.message}`);
+      }
+    });
+  </script>
+</body>
+</html>

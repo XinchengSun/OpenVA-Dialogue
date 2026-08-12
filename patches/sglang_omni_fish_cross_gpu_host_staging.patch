@@ -1,0 +1,60 @@
+diff --git a/sglang_omni/comm/router.py b/sglang_omni/comm/router.py
+--- a/sglang_omni/comm/router.py
++++ b/sglang_omni/comm/router.py
+@@ -90,8 +90,14 @@ class CommRouter:
+             return TransportKind.MOONCAKE
+         if not data.is_cuda:
+             return TransportKind.SHM
+         if self.self_is_gpu and target in self.gpu_stage_names:
+-            return TransportKind.CUDA_IPC
++            target_gpu_ids = self.stage_gpu_ids.get(target)
++            if target_gpu_ids is None or target_gpu_ids == (
++                self.placement_gpu_id,
++            ):
++                return TransportKind.CUDA_IPC
++            # Consumer GPUs may not expose peer access.  Stage through host SHM.
++            return TransportKind.SHM
+         raise ValueError(
+             f"cuda stream chunk cannot be sent from {self.stage_name!r} to "
+             f"non-GPU target {target!r}"
+@@ -139,7 +145,12 @@ class CommRouter:
+         if not devices or devices == {"cpu"}:
+             return TransportKind.SHM
+         if "cuda" in devices and devices <= {"cpu", "cuda"}:
+             if self.self_is_gpu and target in self.gpu_stage_names:
+-                return TransportKind.CUDA_IPC
++                target_gpu_ids = self.stage_gpu_ids.get(target)
++                if target_gpu_ids is None or target_gpu_ids == (
++                    self.placement_gpu_id,
++                ):
++                    return TransportKind.CUDA_IPC
++                return TransportKind.SHM
+             return TransportKind.SHM
+         raise ValueError(f"mixed or unsupported tensor devices in payload: {devices}")
+diff --git a/tests/unit_test/pipeline/test_comm_router.py b/tests/unit_test/pipeline/test_comm_router.py
+--- a/tests/unit_test/pipeline/test_comm_router.py
++++ b/tests/unit_test/pipeline/test_comm_router.py
+@@ -121,3 +121,23 @@ def test_comm_router_uses_cuda_ipc_for_cuda_stream_chunks_only() -> None:
+         router.outbound_stream("decode", torch.empty(1, device="cuda:0"))
+         is TransportKind.CUDA_IPC
+     )
++
++
++@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
++def test_comm_router_uses_shm_for_cross_gpu_stream_and_payload() -> None:
++    router = CommRouter(
++        stage_name="tts_engine",
++        gpu_id=0,
++        placement_gpu_id=0,
++        same_process_targets=set(),
++        gpu_stage_names={"vocoder"},
++        stage_gpu_ids={"vocoder": (1,)},
++        comm_config={},
++    )
++    payload = {"codes": torch.empty(1, device="cuda:0")}
++
++    assert (
++        router.outbound_stream("vocoder", payload["codes"])
++        is TransportKind.SHM
++    )
++    assert router.outbound_payload("vocoder", payload) is TransportKind.SHM

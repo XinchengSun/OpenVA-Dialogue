@@ -1,0 +1,1180 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>定制数字人</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #080a0f;
+      --panel: rgba(17, 21, 30, .94);
+      --panel-soft: #0d1119;
+      --line: #262d3d;
+      --line-strong: #3b4761;
+      --text: #f6f7fb;
+      --muted: #949daf;
+      --primary: #6f7cff;
+      --primary-2: #8e65f5;
+      --good: #4ad69b;
+      --bad: #ff7480;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 15% 0%, rgba(111, 124, 255, .16), transparent 32rem),
+        radial-gradient(circle at 92% 88%, rgba(142, 101, 245, .12), transparent 30rem),
+        var(--bg);
+      font: 15px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+
+    button, textarea, input { font: inherit; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    [hidden] { display: none !important; }
+
+    .shell {
+      width: min(860px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 24px 0 48px;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      min-height: 36px;
+    }
+
+    .back {
+      color: var(--muted);
+      text-decoration: none;
+      transition: color .18s ease;
+    }
+
+    .back:hover { color: var(--text); }
+
+    .serviceBadge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 11px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: #cbd2df;
+      background: rgba(19, 24, 34, .8);
+      font-size: 12px;
+    }
+
+    .serviceDot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--good);
+      box-shadow: 0 0 10px rgba(74, 214, 155, .7);
+    }
+
+    .serviceBadge.unavailable .serviceDot {
+      background: var(--bad);
+      box-shadow: none;
+    }
+
+    .hero {
+      display: flex;
+      justify-content: space-between;
+      align-items: end;
+      gap: 24px;
+      margin: 42px 0 22px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: clamp(30px, 5vw, 46px);
+      line-height: 1.08;
+      letter-spacing: -.035em;
+    }
+
+    .subtitle {
+      margin: 0;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .activeCard {
+      display: grid;
+      grid-template-columns: 48px 1fr;
+      align-items: center;
+      gap: 12px;
+      min-width: 300px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: rgba(17, 21, 30, .88);
+    }
+
+    .activeCard img {
+      width: 48px;
+      height: 48px;
+      border-radius: 11px;
+      object-fit: cover;
+      background: #050608;
+    }
+
+    .activeCard small { display: block; color: var(--good); font-size: 11px; }
+    .activeCard strong { display: block; margin-top: 1px; font-size: 13px; }
+
+    .uploadGrid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+
+    .uploadCard {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      overflow: hidden;
+      background: var(--panel);
+      box-shadow: 0 18px 50px rgba(0, 0, 0, .22);
+    }
+
+    .cardHead { padding: 17px 18px 0; }
+    .cardHead strong { display: block; font-size: 15px; }
+    .cardHead span { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; }
+
+    .drop {
+      position: relative;
+      display: grid;
+      place-items: center;
+      min-height: 250px;
+      margin: 14px;
+      border: 1px dashed var(--line-strong);
+      border-radius: 14px;
+      overflow: hidden;
+      cursor: pointer;
+      background: var(--panel-soft);
+      transition: border-color .18s ease, transform .18s ease, opacity .18s ease;
+    }
+
+    .drop:hover { border-color: var(--primary); transform: translateY(-1px); }
+    .uploadGrid.locked .drop { pointer-events: none; opacity: .58; transform: none; }
+
+    .placeholder {
+      padding: 28px;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .placeholder b {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--text);
+      font-size: 15px;
+    }
+
+    .preview {
+      display: none;
+      width: 100%;
+      height: 248px;
+      object-fit: contain;
+      background: #050608;
+    }
+
+    audio.preview {
+      width: calc(100% - 30px);
+      height: 54px;
+      margin: auto;
+      background: transparent;
+    }
+
+    input[type="file"] {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .advanced {
+      margin-top: 14px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(13, 17, 25, .72);
+    }
+
+    .advanced summary {
+      padding: 13px 15px;
+      color: #c6cddd;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .advancedBody { padding: 0 14px 14px; }
+
+    textarea {
+      display: block;
+      width: 100%;
+      min-height: 72px;
+      resize: vertical;
+      padding: 11px 12px;
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      outline: none;
+      background: #090c12;
+    }
+
+    textarea:focus { border-color: var(--primary); }
+    .hint { margin: 7px 2px 0; color: var(--muted); font-size: 12px; }
+
+    .actionRow {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 16px;
+    }
+
+    button, .button {
+      appearance: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
+      padding: 0 17px;
+      border: 0;
+      border-radius: 12px;
+      color: white;
+      text-decoration: none;
+      font-weight: 680;
+      cursor: pointer;
+      background: linear-gradient(135deg, var(--primary), var(--primary-2));
+      box-shadow: 0 10px 24px rgba(111, 124, 255, .2);
+    }
+
+    button.secondary, .button.secondary {
+      color: #dce1ed;
+      border: 1px solid var(--line-strong);
+      background: #171c27;
+      box-shadow: none;
+    }
+
+    button:disabled { cursor: not-allowed; opacity: .42; }
+
+    .statusBox {
+      margin-top: 14px;
+      padding: 15px 16px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(12, 15, 22, .82);
+    }
+
+    .statusTop {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .stateLabel { font-weight: 720; }
+    .statusBox[data-state="ready"] .stateLabel { color: var(--good); }
+    .statusBox[data-state="failed"] .stateLabel { color: var(--bad); }
+    .statusMessage { margin-top: 4px; color: var(--muted); font-size: 13px; }
+    .statusDetail { color: #bbc3d2; font-size: 12px; }
+
+    .progress {
+      height: 5px;
+      margin-top: 12px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: #202636;
+    }
+
+    .progressBar {
+      width: 0;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--primary), var(--good));
+      transition: width .22s ease;
+    }
+
+    .progressBar.indeterminate {
+      width: 34%;
+      animation: slide 1.15s ease-in-out infinite;
+    }
+
+    .statusBox[data-state="idle"] .progress,
+    .statusBox[data-state="ready"] .progress,
+    .statusBox[data-state="failed"] .progress { display: none; }
+
+    .footnote { margin: 12px 2px 0; color: var(--muted); font-size: 12px; }
+
+    @keyframes slide {
+      from { transform: translateX(-110%); }
+      to { transform: translateX(310%); }
+    }
+
+    @media (max-width: 720px) {
+      .shell { width: min(100% - 22px, 860px); padding-top: 15px; }
+      .hero { display: block; margin-top: 30px; }
+      .activeCard { margin-top: 16px; min-width: 0; }
+      .uploadGrid { grid-template-columns: 1fr; }
+      .drop { min-height: 220px; }
+      .preview { height: 218px; }
+      .actionRow > * { flex: 1 1 auto; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <a class="back" href="/">← 实时对话</a>
+      <span class="serviceBadge" id="serviceBadge">
+        <span class="serviceDot"></span><span id="serviceLabel">服务已连接</span>
+      </span>
+    </header>
+
+    <section class="hero">
+      <div>
+        <h1>定制数字人</h1>
+        <p class="subtitle">上传一张清晰正脸和一段 5–15 秒的人声。</p>
+      </div>
+      <div class="activeCard" id="activeCard" hidden>
+        <img id="activeImage" alt="当前数字人">
+        <div><small>当前在线</small><strong>数字人已就绪</strong></div>
+      </div>
+    </section>
+
+    <section class="uploadGrid" id="uploadGrid">
+      <article class="uploadCard">
+        <div class="cardHead">
+          <strong>头像照片</strong>
+          <span>单人正脸，至少 512×512</span>
+        </div>
+        <label class="drop" for="imageInput">
+          <div class="placeholder" id="imagePlaceholder"><b>选择照片</b>JPG、PNG 或 WebP</div>
+          <img class="preview" id="imagePreview" alt="头像预览">
+        </label>
+        <input id="imageInput" type="file" accept="image/jpeg,image/png,image/webp">
+      </article>
+
+      <article class="uploadCard">
+        <div class="cardHead">
+          <strong>参考声音</strong>
+          <span>3–30 秒，单人、无音乐</span>
+        </div>
+        <div class="drop">
+          <label class="placeholder" id="mediaPlaceholder" for="mediaInput"><b>选择音频或视频</b>视频会自动提取声音</label>
+          <audio class="preview" id="audioPreview" controls></audio>
+          <video class="preview" id="videoPreview" controls playsinline></video>
+        </div>
+        <input id="mediaInput" type="file" accept="audio/*,video/mp4,video/quicktime,video/webm,video/x-matroska">
+      </article>
+    </section>
+
+    <details class="advanced" id="advanced">
+      <summary>高级选项 · 参考文本</summary>
+      <div class="advancedBody">
+        <textarea id="transcript" maxlength="1000" placeholder="准确知道音频内容时再填写；不确定请留空。"></textarea>
+        <p class="hint">文本必须与参考音频完全一致。</p>
+      </div>
+    </details>
+
+    <div class="actionRow">
+      <button id="generateBtn" disabled>生成并启用</button>
+      <a id="chatBtn" class="button" href="/" hidden>立即进入对话</a>
+      <button id="checkStatusBtn" class="secondary" hidden>重新检查状态</button>
+      <button id="resetBtn" class="secondary" hidden>更换数字人</button>
+    </div>
+
+    <section class="statusBox" id="statusBox" data-state="idle" aria-live="polite">
+      <div class="statusTop">
+        <span class="stateLabel" id="stateLabel">待上传</span>
+        <span class="statusDetail" id="statusDetail"></span>
+      </div>
+      <div class="statusMessage" id="statusMessage">请选择照片和参考声音。</div>
+      <div class="progress" id="progress"><div class="progressBar" id="progressBar"></div></div>
+    </section>
+
+    <p class="footnote">新人物启用时会自动替换旧模型，无需手动停进程；失败时会自动恢复当前数字人。</p>
+  </main>
+
+  <script>
+    const imageInput = document.getElementById('imageInput');
+    const mediaInput = document.getElementById('mediaInput');
+    const transcript = document.getElementById('transcript');
+    const imagePreview = document.getElementById('imagePreview');
+    const imagePlaceholder = document.getElementById('imagePlaceholder');
+    const audioPreview = document.getElementById('audioPreview');
+    const videoPreview = document.getElementById('videoPreview');
+    const mediaPlaceholder = document.getElementById('mediaPlaceholder');
+    const uploadGrid = document.getElementById('uploadGrid');
+    const advanced = document.getElementById('advanced');
+    const generateBtn = document.getElementById('generateBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    const chatBtn = document.getElementById('chatBtn');
+    const checkStatusBtn = document.getElementById('checkStatusBtn');
+    const activeCard = document.getElementById('activeCard');
+    const activeImage = document.getElementById('activeImage');
+    const serviceBadge = document.getElementById('serviceBadge');
+    const serviceLabel = document.getElementById('serviceLabel');
+    const statusBox = document.getElementById('statusBox');
+    const stateLabel = document.getElementById('stateLabel');
+    const statusMessage = document.getElementById('statusMessage');
+    const statusDetail = document.getElementById('statusDetail');
+    const progressBar = document.getElementById('progressBar');
+
+    const VISIBLE_STATES = {
+      idle: '待上传',
+      generating: '正在生成',
+      enabling: '正在启用',
+      ready: '已就绪',
+      failed: '失败'
+    };
+    const PREPARE_STATES = new Set(['uploading', 'processing']);
+    const ACTIVATION_STATES = new Set(['queued', 'activating', 'restarting', 'rolling_back']);
+    const ACTIVATION_CLOCK_KEY = 'dystreamCustomizationActivation';
+    const ACTIVATION_TYPICAL_MAX_MS = 3 * 60 * 1000;
+    const ACTIVATION_HARD_LIMIT_MS = 5 * 60 * 1000;
+    const JOB_REQUEST_TIMEOUT_MS = 8000;
+
+    let activeJob = null;
+    let currentJob = localStorage.getItem('dystreamCustomizationJob') || '';
+    let currentJobState = '';
+    let currentJobRetryable = false;
+    let serviceAvailable = false;
+    let operationPhase = 'idle';
+    let pollGeneration = 0;
+    let draftRevision = 0;
+    let imageObjectUrl = '';
+    let mediaObjectUrl = '';
+    let readyForChat = false;
+    let manualStatusCheck = false;
+    let chatCountdownTimer = 0;
+
+    function showState(kind, message, options = {}) {
+      const safeKind = VISIBLE_STATES[kind] ? kind : 'failed';
+      statusBox.dataset.state = safeKind;
+      stateLabel.textContent = VISIBLE_STATES[safeKind];
+      statusMessage.textContent = message || '';
+      statusDetail.textContent = options.detail || '';
+      progressBar.classList.toggle('indeterminate', options.indeterminate === true);
+      if (options.indeterminate !== true) {
+        const value = Number.isFinite(options.progress)
+          ? options.progress
+          : (safeKind === 'ready' ? 100 : 0);
+        progressBar.style.width = `${Math.max(0, Math.min(100, value))}%`;
+      } else {
+        progressBar.style.removeProperty('width');
+      }
+    }
+
+    function hasFiles() {
+      return Boolean(imageInput.files[0] && mediaInput.files[0]);
+    }
+
+    function hasDraft() {
+      return Boolean(imageInput.files[0] || mediaInput.files[0] || transcript.value.trim());
+    }
+
+    function readActivationStartedAt(jobId) {
+      try {
+        const record = JSON.parse(localStorage.getItem(ACTIVATION_CLOCK_KEY) || '{}');
+        if (String(record.job_id || '') === String(jobId || '') && Number(record.started_at) > 0) {
+          return Number(record.started_at);
+        }
+      } catch (_) {}
+      return 0;
+    }
+
+    function ensureActivationStartedAt(jobId) {
+      const existing = readActivationStartedAt(jobId);
+      if (existing) return existing;
+      const startedAt = Date.now();
+      localStorage.setItem(ACTIVATION_CLOCK_KEY, JSON.stringify({
+        job_id: jobId,
+        started_at: startedAt
+      }));
+      return startedAt;
+    }
+
+    function clearActivationClock(jobId) {
+      if (!jobId) return;
+      try {
+        const record = JSON.parse(localStorage.getItem(ACTIVATION_CLOCK_KEY) || '{}');
+        if (String(record.job_id || '') !== String(jobId)) return;
+      } catch (_) {
+        return;
+      }
+      localStorage.removeItem(ACTIVATION_CLOCK_KEY);
+    }
+
+    function formatElapsed(milliseconds) {
+      const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+      const minutes = Math.floor(seconds / 60);
+      return `${minutes}:${String(seconds % 60).padStart(2, '0')}`;
+    }
+
+    function activationStage(state) {
+      return ({
+        queued: '等待启用',
+        activating: '加载头像和声音',
+        restarting: '重启实时服务',
+        rolling_back: '恢复上一版本'
+      })[state] || '确认服务状态';
+    }
+
+    function showActivationProgress(jobId, state, message = '正在启用新头像和声音…') {
+      const elapsed = Date.now() - ensureActivationStartedAt(jobId);
+      const progress = Math.min(95, 42 + elapsed / ACTIVATION_TYPICAL_MAX_MS * 53);
+      showState('enabling', message, {
+        progress,
+        detail: `阶段：${activationStage(state)} · 已用 ${formatElapsed(elapsed)} · 通常 1–3 分钟 · 最长等待 5 分钟`
+      });
+      return elapsed;
+    }
+
+    function clearChatCountdown() {
+      if (chatCountdownTimer) window.clearInterval(chatCountdownTimer);
+      chatCountdownTimer = 0;
+      chatBtn.textContent = '立即进入对话';
+    }
+
+    function startChatCountdown() {
+      clearChatCountdown();
+      let seconds = 3;
+      const render = () => {
+        chatBtn.textContent = `立即进入对话（${seconds}）`;
+        showState('ready', `数字人已启用，${seconds} 秒后自动进入对话。`, {
+          detail: '服务端已确认 ready'
+        });
+      };
+      render();
+      chatCountdownTimer = window.setInterval(() => {
+        seconds -= 1;
+        if (seconds <= 0) {
+          clearChatCountdown();
+          window.location.assign('/');
+          return;
+        }
+        render();
+      }, 1000);
+    }
+
+    function showActivationTimedOut(jobId, message) {
+      const startedAt = readActivationStartedAt(jobId) || Date.now() - ACTIVATION_HARD_LIMIT_MS;
+      const elapsed = Date.now() - startedAt;
+      showState('enabling', message || '5 分钟内尚未确认服务端 ready，已停止自动检查。', {
+        progress: 95,
+        detail: `已用 ${formatElapsed(elapsed)} · 自动检查已停止 · 点击下方按钮仅查询状态，不会重复启用`
+      });
+    }
+
+    function stopAtActivationLimit(jobId) {
+      cancelPolling();
+      readyForChat = false;
+      clearChatCountdown();
+      operationPhase = 'timed_out';
+      manualStatusCheck = false;
+      showActivationTimedOut(jobId);
+      updateControls();
+    }
+
+    function canContinueJob() {
+      return Boolean(
+        currentJob
+        && (currentJobState === 'prepared' || (currentJobState === 'failed' && currentJobRetryable))
+      );
+    }
+
+    function updateControls() {
+      const locked = operationPhase !== 'idle';
+      const chatReady = Boolean(
+        readyForChat
+        && activeJob
+        && serviceAvailable
+        && operationPhase === 'idle'
+        && !currentJob
+      );
+      imageInput.disabled = locked;
+      mediaInput.disabled = locked;
+      transcript.disabled = locked;
+      uploadGrid.classList.toggle('locked', locked);
+      uploadGrid.hidden = chatReady;
+      advanced.hidden = chatReady;
+      generateBtn.hidden = chatReady;
+      generateBtn.disabled = locked || !serviceAvailable || (!hasFiles() && !canContinueJob());
+      generateBtn.textContent = canContinueJob()
+        ? (currentJobState === 'failed' ? '重试启用' : '继续启用')
+        : '生成并启用';
+      resetBtn.hidden = chatReady ? false : !(activeJob || currentJob || hasDraft());
+      resetBtn.disabled = locked;
+      resetBtn.textContent = chatReady ? '再换一个' : '更换数字人';
+      chatBtn.hidden = !chatReady;
+      checkStatusBtn.hidden = operationPhase !== 'timed_out';
+      checkStatusBtn.disabled = operationPhase !== 'timed_out' || manualStatusCheck;
+    }
+
+    function cancelPolling() {
+      pollGeneration += 1;
+    }
+
+    function setPhase(phase) {
+      operationPhase = phase;
+      updateControls();
+    }
+
+    function clearPendingJob() {
+      const jobToClear = currentJob;
+      currentJob = '';
+      currentJobState = '';
+      currentJobRetryable = false;
+      if (localStorage.getItem('dystreamCustomizationJob') === String(jobToClear || '')) {
+        localStorage.removeItem('dystreamCustomizationJob');
+      }
+      clearActivationClock(jobToClear);
+    }
+
+    function releaseImagePreview() {
+      if (imageObjectUrl) URL.revokeObjectURL(imageObjectUrl);
+      imageObjectUrl = '';
+      imagePreview.removeAttribute('src');
+      imagePreview.style.display = 'none';
+      imagePlaceholder.style.display = 'block';
+    }
+
+    function releaseMediaPreview() {
+      if (mediaObjectUrl) URL.revokeObjectURL(mediaObjectUrl);
+      mediaObjectUrl = '';
+      for (const element of [audioPreview, videoPreview]) {
+        element.pause();
+        element.removeAttribute('src');
+        element.load();
+        element.style.display = 'none';
+      }
+      mediaPlaceholder.style.display = 'block';
+    }
+
+    function clearDraftInputs() {
+      imageInput.value = '';
+      mediaInput.value = '';
+      transcript.value = '';
+      releaseImagePreview();
+      releaseMediaPreview();
+    }
+
+    function renderActive(active) {
+      activeJob = active && active.job_id ? active : null;
+      activeCard.hidden = !activeJob;
+      if (!activeJob) {
+        activeImage.removeAttribute('src');
+        return;
+      }
+      activeImage.src = activeJob.image_url || `/api/customization/${activeJob.job_id}/image`;
+      activeImage.onerror = () => { activeImage.style.visibility = 'hidden'; };
+      activeImage.onload = () => { activeImage.style.visibility = 'visible'; };
+    }
+
+    function resetDraft(options = {}) {
+      if (operationPhase !== 'idle') return false;
+      cancelPolling();
+      clearChatCountdown();
+      readyForChat = false;
+      draftRevision += 1;
+      clearPendingJob();
+      clearDraftInputs();
+      showState(
+        'idle',
+        activeJob ? '当前数字人保持在线，请选择新素材。' : '请选择照片和参考声音。'
+      );
+      updateControls();
+      if (options.focus !== false) imageInput.focus();
+      return true;
+    }
+
+    function invalidatePreparedJobForDraft() {
+      if (operationPhase !== 'idle') return;
+      cancelPolling();
+      clearChatCountdown();
+      readyForChat = false;
+      draftRevision += 1;
+      clearPendingJob();
+      if (hasFiles()) {
+        showState('idle', '素材已选好，点击“生成并启用”。');
+      } else {
+        showState('idle', '请选择照片和参考声音。');
+      }
+      updateControls();
+    }
+
+    imageInput.addEventListener('change', () => {
+      releaseImagePreview();
+      const file = imageInput.files[0];
+      if (file) {
+        imageObjectUrl = URL.createObjectURL(file);
+        imagePreview.src = imageObjectUrl;
+        imagePreview.style.display = 'block';
+        imagePlaceholder.style.display = 'none';
+      }
+      invalidatePreparedJobForDraft();
+    });
+
+    mediaInput.addEventListener('change', () => {
+      releaseMediaPreview();
+      const file = mediaInput.files[0];
+      if (file) {
+        mediaObjectUrl = URL.createObjectURL(file);
+        const isVideo = file.type.startsWith('video/') || /\.(mp4|mov|webm|mkv)$/i.test(file.name);
+        const element = isVideo ? videoPreview : audioPreview;
+        element.src = mediaObjectUrl;
+        element.style.display = 'block';
+        mediaPlaceholder.style.display = 'none';
+      }
+      invalidatePreparedJobForDraft();
+    });
+
+    transcript.addEventListener('input', invalidatePreparedJobForDraft);
+    resetBtn.addEventListener('click', () => resetDraft());
+    chatBtn.addEventListener('click', clearChatCountdown);
+
+    function uploadForm(form, revision) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/customization/prepare');
+        xhr.setRequestHeader('X-DyStream-Customize', '1');
+        xhr.upload.onprogress = event => {
+          if (revision !== draftRevision || !event.lengthComputable) return;
+          const uploadedPercent = event.loaded / event.total * 100;
+          const progress = uploadedPercent * 0.3;
+          showState('generating', '正在上传素材…', {
+            progress,
+            detail: `${Math.round(uploadedPercent)}% 已上传`
+          });
+        };
+        xhr.upload.onload = () => {
+          if (revision === draftRevision) {
+            showState('generating', '正在检测照片并处理声音…', {
+              progress: 35,
+              detail: '素材处理 35%'
+            });
+          }
+        };
+        xhr.onload = () => {
+          let payload = {};
+          try { payload = JSON.parse(xhr.responseText); } catch (_) {}
+          if (xhr.status >= 200 && xhr.status < 300) resolve(payload);
+          else reject(payload);
+        };
+        xhr.onerror = () => reject({message: '上传连接中断，请重试。'});
+        xhr.send(form);
+      });
+    }
+
+    async function fetchWithTimeout(url, options = {}, timeoutMs = JOB_REQUEST_TIMEOUT_MS) {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), Math.max(250, timeoutMs));
+      try {
+        return await fetch(url, {...options, signal: controller.signal});
+      } finally {
+        window.clearTimeout(timer);
+      }
+    }
+
+    async function fetchJob(jobId, timeoutMs = JOB_REQUEST_TIMEOUT_MS) {
+      const response = await fetchWithTimeout(
+        `/api/customization/${jobId}`,
+        {cache: 'no-store'},
+        timeoutMs
+      );
+      if (response.status === 404) return null;
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    }
+
+    async function fetchActiveSnapshot() {
+      const response = await fetchWithTimeout(
+        '/api/customization/active',
+        {cache: 'no-store'}
+      );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    }
+
+    async function finishReady(jobId) {
+      const readyJob = jobId || currentJob;
+      let data;
+      try {
+        data = await fetchActiveSnapshot();
+      } catch (_) {
+        readyForChat = false;
+        setPhase('activating');
+        showActivationProgress(
+          readyJob,
+          'checking',
+          '任务已完成，正在确认当前在线数字人…'
+        );
+        return false;
+      }
+
+      const authoritativeActive = data.active && data.active.job_id ? data.active : null;
+      serviceAvailable = data.available !== false;
+      renderActive(authoritativeActive);
+      serviceBadge.classList.toggle('unavailable', !serviceAvailable);
+      serviceLabel.textContent = serviceAvailable ? '服务已连接' : '服务尚未就绪';
+
+      if (!serviceAvailable || !authoritativeActive) {
+        readyForChat = false;
+        setPhase('activating');
+        showActivationProgress(
+          readyJob,
+          'checking',
+          '任务已完成，正在等待实时服务确认当前人物…'
+        );
+        return false;
+      }
+
+      if (String(authoritativeActive.job_id) !== String(readyJob)) {
+        cancelPolling();
+        clearPendingJob();
+        clearChatCountdown();
+        clearDraftInputs();
+        readyForChat = true;
+        setPhase('idle');
+        showState('ready', '该任务已被更新人物替换，已显示当前在线数字人。', {
+          detail: `当前人物：${authoritativeActive.job_id}`
+        });
+        updateControls();
+        return true;
+      }
+
+      cancelPolling();
+      clearPendingJob();
+      clearDraftInputs();
+      readyForChat = true;
+      setPhase('idle');
+      updateControls();
+      startChatCountdown();
+      return true;
+    }
+
+    function finishFailed(status, fallbackMessage) {
+      clearChatCountdown();
+      clearActivationClock(currentJob);
+      readyForChat = false;
+      currentJobState = 'failed';
+      currentJobRetryable = Boolean(currentJob && status && status.rollback_succeeded !== false);
+      setPhase('idle');
+      showState('failed', (status && status.message) || fallbackMessage || '操作失败，请重新选择素材。');
+      updateControls();
+    }
+
+    function restorePrepared(status) {
+      clearChatCountdown();
+      clearActivationClock(currentJob);
+      readyForChat = false;
+      currentJobState = 'prepared';
+      currentJobRetryable = false;
+      setPhase('idle');
+      const voice = status.voice || {};
+      const duration = voice.reference_duration_seconds
+        ? `${voice.reference_duration_seconds} 秒`
+        : '';
+      showState('idle', '素材已生成，点击“继续启用”。', {detail: duration});
+      updateControls();
+    }
+
+    async function pollJob(jobId, initialPhase = 'activating') {
+      cancelPolling();
+      const token = pollGeneration;
+      const pollStartedAt = Date.now();
+      let phase = initialPhase;
+      if (phase === 'activating') ensureActivationStartedAt(jobId);
+      setPhase(phase);
+
+      while (token === pollGeneration && currentJob === jobId) {
+        if (
+          phase === 'activating'
+          && Date.now() - ensureActivationStartedAt(jobId) >= ACTIVATION_HARD_LIMIT_MS
+        ) {
+          stopAtActivationLimit(jobId);
+          return;
+        }
+        try {
+          const remaining = phase === 'activating'
+            ? ACTIVATION_HARD_LIMIT_MS - (Date.now() - ensureActivationStartedAt(jobId))
+            : JOB_REQUEST_TIMEOUT_MS;
+          const status = await fetchJob(
+            jobId,
+            Math.min(JOB_REQUEST_TIMEOUT_MS, Math.max(250, remaining))
+          );
+          if (token !== pollGeneration || currentJob !== jobId) return;
+          if (!status) {
+            clearPendingJob();
+            setPhase('idle');
+            showState('failed', '之前的任务已不存在，请重新上传素材。');
+            updateControls();
+            return;
+          }
+          currentJobState = status.state || '';
+          if (status.state === 'ready') {
+            if (await finishReady(jobId)) return;
+            phase = 'activating';
+          } else if (status.state === 'failed') {
+            finishFailed(status);
+            return;
+          } else if (status.state === 'prepared') {
+            restorePrepared(status);
+            return;
+          } else if (PREPARE_STATES.has(status.state)) {
+            phase = 'preparing';
+            setPhase(phase);
+            showState('generating', '正在检测照片并处理声音…', {
+              progress: status.state === 'uploading' ? 35 : 40,
+              detail: status.state === 'uploading' ? '素材上传完成' : '素材处理 40%'
+            });
+          } else if (ACTIVATION_STATES.has(status.state)) {
+            phase = 'activating';
+            setPhase(phase);
+            showActivationProgress(jobId, status.state);
+          }
+        } catch (_) {
+          if (token !== pollGeneration || currentJob !== jobId) return;
+          if (phase === 'preparing') {
+            showState('generating', '正在等待素材处理完成…', {
+              progress: 40,
+              detail: '素材处理 40%'
+            });
+          } else {
+            phase = 'activating';
+            setPhase(phase);
+            showActivationProgress(
+              jobId,
+              currentJobState,
+              '服务正在切换，正在等待恢复连接…'
+            );
+          }
+        }
+
+        if (
+          phase === 'activating'
+          && Date.now() - ensureActivationStartedAt(jobId) >= ACTIVATION_HARD_LIMIT_MS
+        ) {
+          stopAtActivationLimit(jobId);
+          return;
+        }
+        if (phase === 'preparing' && Date.now() - pollStartedAt > 12 * 60 * 1000) {
+          operationPhase = 'unknown';
+          showState('failed', '等待超过 12 分钟，任务状态暂时无法确认。请刷新页面后重试。');
+          updateControls();
+          return;
+        }
+        const delay = phase === 'activating'
+          ? Math.min(
+              2200,
+              Math.max(0, ACTIVATION_HARD_LIMIT_MS - (Date.now() - ensureActivationStartedAt(jobId)))
+            )
+          : 2200;
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+
+    async function submitActivation(jobId) {
+      clearChatCountdown();
+      readyForChat = false;
+      currentJobState = 'queued';
+      ensureActivationStartedAt(jobId);
+      setPhase('activating');
+      showActivationProgress(jobId, currentJobState);
+      try {
+        const response = await fetchWithTimeout(
+          `/api/customization/${jobId}/activate`,
+          {
+            method: 'POST',
+            headers: {'X-DyStream-Customize': '1'}
+          }
+        );
+        let status = {};
+        try { status = await response.json(); } catch (_) {}
+        if (!response.ok && response.status !== 409) {
+          if (response.status === 503) serviceAvailable = false;
+          clearActivationClock(jobId);
+          currentJobState = 'prepared';
+          setPhase('idle');
+          showState('failed', status.message || '当前服务无法启用定制素材。');
+          updateControls();
+          return;
+        }
+        if (status.state === 'ready') {
+          if (await finishReady(jobId)) return;
+        }
+        if (status.state === 'failed') {
+          finishFailed(status);
+          return;
+        }
+      } catch (_) {
+        // The controller may already have accepted the task and stopped this
+        // HTTP process. The persisted job state is the source of truth.
+      }
+      await pollJob(jobId, 'activating');
+    }
+
+    generateBtn.addEventListener('click', async () => {
+      if (operationPhase !== 'idle' || !serviceAvailable) return;
+      if (canContinueJob()) {
+        await submitActivation(currentJob);
+        return;
+      }
+      if (!hasFiles()) return;
+
+      clearChatCountdown();
+      readyForChat = false;
+      const revision = draftRevision;
+      setPhase('preparing');
+      showState('generating', '正在上传素材…', {progress: 0, detail: '0%'});
+      const form = new FormData();
+      form.append('image', imageInput.files[0]);
+      form.append('voice_media', mediaInput.files[0]);
+      form.append('transcript', transcript.value.trim());
+
+      try {
+        const result = await uploadForm(form, revision);
+        if (revision !== draftRevision) return;
+        currentJob = result.job_id || '';
+        if (!currentJob) throw new Error('missing job id');
+        currentJobState = 'prepared';
+        currentJobRetryable = false;
+        localStorage.setItem('dystreamCustomizationJob', currentJob);
+        await submitActivation(currentJob);
+      } catch (error) {
+        if (revision !== draftRevision) return;
+        setPhase('idle');
+        showState('failed', error.message || '素材处理失败，请检查照片和声音。');
+        updateControls();
+      }
+    });
+
+    checkStatusBtn.addEventListener('click', async () => {
+      if (operationPhase !== 'timed_out' || !currentJob || manualStatusCheck) return;
+      const jobId = currentJob;
+      manualStatusCheck = true;
+      updateControls();
+      showActivationTimedOut(jobId, '正在重新检查服务端状态…');
+      try {
+        const status = await fetchJob(jobId);
+        if (currentJob !== jobId || operationPhase !== 'timed_out') return;
+        if (!status) {
+          showActivationTimedOut(jobId, '暂时查不到该任务，未重新启用；稍后可再次检查。');
+          return;
+        }
+        currentJobState = status.state || '';
+        if (status.state === 'ready') {
+          if (await finishReady(jobId)) return;
+          operationPhase = 'timed_out';
+          showActivationTimedOut(jobId, '任务已完成，但当前在线人物尚未得到服务端确认。');
+          return;
+        }
+        if (status.state === 'failed') {
+          finishFailed(status);
+          return;
+        }
+        showActivationTimedOut(
+          jobId,
+          `服务端当前阶段：${activationStage(status.state)}；未重复发起启用。`
+        );
+      } catch (_) {
+        if (currentJob === jobId && operationPhase === 'timed_out') {
+          showActivationTimedOut(jobId, '本次检查未连接成功，未重复发起启用；稍后可再次检查。');
+        }
+      } finally {
+        manualStatusCheck = false;
+        if (operationPhase === 'timed_out') updateControls();
+      }
+    });
+
+    async function loadActive() {
+      try {
+        const data = await fetchActiveSnapshot();
+        serviceAvailable = data.available !== false;
+        renderActive(data.active || null);
+        readyForChat = Boolean(activeJob && serviceAvailable && !currentJob);
+        serviceBadge.classList.toggle('unavailable', !serviceAvailable);
+        serviceLabel.textContent = serviceAvailable ? '服务已连接' : '当前模式不可启用';
+      } catch (_) {
+        serviceAvailable = false;
+        readyForChat = false;
+        serviceBadge.classList.add('unavailable');
+        serviceLabel.textContent = '服务未连接';
+      }
+      updateControls();
+    }
+
+    function removeNewQuery() {
+      const url = new URL(window.location.href);
+      if (!url.searchParams.has('new')) return;
+      url.searchParams.delete('new');
+      history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+    }
+
+    async function initialize() {
+      const forceNew = new URLSearchParams(window.location.search).get('new') === '1';
+      await loadActive();
+
+      if (!currentJob) {
+        if (forceNew && serviceAvailable) resetDraft({focus: false});
+        else if (activeJob) showState('ready', '当前数字人已就绪。');
+        else if (!serviceAvailable) showState('failed', '当前运行模式未配置定制功能。');
+        updateControls();
+        removeNewQuery();
+        return;
+      }
+
+      try {
+        const status = await fetchJob(currentJob);
+        if (!status) {
+          clearPendingJob();
+          if (forceNew) resetDraft({focus: false});
+          else showState('failed', '之前的任务已不存在，请重新上传素材。');
+          updateControls();
+          removeNewQuery();
+          return;
+        }
+
+        if (forceNew && !PREPARE_STATES.has(status.state) && !ACTIVATION_STATES.has(status.state)) {
+          resetDraft({focus: false});
+          removeNewQuery();
+          return;
+        }
+
+        currentJobState = status.state || '';
+        if (status.state === 'ready') {
+          const readyConfirmed = await finishReady(currentJob);
+          if (!readyConfirmed) pollJob(currentJob, 'activating');
+        }
+        else if (status.state === 'prepared') restorePrepared(status);
+        else if (status.state === 'failed') finishFailed(status);
+        else if (PREPARE_STATES.has(status.state)) pollJob(currentJob, 'preparing');
+        else if (ACTIVATION_STATES.has(status.state)) pollJob(currentJob, 'activating');
+        else finishFailed(status, '任务状态异常，请重新选择素材。');
+      } catch (_) {
+        // A pending activation intentionally makes the HTTP service disappear
+        // for a short time. Keep the draft locked until persisted status returns.
+        pollJob(currentJob, 'activating');
+      }
+      removeNewQuery();
+    }
+
+    window.addEventListener('beforeunload', () => {
+      cancelPolling();
+      clearChatCountdown();
+      releaseImagePreview();
+      releaseMediaPreview();
+    });
+
+    initialize();
+  </script>
+</body>
+</html>
