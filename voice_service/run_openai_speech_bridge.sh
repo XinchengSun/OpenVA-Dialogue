@@ -219,6 +219,8 @@ status_bridge() {
 }
 
 load_env
+unset PYTHONSAFEPATH
+export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 acquire_lock
 case "${ACTION}" in
   start) start_bridge ;;

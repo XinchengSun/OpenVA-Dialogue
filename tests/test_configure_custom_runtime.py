@@ -74,6 +74,9 @@ class ConfigureCustomRuntimeTests(unittest.TestCase):
             )
             upstream_env = (config / "fish_s2pro.env").read_text(encoding="utf-8")
             self.assertIn("PIPECAT_TTS_PROVIDER=fish_s2pro", main_env)
+            self.assertIn("PIPECAT_TTS_BACKEND=fish_s2_pro", main_env)
+            self.assertIn("PIPECAT_TTS_REFERENCE_LANGUAGE=auto", main_env)
+            self.assertIn("PIPECAT_TTS_TARGET_LANGUAGE=zh-CN", main_env)
             self.assertIn("PIPECAT_TTS_MODEL=fishaudio/s2-pro", main_env)
             self.assertIn("PIPECAT_TTS_BRIDGE_URI=ws://127.0.0.1:8771", main_env)
             self.assertIn("OPENAI_SPEECH_MODEL=fishaudio/s2-pro", bridge_env)
@@ -184,6 +187,7 @@ class ConfigureCustomRuntimeTests(unittest.TestCase):
             config = root / "runtime" / "config"
             main_env = (config / "custom_cascade.env").read_text(encoding="utf-8")
             self.assertIn("PIPECAT_TTS_PROVIDER=voxcpm2", main_env)
+            self.assertIn("PIPECAT_TTS_BACKEND=voxcpm2", main_env)
             self.assertIn("PIPECAT_TTS_MODEL=VoxCPM2", main_env)
             self.assertTrue((config / "voxcpm2.env").is_file())
             self.assertFalse((config / "fish_s2pro.env").exists())

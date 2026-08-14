@@ -12,6 +12,12 @@ import numpy as np
 
 SAMPLE_RATE = 16_000
 CHUNK_SAMPLES = 10 * 960  # 600 ms, matching the realtime Paraformer path.
+SENSEVOICE_LANGUAGES = {
+    "auto": "auto",
+    "zh-CN": "zh",
+    "en-US": "en",
+    "ja-JP": "ja",
+}
 
 
 def _read_pcm16_mono(path: Path) -> np.ndarray:
@@ -32,6 +38,7 @@ def transcribe(
     model_name: str,
     device: str,
     hub: str,
+    language: str = "auto",
 ) -> str:
     from funasr import AutoModel
 
@@ -42,9 +49,13 @@ def transcribe(
         disable_update=True,
     )
     if "sensevoice" in model_name.lower():
+        try:
+            sensevoice_language = SENSEVOICE_LANGUAGES[language]
+        except KeyError as exc:
+            raise ValueError(f"unsupported reference language: {language}") from exc
         result = model.generate(
             input=str(path),
-            language="auto",
+            language=sensevoice_language,
             use_itn=True,
         )
         if not result:
@@ -82,6 +93,7 @@ def main() -> int:
     parser.add_argument("--model", default="iic/SenseVoiceSmall")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--hub", default="ms")
+    parser.add_argument("--language", choices=tuple(SENSEVOICE_LANGUAGES), default="auto")
     args = parser.parse_args()
 
     text = transcribe(
@@ -89,8 +101,13 @@ def main() -> int:
         model_name=args.model,
         device=args.device,
         hub=args.hub,
+        language=args.language,
     )
-    print(json.dumps({"text": text}, ensure_ascii=False))
+    print(json.dumps({
+        "text": text,
+        "language": args.language,
+        "model": args.model,
+    }, ensure_ascii=False))
     return 0 if text else 2
 
 

@@ -1,10 +1,12 @@
 import importlib.util
+import io
 import json
 import math
 import os
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 import wave
@@ -25,14 +27,22 @@ except ModuleNotFoundError:
     sys.modules["fcntl"] = fcntl_stub
 
 from PIL import Image
+from aiohttp import FormData, web
+from aiohttp.test_utils import TestClient, TestServer
+
+import customization_runtime as customization
 
 from customization_runtime import (
     CustomizationInputError,
     _normalize_image,
+    _normalize_tts_selection,
     _normalize_voice,
     _patch_env_file,
+    _prepare_job,
     _runtime_missing,
     _runtime_paths,
+    _tts_options,
+    register_customization_routes,
 )
 
 
@@ -44,105 +54,19 @@ STATIC_ROOT = Path(__file__).resolve().parents[1] / "static"
 
 
 class CustomizationRuntimeTests(unittest.TestCase):
-    def _activation_fixture(self, root, provider="fish_s2pro", transcript="参考文本。"):
-        runtime_root = root / "customizations"
-        job_dir = runtime_root / ("a" * 32)
-        assets = job_dir / "assets"
-        assets.mkdir(parents=True)
-        image = assets / "reference.png"
-        voice = assets / "voice_reference.wav"
-        image.write_bytes(b"image")
-        voice.write_bytes(b"voice")
-        transcript_path = assets / "voice_reference.txt"
-        if transcript:
-            transcript_path.write_text(transcript + "\n", encoding="utf-8")
-        main_env = root / "custom.env"
-        tts_env = root / "tts.env"
-        fish_env = root / "fish.env"
-        main_env.write_text("DYSTREAM_REF_IMAGE=/old.png\n", encoding="utf-8")
-        if provider == "fish_s2pro":
-            tts_env.write_text(
-                "OPENAI_SPEECH_REFERENCE_AUDIO=/old.wav\n"
-                "OPENAI_SPEECH_REFERENCE_TEXT='old text'\n",
-                encoding="utf-8",
-            )
-            fish_env.write_text("FISH_REFERENCE_DIR=/old/references\n", encoding="utf-8")
-        else:
-            tts_env.write_text("VOXCPM2_PROMPT_WAV=/old.wav\n", encoding="utf-8")
-        manifest = {
-            "job_id": job_dir.name,
-            "image_path": str(image),
-            "voice_path": str(voice),
-            "transcript_path": str(transcript_path) if transcript else "",
-            "voice": {"source_type": "audio"},
-        }
-        (job_dir / "manifest.json").write_text(
-            json.dumps(manifest), encoding="utf-8"
-        )
-        (job_dir / "status.json").write_text("{}\n", encoding="utf-8")
-        args = SimpleNamespace(
-            job_dir=job_dir,
-            runtime_root=runtime_root,
-            repo_root=root / "repo",
-            main_env=main_env,
-            tts_provider=provider,
-            tts_env=tts_env,
-            fish_env=fish_env if provider == "fish_s2pro" else None,
-            port=7860,
-        )
-        return args, image, voice, main_env, tts_env, fish_env
-
-    def test_fish_runtime_paths_use_provider_neutral_bridge_env(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            config = root / "config"
-            config.mkdir()
-            main_env = config / "custom_cascade.env"
-            tts_env = config / "fish_speech_bridge.env"
-            fish_env = config / "fish_s2pro.env"
-            for path in (main_env, tts_env, fish_env):
-                path.write_text("READY=1\n", encoding="utf-8")
-            environment = {
-                "PIPECAT_TTS_PROVIDER": "fish_s2pro",
-                "PIPECAT_TTS_BRIDGE_ENV_FILE": str(tts_env),
-                "FISH_S2PRO_ENV_FILE": str(fish_env),
-                "CUSTOMIZATION_MAIN_ENV_FILE": str(main_env),
-            }
-            with mock.patch.dict(os.environ, environment, clear=True):
-                paths = _runtime_paths()
-            self.assertEqual(paths["tts_provider"], "fish_s2pro")
-            self.assertEqual(paths["tts_env"], tts_env.resolve())
-            self.assertEqual(paths["fish_env"], fish_env.resolve())
-            self.assertEqual(paths["runtime_root"], (root / "customizations").resolve())
-            self.assertNotIn("tts_env", _runtime_missing(paths))
-            self.assertNotIn("fish_env", _runtime_missing(paths))
-
-    def test_fish_runtime_requires_upstream_env(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            main_env = root / "main.env"
-            tts_env = root / "bridge.env"
-            for path in (main_env, tts_env):
-                path.write_text("READY=1\n", encoding="utf-8")
-            with mock.patch.dict(os.environ, {
-                "PIPECAT_TTS_PROVIDER": "fish_s2pro",
-                "PIPECAT_TTS_BRIDGE_ENV_FILE": str(tts_env),
-                "FISH_S2PRO_ENV_FILE": str(root / "missing-fish.env"),
-                "CUSTOMIZATION_MAIN_ENV_FILE": str(main_env),
-                "CUSTOMIZATION_ROOT": str(root / "customizations"),
-            }, clear=True):
-                paths = _runtime_paths()
-            self.assertIn("fish_env", _runtime_missing(paths))
-
     def test_product_pages_use_current_names_and_switch_flow(self):
         customize = (STATIC_ROOT / "customize.html").read_text(encoding="utf-8")
         realtime = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
 
-        self.assertIn("生成并启用", customize)
+        self.assertIn("生成素材", customize)
+        self.assertIn("确认文本并启用", customize)
+        self.assertIn("TTS 后端", customize)
+        self.assertIn("参考声音语言", customize)
+        self.assertIn("输出语言", customize)
         self.assertIn("更换数字人", customize)
         self.assertIn("新人物启用时会自动替换旧模型", customize)
         self.assertIn("立即进入对话", customize)
-        self.assertIn("重新检查状态", customize)
+        self.assertIn("立即检查状态", customize)
         self.assertIn("ACTIVATION_HARD_LIMIT_MS = 5 * 60 * 1000", customize)
         self.assertIn("Math.min(95, 42 +", customize)
         self.assertIn("await fetchActiveSnapshot()", customize)
@@ -189,6 +113,27 @@ class CustomizationRuntimeTests(unittest.TestCase):
             self.assertEqual(selected[0], "DYSTREAM_REF_IMAGE='/path with spaces/reference.png'")
             self.assertIn("KEEP=1", lines)
 
+    def test_success_status_clears_previous_failure_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            status_path = Path(directory) / "status.json"
+            CONTROLLER.write_json(status_path, {
+                "state": "failed",
+                "error_code": "controller_failed",
+                "rollback_succeeded": False,
+            })
+            status = CONTROLLER.update_status(
+                status_path,
+                clear_errors=True,
+                state="ready",
+                message="ready",
+            )
+            self.assertEqual(status["state"], "ready")
+            self.assertNotIn("error_code", status)
+            self.assertNotIn("rollback_succeeded", status)
+            persisted = CONTROLLER.read_json(status_path)
+            self.assertNotIn("error_code", persisted)
+            self.assertNotIn("rollback_succeeded", persisted)
+
     def test_controller_restart_environment_can_import_repo_modules(self):
         repo = Path("/srv/dystream")
         with mock.patch.dict(
@@ -201,106 +146,345 @@ class CustomizationRuntimeTests(unittest.TestCase):
             )
         self.assertEqual(environment["PYTHONPATH"].split(CONTROLLER.os.pathsep)[0], str(repo))
         self.assertNotIn("PYTHONSAFEPATH", environment)
-        self.assertEqual(environment["ENV_FILE"], str(Path("/runtime/custom.env")))
+        self.assertEqual(Path(environment["ENV_FILE"]), Path("/runtime/custom.env"))
         self.assertEqual(token, "custom-aaaaaaaaaaaaaaaa")
 
-    def test_loaded_asset_check_uses_fish_bridge_identity(self):
+    def test_runtime_paths_are_derived_from_main_env_not_legacy_vox_env(self):
         with tempfile.TemporaryDirectory() as directory:
-            image = Path(directory) / "reference.png"
-            voice = Path(directory) / "reference.wav"
-            calls = []
+            candidate = Path(directory) / "candidate"
+            config = candidate / "config"
+            config.mkdir(parents=True)
+            main_env = config / "custom_cascade.env"
+            main_env.write_text(
+                "VOXCPM2_BRIDGE_URI=ws://127.0.0.1:8773\n", encoding="utf-8"
+            )
+            tts_env = config / "fish_bridge_8773.env"
+            tts_env.write_text("OPENAI_SPEECH_BRIDGE_PORT=8773\n", encoding="utf-8")
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "CUSTOMIZATION_MAIN_ENV_FILE": str(main_env),
+                    "CUSTOMIZATION_TTS_BRIDGE_INSTANCE": "flashav2av",
+                    "VOXCPM2_ENV_FILE": "/legacy/voxcpm2.env",
+                },
+                clear=False,
+            ):
+                paths = _runtime_paths()
+            self.assertEqual(paths["runtime_root"], candidate / "customizations")
+            self.assertEqual(paths["tts_env"], tts_env)
+            self.assertEqual(paths["bridge_instance"], "flashav2av")
 
-            def fake_environment(pid_path):
-                calls.append(pid_path.name)
-                if pid_path.name == "pipecat_mse.pid":
-                    return {"DYSTREAM_REF_IMAGE": str(image)}
-                return {"OPENAI_SPEECH_REFERENCE_AUDIO": str(voice)}
-
-            with mock.patch.object(CONTROLLER, "process_environment", fake_environment):
-                CONTROLLER.verify_loaded_assets(
-                    Path(directory) / "repo", image, voice, "fish_s2pro"
-                )
-            self.assertEqual(calls, [
-                "pipecat_mse.pid", "openai_speech_bridge.flashav2av.pid"
-            ])
-
-    def test_loaded_asset_check_preserves_voxcpm2_fallback(self):
+    def test_runtime_paths_preserve_explicit_legacy_voxcpm2_deployment(self):
         with tempfile.TemporaryDirectory() as directory:
-            image = Path(directory) / "reference.png"
-            voice = Path(directory) / "reference.wav"
-            calls = []
+            candidate = Path(directory) / "candidate"
+            config = candidate / "config"
+            config.mkdir(parents=True)
+            main_env = config / "custom_cascade.env"
+            vox_env = config / "voxcpm2.env"
+            main_env.write_text("PIPECAT_TTS_PROVIDER=voxcpm2\n", encoding="utf-8")
+            vox_env.write_text("VOXCPM2_BRIDGE_PORT=8770\n", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PIPECAT_TTS_PROVIDER": "voxcpm2",
+                    "CUSTOMIZATION_MAIN_ENV_FILE": str(main_env),
+                    "VOXCPM2_ENV_FILE": str(vox_env),
+                },
+                clear=True,
+            ):
+                paths = _runtime_paths()
+                options = _tts_options(paths)
+            self.assertEqual(paths["tts_provider"], "voxcpm2")
+            self.assertEqual(paths["tts_env"], vox_env.resolve())
+            selected = {
+                item["id"]: item for item in options["backends"]
+            }
+            self.assertTrue(selected["voxcpm2"]["selectable"])
+            self.assertFalse(selected["fish_s2_pro"]["selectable"])
+            self.assertEqual(options["defaults"]["tts_backend"], "voxcpm2")
 
-            def fake_environment(pid_path):
-                calls.append(pid_path.name)
-                if pid_path.name == "pipecat_mse.pid":
-                    return {"DYSTREAM_REF_IMAGE": str(image)}
-                return {"VOXCPM2_PROMPT_WAV": str(voice)}
+    def test_new_fish_backend_keeps_legacy_provider_api_value(self):
+        with mock.patch.dict(
+            os.environ, {"PIPECAT_TTS_BACKEND": "fish_s2_pro"}, clear=True
+        ):
+            paths = _runtime_paths()
+        self.assertEqual(paths["tts_provider"], "fish_s2_pro")
+        self.assertEqual(paths["legacy_tts_provider"], "fish_s2pro")
 
-            with mock.patch.object(CONTROLLER, "process_environment", fake_environment):
-                CONTROLLER.verify_loaded_assets(
-                    Path(directory) / "repo", image, voice, "voxcpm2"
-                )
-            self.assertEqual(calls, ["pipecat_mse.pid", "voxcpm2_bridge.pid"])
+    def test_controller_cli_accepts_legacy_provider_arguments(self):
+        argv = [
+            "activate_customization.py",
+            "--job-dir", "/runtime/customizations/" + "a" * 32,
+            "--runtime-root", "/runtime/customizations",
+            "--repo-root", "/srv/dystream",
+            "--main-env", "/runtime/config/custom.env",
+            "--vox-env", "/runtime/config/voxcpm2.env",
+            "--tts-provider", "voxcpm2",
+            "--fish-env", "/runtime/config/fish.env",
+            "--port", "7860",
+        ]
+        with mock.patch.object(sys, "argv", argv):
+            args = CONTROLLER.parse_args()
+        self.assertEqual(args.tts_provider, "voxcpm2")
+        self.assertEqual(args.tts_env, Path("/runtime/config/voxcpm2.env"))
+        self.assertEqual(args.fish_env, Path("/runtime/config/fish.env"))
 
-    def test_fish_activation_updates_all_provider_assets(self):
+    def test_controller_dispatches_legacy_voxcpm2_activation(self):
         with tempfile.TemporaryDirectory() as directory:
-            args, image, voice, main_env, tts_env, fish_env = (
-                self._activation_fixture(Path(directory))
+            root = Path(directory)
+            repo = root / "repo"
+            repo.mkdir()
+            runtime_root = root / "customizations"
+            job_id = "a" * 32
+            job_dir = runtime_root / job_id
+            assets = job_dir / "assets"
+            assets.mkdir(parents=True)
+            image = assets / "reference.png"
+            voice = assets / "voice_reference.wav"
+            image.write_bytes(b"image")
+            voice.write_bytes(b"voice")
+            main_env = root / "custom_cascade.env"
+            vox_env = root / "voxcpm2.env"
+            main_env.write_text("DYSTREAM_REF_IMAGE=/old.png\n", encoding="utf-8")
+            vox_env.write_text("VOXCPM2_PROMPT_WAV=/old.wav\n", encoding="utf-8")
+            CONTROLLER.write_json(job_dir / "manifest.json", {
+                "job_id": job_id,
+                "image_path": str(image),
+                "voice_path": str(voice),
+                "transcript_path": "",
+                "tts_provider": "voxcpm2",
+                "reference_language": "auto",
+                "target_language": "zh-CN",
+                "voice": {"source_type": "audio"},
+            })
+            CONTROLLER.write_json(
+                job_dir / "status.json", {"job_id": job_id, "state": "prepared"}
+            )
+            args = SimpleNamespace(
+                job_dir=job_dir,
+                runtime_root=runtime_root,
+                repo_root=repo,
+                main_env=main_env,
+                tts_env=vox_env,
+                tts_provider=None,
+                fish_env=None,
+                bridge_instance="flashav2av",
+                port=7860,
             )
             with mock.patch.object(
-                CONTROLLER, "run_demo_restart", return_value="launch-token"
-            ), mock.patch.object(CONTROLLER, "verify_health"), mock.patch.object(
-                CONTROLLER, "verify_loaded_assets"
-            ) as loaded, mock.patch.object(CONTROLLER.time, "sleep"):
-                result = CONTROLLER.activate(args)
-            self.assertEqual(result, 0)
-            self.assertIn(str(image), main_env.read_text(encoding="utf-8"))
-            tts_value = tts_env.read_text(encoding="utf-8")
-            self.assertIn(str(voice), tts_value)
-            self.assertIn("参考文本。", tts_value)
-            self.assertIn(str(voice.parent), fish_env.read_text(encoding="utf-8"))
-            loaded.assert_called_once_with(
-                args.repo_root.resolve(), image.resolve(), voice.resolve(), "fish_s2pro"
-            )
-
-    def test_fish_activation_rejects_missing_transcript_before_writes(self):
-        with tempfile.TemporaryDirectory() as directory:
-            args, _, _, main_env, tts_env, fish_env = self._activation_fixture(
-                Path(directory), transcript=""
-            )
-            originals = tuple(
-                path.read_text(encoding="utf-8")
-                for path in (main_env, tts_env, fish_env)
-            )
-            with mock.patch.object(CONTROLLER, "run_demo_restart") as restart:
-                with self.assertRaisesRegex(RuntimeError, "exact reference transcript"):
-                    CONTROLLER.activate(args)
-            restart.assert_not_called()
-            self.assertEqual(originals, tuple(
-                path.read_text(encoding="utf-8")
-                for path in (main_env, tts_env, fish_env)
-            ))
-
-    def test_fish_activation_rolls_back_all_three_env_files(self):
-        with tempfile.TemporaryDirectory() as directory:
-            args, _, _, main_env, tts_env, fish_env = self._activation_fixture(
-                Path(directory)
-            )
-            originals = tuple(
-                path.read_text(encoding="utf-8")
-                for path in (main_env, tts_env, fish_env)
-            )
-            with mock.patch.object(
-                CONTROLLER, "run_demo_restart", return_value="launch-token"
+                CONTROLLER, "run_demo_full_restart", return_value="custom-token"
+            ) as restart, mock.patch.object(
+                CONTROLLER, "verify_health"
             ), mock.patch.object(
-                CONTROLLER, "verify_health", side_effect=[RuntimeError("bad"), None]
+                CONTROLLER, "verify_loaded_voxcpm2_assets"
             ), mock.patch.object(CONTROLLER.time, "sleep"):
                 result = CONTROLLER.activate(args)
-            self.assertEqual(result, 1)
-            self.assertEqual(originals, tuple(
-                path.read_text(encoding="utf-8")
-                for path in (main_env, tts_env, fish_env)
-            ))
+            self.assertEqual(result, 0)
+            restart.assert_called_once_with(repo.resolve(), main_env.resolve(), 7860, job_id)
+            self.assertEqual(
+                CONTROLLER.read_env_value(main_env, "PIPECAT_TTS_BACKEND"),
+                "voxcpm2",
+            )
+            self.assertEqual(
+                Path(CONTROLLER.read_env_value(vox_env, "VOXCPM2_PROMPT_WAV")),
+                voice.resolve(),
+            )
+            active = CONTROLLER.read_json(runtime_root / "active.json")
+            self.assertEqual(active["tts_backend"], "voxcpm2")
+            self.assertEqual(active["job_id"], job_id)
+
+    def test_controller_uses_fish_bridge_and_mse_only(self):
+        repo = Path("/srv/dystream")
+        bridge_env = Path("/runtime/fish_bridge_8773.env")
+        with mock.patch.dict(
+            CONTROLLER.os.environ,
+            {"PYTHONSAFEPATH": "1", "PYTHONPATH": "/unrelated"},
+            clear=False,
+        ), mock.patch.object(CONTROLLER.subprocess, "run") as run:
+            CONTROLLER.restart_fish_bridge(repo, bridge_env, "realtime")
+            bridge_environment = run.call_args.kwargs["env"]
+            CONTROLLER.run_demo_restart(repo, Path("/runtime/main.env"), 7862, "a" * 32)
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertNotIn("PYTHONSAFEPATH", bridge_environment)
+        self.assertEqual(
+            bridge_environment["PYTHONPATH"].split(CONTROLLER.os.pathsep)[0],
+            str(repo),
+        )
+        self.assertEqual(commands[0][-2:], ["restart", str(bridge_env)])
+        self.assertEqual(commands[1][-1], "restart-mse")
+        flattened = " ".join(item for command in commands for item in command)
+        self.assertNotIn("voxcpm2", flattened.lower())
+        self.assertNotIn("8002", flattened)
+        self.assertNotRegex(flattened, r"run_demo\.sh restart(?:\s|$)")
+
+    def test_fish_reference_is_copied_next_to_current_allowlisted_reference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            references = root / "references"
+            references.mkdir()
+            current = references / "ref.wav"
+            current.write_bytes(b"old")
+            bridge_env = root / "fish.env"
+            bridge_env.write_text(
+                f"OPENAI_SPEECH_REFERENCE_AUDIO={current}\n"
+                "OPENAI_SPEECH_REFERENCE_TEXT=old\n",
+                encoding="utf-8",
+            )
+            upload = root / "upload.wav"
+            upload.write_bytes(b"new voice")
+            installed = CONTROLLER.install_fish_reference(
+                bridge_env, upload, "new transcript", "b" * 32
+            )
+            self.assertEqual(installed.parent, references)
+            self.assertEqual(installed.read_bytes(), b"new voice")
+            self.assertEqual(
+                CONTROLLER.read_env_value(
+                    bridge_env, "OPENAI_SPEECH_REFERENCE_AUDIO"
+                ),
+                str(installed),
+            )
+            self.assertEqual(
+                CONTROLLER.read_env_value(
+                    bridge_env, "OPENAI_SPEECH_REFERENCE_TEXT"
+                ),
+                "new transcript",
+            )
+
+    def test_fish_reference_can_be_staged_without_patching_live_env(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            references = root / "references"
+            references.mkdir()
+            current = references / "ref.wav"
+            current.write_bytes(b"old")
+            bridge_env = root / "fish.env"
+            bridge_env.write_text(
+                f"OPENAI_SPEECH_REFERENCE_AUDIO={current}\n"
+                "OPENAI_SPEECH_REFERENCE_TEXT=old\n",
+                encoding="utf-8",
+            )
+            upload = root / "upload.wav"
+            upload.write_bytes(b"new voice")
+
+            staged = CONTROLLER.stage_fish_reference(
+                bridge_env, upload, "c" * 32
+            )
+
+            self.assertEqual(staged.read_bytes(), b"new voice")
+            self.assertEqual(
+                CONTROLLER.read_env_value(
+                    bridge_env, "OPENAI_SPEECH_REFERENCE_AUDIO"
+                ),
+                str(current),
+            )
+
+    def test_candidate_probe_rejects_large_rms_jump(self):
+        current = CONTROLLER.PCMProbeMetrics(
+            rms_dbfs=-30.0, peak_dbfs=-12.0, clipping_samples=0, samples=1000
+        )
+        candidate = CONTROLLER.PCMProbeMetrics(
+            rms_dbfs=-23.0, peak_dbfs=-9.0, clipping_samples=0, samples=1000
+        )
+        with self.assertRaisesRegex(RuntimeError, "relative RMS"):
+            CONTROLLER.validate_candidate_probe(candidate, current)
+
+    def test_candidate_probe_accepts_safe_pcm(self):
+        current = CONTROLLER.PCMProbeMetrics(
+            rms_dbfs=-30.0, peak_dbfs=-12.0, clipping_samples=0, samples=1000
+        )
+        candidate = CONTROLLER.PCMProbeMetrics(
+            rms_dbfs=-29.0, peak_dbfs=-10.0, clipping_samples=0, samples=1000
+        )
+        CONTROLLER.validate_candidate_probe(candidate, current)
+
+    def test_candidate_probe_rejects_pcm_that_is_too_quiet_relative_to_current(self):
+        current = CONTROLLER.PCMProbeMetrics(
+            rms_dbfs=-30.0, peak_dbfs=-12.0, clipping_samples=0, samples=1000
+        )
+        candidate = CONTROLLER.PCMProbeMetrics(
+            rms_dbfs=-42.0, peak_dbfs=-14.0, clipping_samples=0, samples=1000
+        )
+        current = current._replace(rms_dbfs=-29.0)
+        with self.assertRaisesRegex(RuntimeError, "relative RMS"):
+            CONTROLLER.validate_candidate_probe(candidate, current)
+
+    def test_reference_transcription_always_uses_multilingual_sensevoice(self):
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=json.dumps({"text": "hello world"}) + "\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            main_env = Path(directory) / "main.env"
+            main_env.write_text(
+                "PIPECAT_ASR_MODEL=paraformer-zh-streaming\n", encoding="utf-8"
+            )
+            with mock.patch.object(
+                CONTROLLER.subprocess, "run", return_value=completed
+            ) as run:
+                transcript = CONTROLLER.transcribe_reference(
+                    Path(directory), main_env, Path(directory) / "voice.wav"
+                )
+        command = run.call_args.args[0]
+        self.assertEqual(transcript, "hello world")
+        self.assertIn("iic/SenseVoiceSmall", command)
+        self.assertNotIn("paraformer-zh-streaming", command)
+
+    def test_only_legacy_paraformer_or_missing_transcript_is_retranscribed(self):
+        self.assertTrue(CONTROLLER.should_auto_transcribe({"transcript_path": ""}))
+        self.assertTrue(
+            CONTROLLER.should_auto_transcribe(
+                {
+                    "transcript_path": "/job/voice_reference.txt",
+                    "transcript_source": "legacy_paraformer_auto",
+                }
+            )
+        )
+        self.assertFalse(
+            CONTROLLER.should_auto_transcribe(
+                {
+                    "transcript_path": "/job/voice_reference.txt",
+                    "transcript_source": "user",
+                }
+            )
+        )
+        self.assertFalse(
+            CONTROLLER.should_auto_transcribe(
+                {"transcript_path": "/job/voice_reference.txt"}
+            )
+        )
+
+    def test_probe_pcm_enforces_duration_and_even_pcm16(self):
+        sample_rate = 100
+        safe = struct.pack("<h", 1000) * 30
+        metrics = CONTROLLER.validate_probe_pcm(safe, sample_rate)
+        self.assertEqual(metrics.samples, 30)
+        with self.assertRaisesRegex(RuntimeError, "duration"):
+            CONTROLLER.validate_probe_pcm(struct.pack("<h", 1000) * 29, sample_rate)
+        with self.assertRaisesRegex(RuntimeError, "PCM16"):
+            CONTROLLER.validate_probe_pcm(safe + b"x", sample_rate)
+
+    def test_new_manifest_records_transcript_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = root / "image.png"
+            voice = root / "voice.wav"
+            image.write_bytes(b"image")
+            voice.write_bytes(b"voice")
+            job = root / ("d" * 32)
+            def normalize(source, destination):
+                destination.write_bytes(source.read_bytes())
+                return {"ok": True}
+            with mock.patch(
+                "customization_runtime._normalize_image", side_effect=normalize
+            ), mock.patch(
+                "customization_runtime._validate_official_face_path",
+                return_value={"ok": True},
+            ), mock.patch(
+                "customization_runtime._normalize_voice", side_effect=normalize
+            ):
+                from customization_runtime import _prepare_job
+
+                user_manifest = _prepare_job(job, image, voice, "written by user")
+            self.assertEqual(user_manifest["transcript_source"], "user")
 
     def test_image_is_exif_safe_rgb_png_without_custom_crop(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -329,7 +513,7 @@ class CustomizationRuntimeTests(unittest.TestCase):
             sample_rate = 44100
             samples = bytearray()
             for index in range(int(sample_rate * 3.2)):
-                value = int(0.2 * 32767 * math.sin(2 * math.pi * 220 * index / sample_rate))
+                value = int(0.1 * 32767 * math.sin(2 * math.pi * 220 * index / sample_rate))
                 samples.extend(struct.pack("<hh", value, value))
             with wave.open(str(source), "wb") as wav:
                 wav.setnchannels(2)
@@ -338,11 +522,43 @@ class CustomizationRuntimeTests(unittest.TestCase):
                 wav.writeframes(bytes(samples))
             info = _normalize_voice(source, destination)
             self.assertEqual(info["source_type"], "audio")
+            self.assertAlmostEqual(info["reference_dbfs"], -29.0, delta=0.2)
+            self.assertLessEqual(info["reference_peak_dbfs"], -6.0)
+            self.assertAlmostEqual(info["reference_input_dbfs"], -23.0, delta=0.3)
+            self.assertLessEqual(info["normalization_gain_db"], 8.0)
             with wave.open(str(destination), "rb") as wav:
                 self.assertEqual(wav.getframerate(), 16000)
                 self.assertEqual(wav.getnchannels(), 1)
                 self.assertEqual(wav.getsampwidth(), 2)
                 self.assertGreater(wav.getnframes(), 3 * 16000)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg required")
+    def test_clipped_reference_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "clipped.wav"
+            with wave.open(str(source), "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(16000)
+                wav.writeframes(struct.pack("<h", 32767) * (16000 * 3))
+            with self.assertRaisesRegex(CustomizationInputError, "clip"):
+                _normalize_voice(source, Path(directory) / "out.wav")
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg required")
+    def test_reference_with_large_dc_offset_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "dc.wav"
+            samples = bytearray()
+            for index in range(16000 * 3):
+                value = 2000 + int(600 * math.sin(2 * math.pi * 220 * index / 16000))
+                samples.extend(struct.pack("<h", value))
+            with wave.open(str(source), "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(16000)
+                wav.writeframes(bytes(samples))
+            with self.assertRaisesRegex(CustomizationInputError, "DC"):
+                _normalize_voice(source, Path(directory) / "out.wav")
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg required")
     def test_video_audio_track_is_extracted(self):
@@ -382,6 +598,315 @@ class CustomizationRuntimeTests(unittest.TestCase):
                 wav.writeframes(b"\x20\x03" * int(16000 * 30.2))
             with self.assertRaisesRegex(CustomizationInputError, "30 秒"):
                 _normalize_voice(source, Path(directory) / "out.wav")
+
+
+class CustomizationApiTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        config = self.root / "config"
+        config.mkdir()
+        main_env = config / "custom_cascade.env"
+        tts_env = config / "fish_speech_bridge.env"
+        fish_env = config / "fish_s2_pro.env"
+        for path in (main_env, tts_env, fish_env):
+            path.write_text("READY=1\n", encoding="utf-8")
+        self.environment = {
+            "PIPECAT_TTS_PROVIDER": "fish_s2pro",
+            "PIPECAT_TTS_BRIDGE_ENV_FILE": str(tts_env),
+            "FISH_S2PRO_ENV_FILE": str(fish_env),
+            "CUSTOMIZATION_MAIN_ENV_FILE": str(main_env),
+            "CUSTOMIZATION_ROOT": str(self.root / "customizations"),
+            "CUSTOMIZATION_ALLOW_REMOTE": "1",
+        }
+        self.environment_patch = mock.patch.dict(
+            os.environ, self.environment, clear=True
+        )
+        self.environment_patch.start()
+        app = web.Application()
+        app["engine"] = SimpleNamespace(log=lambda _message: None)
+        register_customization_routes(app)
+        self.runtime_root = app["customization_paths"]["runtime_root"]
+        self.client = TestClient(TestServer(app))
+        await self.client.start_server()
+
+    async def asyncTearDown(self):
+        await self.client.close()
+        self.environment_patch.stop()
+        self.temporary.cleanup()
+
+    @staticmethod
+    def _form(
+        *, backend=None, reference_language=None, target_language=None,
+        transcript="reference text",
+    ):
+        form = FormData()
+        form.add_field(
+            "image", io.BytesIO(b"image"), filename="avatar.png", content_type="image/png"
+        )
+        form.add_field(
+            "voice_media",
+            io.BytesIO(b"voice"),
+            filename="voice.wav",
+            content_type="audio/wav",
+        )
+        form.add_field("transcript", transcript)
+        if backend is not None:
+            form.add_field("tts_backend", backend)
+        if reference_language is not None:
+            form.add_field("reference_language", reference_language)
+        if target_language is not None:
+            form.add_field("target_language", target_language)
+        return form
+
+    @staticmethod
+    def _normalization_patches():
+        def fake_image(_source, destination):
+            destination.write_bytes(b"normalized-image")
+            return {"normalized_size": [1024, 1024]}
+
+        def fake_voice(_source, destination):
+            destination.write_bytes(b"normalized-voice")
+            return {"reference_duration_seconds": 5.0}
+
+        return (
+            mock.patch.object(customization, "_normalize_image", side_effect=fake_image),
+            mock.patch.object(
+                customization, "_validate_official_face_path", return_value={"ok": True}
+            ),
+            mock.patch.object(customization, "_normalize_voice", side_effect=fake_voice),
+        )
+
+    def _create_prepared_job(self, *, job_id, provider="fish_s2pro"):
+        job_dir = self.runtime_root / job_id
+        assets = job_dir / "assets"
+        assets.mkdir(parents=True)
+        image = assets / "reference.png"
+        voice = assets / "voice_reference.wav"
+        transcript = assets / "voice_reference.txt"
+        image.write_bytes(b"image")
+        voice.write_bytes(b"voice")
+        transcript.write_text("old transcript\n", encoding="utf-8")
+        manifest = {
+            "job_id": job_id,
+            "image_path": str(image),
+            "voice_path": str(voice),
+            "transcript_path": str(transcript),
+            "tts_provider": provider,
+        }
+        (job_dir / "manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        (job_dir / "status.json").write_text(
+            json.dumps({"job_id": job_id, "state": "prepared"}), encoding="utf-8"
+        )
+        return job_dir
+
+    async def test_active_adds_registry_and_normalizes_legacy_selection(self):
+        self.runtime_root.mkdir(parents=True, exist_ok=True)
+        (self.runtime_root / "active.json").write_text(
+            json.dumps({"job_id": "a" * 32, "tts_provider": "fish_s2pro"}),
+            encoding="utf-8",
+        )
+        with mock.patch.object(customization.subprocess, "Popen") as popen:
+            response = await self.client.get("/api/customization/active")
+        self.assertEqual(response.status, 200)
+        payload = await response.json()
+        self.assertEqual(payload["tts_provider"], "fish_s2pro")
+        self.assertEqual(payload["active"]["tts_backend"], "fish_s2_pro")
+        self.assertEqual(payload["active"]["reference_language"], "auto")
+        self.assertEqual(payload["active"]["target_language"], "zh-CN")
+        self.assertEqual(
+            [item["id"] for item in payload["tts_options"]["backends"]],
+            ["fish_s2_pro", "qwen3_tts_1_7b_base", "cosyvoice3_0_5b", "voxcpm2"],
+        )
+        popen.assert_not_called()
+
+    async def test_prepare_old_request_uses_defaults_and_persists_status(self):
+        image_patch, face_patch, voice_patch = self._normalization_patches()
+        with image_patch, face_patch, voice_patch:
+            response = await self.client.post(
+                "/api/customization/prepare",
+                data=self._form(),
+                headers={"X-DyStream-Customize": "1"},
+            )
+        self.assertEqual(response.status, 201)
+        status = await response.json()
+        expected = {
+            "tts_backend": "fish_s2_pro",
+            "reference_language": "auto",
+            "target_language": "zh-CN",
+        }
+        self.assertEqual({key: status[key] for key in expected}, expected)
+        manifest = json.loads(
+            (self.runtime_root / status["job_id"] / "manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        persisted_status = json.loads(
+            (self.runtime_root / status["job_id"] / "status.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual({key: manifest[key] for key in expected}, expected)
+        self.assertEqual({key: persisted_status[key] for key in expected}, expected)
+
+    async def test_prepare_rejects_unknown_backend(self):
+        with mock.patch.object(customization, "_prepare_job") as prepare_job:
+            response = await self.client.post(
+                "/api/customization/prepare",
+                data=self._form(backend="unknown_backend"),
+                headers={"X-DyStream-Customize": "1"},
+            )
+        self.assertEqual(response.status, 400)
+        payload = await response.json()
+        self.assertIn("unknown TTS backend", payload["message"])
+        prepare_job.assert_not_called()
+
+    async def test_prepare_auto_transcribes_blank_reference_for_confirmation(self):
+        image_patch, face_patch, voice_patch = self._normalization_patches()
+        with image_patch, face_patch, voice_patch, mock.patch.object(
+            customization, "_transcribe_reference", return_value="detected transcript"
+        ) as transcribe:
+            response = await self.client.post(
+                "/api/customization/prepare",
+                data=self._form(transcript="", reference_language="en-US"),
+                headers={"X-DyStream-Customize": "1"},
+            )
+        self.assertEqual(response.status, 201)
+        status = await response.json()
+        self.assertEqual(status["transcript"], "detected transcript")
+        self.assertEqual(status["transcript_source"], "sensevoice_auto")
+        transcribe.assert_called_once()
+        self.assertEqual(transcribe.call_args.args[1], "en-US")
+        manifest = json.loads(
+            (self.runtime_root / status["job_id"] / "manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(manifest["transcript"], "detected transcript")
+        self.assertEqual(manifest["transcript_source"], "sensevoice_auto")
+
+    async def test_activation_override_is_validated_and_persisted_before_spawn(self):
+        job_id = "c" * 32
+        job_dir = self._create_prepared_job(job_id=job_id)
+        with mock.patch.object(customization.subprocess, "Popen") as popen:
+            response = await self.client.post(
+                f"/api/customization/{job_id}/activate",
+                json={
+                    "tts_backend": "fish_s2pro",
+                    "reference_language": "en-US",
+                    "target_language": "zh-CN",
+                    "transcript": "corrected transcript",
+                },
+                headers={"X-DyStream-Customize": "1"},
+            )
+        self.assertEqual(response.status, 202)
+        payload = await response.json()
+        self.assertEqual(payload["tts_backend"], "fish_s2_pro")
+        self.assertEqual(payload["transcript"], "corrected transcript")
+        manifest = json.loads((job_dir / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["tts_backend"], "fish_s2_pro")
+        self.assertEqual(manifest["reference_language"], "en-US")
+        self.assertEqual(
+            (job_dir / "assets" / "voice_reference.txt").read_text(encoding="utf-8"),
+            "corrected transcript\n",
+        )
+        popen.assert_called_once()
+        command = popen.call_args.args[0]
+        self.assertEqual(
+            command[command.index("--bridge-instance") + 1], "flashav2av"
+        )
+        self.assertEqual(
+            command[command.index("--tts-provider") + 1], "fish_s2_pro"
+        )
+        self.assertNotIn("--fish-env", command)
+
+    async def test_activation_rejects_unavailable_backend_without_mutation(self):
+        job_id = "d" * 32
+        job_dir = self._create_prepared_job(job_id=job_id)
+        original = (job_dir / "manifest.json").read_bytes()
+        with mock.patch.object(customization.subprocess, "Popen") as popen:
+            response = await self.client.post(
+                f"/api/customization/{job_id}/activate",
+                json={"tts_backend": "qwen3_tts_1_7b_base"},
+                headers={"X-DyStream-Customize": "1"},
+            )
+        self.assertEqual(response.status, 409)
+        payload = await response.json()
+        self.assertEqual(payload["state"], "unavailable")
+        self.assertEqual(payload["disabled_reason"], "dependency_and_weights_missing")
+        self.assertEqual((job_dir / "manifest.json").read_bytes(), original)
+        popen.assert_not_called()
+
+    async def test_activation_empty_body_preserves_old_client_contract(self):
+        job_id = "e" * 32
+        self._create_prepared_job(job_id=job_id)
+        with mock.patch.object(customization.subprocess, "Popen") as popen:
+            response = await self.client.post(
+                f"/api/customization/{job_id}/activate",
+                headers={"X-DyStream-Customize": "1"},
+            )
+        self.assertEqual(response.status, 202)
+        payload = await response.json()
+        self.assertEqual(payload["tts_backend"], "fish_s2_pro")
+        self.assertEqual(payload["reference_language"], "auto")
+        self.assertEqual(payload["target_language"], "zh-CN")
+        self.assertEqual(payload["transcript"], "old transcript")
+        popen.assert_called_once()
+
+    async def test_legacy_voxcpm2_client_defaults_to_current_runtime(self):
+        vox_root = self.root / "legacy_vox"
+        config = vox_root / "config"
+        config.mkdir(parents=True)
+        main_env = config / "custom_cascade.env"
+        vox_env = config / "voxcpm2.env"
+        main_env.write_text("PIPECAT_TTS_PROVIDER=voxcpm2\n", encoding="utf-8")
+        vox_env.write_text("VOXCPM2_BRIDGE_PORT=8770\n", encoding="utf-8")
+        environment = {
+            "PIPECAT_TTS_PROVIDER": "voxcpm2",
+            "CUSTOMIZATION_MAIN_ENV_FILE": str(main_env),
+            "VOXCPM2_ENV_FILE": str(vox_env),
+            "CUSTOMIZATION_ROOT": str(vox_root / "customizations"),
+            "CUSTOMIZATION_ALLOW_REMOTE": "1",
+        }
+        with mock.patch.dict(os.environ, environment, clear=True):
+            app = web.Application()
+            app["engine"] = SimpleNamespace(log=lambda _message: None)
+            register_customization_routes(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            image_patch, face_patch, voice_patch = self._normalization_patches()
+            with image_patch, face_patch, voice_patch, mock.patch.object(
+                customization, "_transcribe_reference"
+            ) as transcribe:
+                response = await client.post(
+                    "/api/customization/prepare",
+                    data=self._form(transcript=""),
+                    headers={"X-DyStream-Customize": "1"},
+                )
+            self.assertEqual(response.status, 201)
+            prepared = await response.json()
+            self.assertEqual(prepared["tts_backend"], "voxcpm2")
+            self.assertEqual(prepared["transcript"], "")
+            transcribe.assert_not_called()
+
+            with mock.patch.object(customization.subprocess, "Popen") as popen:
+                response = await client.post(
+                    f"/api/customization/{prepared['job_id']}/activate",
+                    headers={"X-DyStream-Customize": "1"},
+                )
+            self.assertEqual(response.status, 202)
+            payload = await response.json()
+            self.assertEqual(payload["tts_backend"], "voxcpm2")
+            command = popen.call_args.args[0]
+            self.assertEqual(
+                command[command.index("--tts-provider") + 1], "voxcpm2"
+            )
+            self.assertEqual(command[command.index("--tts-env") + 1], str(vox_env))
+        finally:
+            await client.close()
 
 
 if __name__ == "__main__":

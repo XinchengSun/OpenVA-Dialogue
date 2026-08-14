@@ -33,7 +33,7 @@
       font: 15px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
     }
 
-    button, textarea, input { font: inherit; }
+    button, textarea, input, select { font: inherit; }
     button, a { -webkit-tap-highlight-color: transparent; }
     [hidden] { display: none !important; }
 
@@ -231,6 +231,44 @@
     textarea:focus { border-color: var(--primary); }
     .hint { margin: 7px 2px 0; color: var(--muted); font-size: 12px; }
 
+    .voiceOptions {
+      margin-top: 14px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(13, 17, 25, .72);
+    }
+
+    .optionGrid {
+      display: grid;
+      grid-template-columns: 1.4fr 1fr 1fr;
+      gap: 12px;
+    }
+
+    .fieldLabel {
+      display: block;
+      margin-bottom: 6px;
+      color: #c6cddd;
+      font-size: 12px;
+      font-weight: 680;
+    }
+
+    select {
+      display: block;
+      width: 100%;
+      min-height: 42px;
+      padding: 0 34px 0 11px;
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      outline: none;
+      background: #090c12;
+    }
+
+    select:focus { border-color: var(--primary); }
+    select:disabled { cursor: not-allowed; opacity: .58; }
+    .optionHint { min-height: 18px; }
+
     .actionRow {
       display: flex;
       align-items: center;
@@ -325,6 +363,7 @@
       .uploadGrid { grid-template-columns: 1fr; }
       .drop { min-height: 220px; }
       .preview { height: 218px; }
+      .optionGrid { grid-template-columns: 1fr; }
       .actionRow > * { flex: 1 1 auto; }
     }
   </style>
@@ -376,6 +415,24 @@
       </article>
     </section>
 
+    <section class="voiceOptions" id="voiceOptions" hidden>
+      <div class="optionGrid">
+        <label>
+          <span class="fieldLabel">TTS 后端</span>
+          <select id="ttsBackend" aria-describedby="ttsBackendHint"></select>
+          <span class="hint optionHint" id="ttsBackendHint"></span>
+        </label>
+        <label>
+          <span class="fieldLabel">参考声音语言</span>
+          <select id="referenceLanguage"></select>
+        </label>
+        <label>
+          <span class="fieldLabel">输出语言</span>
+          <select id="targetLanguage"></select>
+        </label>
+      </div>
+    </section>
+
     <details class="advanced" id="advanced">
       <summary id="transcriptSummary">参考文本</summary>
       <div class="advancedBody">
@@ -385,9 +442,9 @@
     </details>
 
     <div class="actionRow">
-      <button id="generateBtn" disabled>生成并启用</button>
+      <button id="generateBtn" disabled>生成素材</button>
       <a id="chatBtn" class="button" href="/" hidden>立即进入对话</a>
-      <button id="checkStatusBtn" class="secondary" hidden>重新检查状态</button>
+      <button id="checkStatusBtn" class="secondary" hidden>立即检查状态</button>
       <button id="resetBtn" class="secondary" hidden>更换数字人</button>
     </div>
 
@@ -400,7 +457,7 @@
       <div class="progress" id="progress"><div class="progressBar" id="progressBar"></div></div>
     </section>
 
-    <p class="footnote">新人物启用时会自动替换旧模型，无需手动停进程；失败时会自动恢复当前数字人。</p>
+    <p class="footnote">新人物启用时会自动替换旧模型，无需手动停进程；启用失败时，系统会尝试恢复当前数字人。</p>
   </main>
 
   <script>
@@ -409,6 +466,11 @@
     const transcript = document.getElementById('transcript');
     const transcriptSummary = document.getElementById('transcriptSummary');
     const transcriptHint = document.getElementById('transcriptHint');
+    const voiceOptions = document.getElementById('voiceOptions');
+    const ttsBackend = document.getElementById('ttsBackend');
+    const ttsBackendHint = document.getElementById('ttsBackendHint');
+    const referenceLanguage = document.getElementById('referenceLanguage');
+    const targetLanguage = document.getElementById('targetLanguage');
     const imagePreview = document.getElementById('imagePreview');
     const imagePlaceholder = document.getElementById('imagePlaceholder');
     const audioPreview = document.getElementById('audioPreview');
@@ -434,6 +496,7 @@
       idle: '待上传',
       generating: '正在生成',
       enabling: '正在启用',
+      checking: '状态待确认',
       ready: '已就绪',
       failed: '失败'
     };
@@ -442,6 +505,7 @@
     const ACTIVATION_CLOCK_KEY = 'dystreamCustomizationActivation';
     const ACTIVATION_TYPICAL_MAX_MS = 3 * 60 * 1000;
     const ACTIVATION_HARD_LIMIT_MS = 5 * 60 * 1000;
+    const STATUS_CHECK_POLL_MS = 10 * 1000;
     const JOB_REQUEST_TIMEOUT_MS = 8000;
 
     let activeJob = null;
@@ -450,6 +514,10 @@
     let currentJobRetryable = false;
     let serviceAvailable = false;
     let transcriptRequired = true;
+    let ttsOptionsEnabled = false;
+    let ttsBackends = [];
+    let ttsDefaults = {};
+    let languageOptions = {};
     let operationPhase = 'idle';
     let pollGeneration = 0;
     let draftRevision = 0;
@@ -481,11 +549,187 @@
     }
 
     function hasRequiredTranscript() {
+      return ttsOptionsEnabled || !transcriptRequired || Boolean(transcript.value.trim());
+    }
+
+    function hasActivationTranscript() {
       return !transcriptRequired || Boolean(transcript.value.trim());
     }
 
     function hasDraft() {
       return Boolean(imageInput.files[0] || mediaInput.files[0] || transcript.value.trim());
+    }
+
+    function backendId(backend) {
+      return String((backend && (backend.id || backend.value)) || '');
+    }
+
+    function backendIsSelectable(backend) {
+      return Boolean(
+        backend
+        && backend.available !== false
+        && (backend.selectable === true
+          || (backend.selectable !== false && backend.available === true))
+      );
+    }
+
+    function backendDisabledReason(reason) {
+      const labels = {
+        fish_runtime_unavailable: 'Fish S2 Pro 运行时未就绪',
+        dependency_and_weights_missing: '缺少运行依赖和模型权重',
+        runtime_and_weights_missing_on_host: '当前主机未安装运行时和模型权重',
+        installed_stopped_gpu_conflict: '已安装，但当前 GPU 被占用，服务未启动'
+      };
+      return labels[String(reason || '')] || String(reason || '当前未配置');
+    }
+
+    function selectedBackend() {
+      return ttsBackends.find(backend => backendId(backend) === ttsBackend.value) || null;
+    }
+
+    function normalizeLanguageOptions(rawOptions) {
+      const values = Array.isArray(rawOptions) ? rawOptions : [];
+      const seen = new Set();
+      return values.flatMap(option => {
+        const rawValue = typeof option === 'string'
+          ? option
+          : option && (option.value || option.id || option.code);
+        const value = String(rawValue || '').trim();
+        if (!value || seen.has(value)) return [];
+        seen.add(value);
+        const label = typeof option === 'string'
+          ? option
+          : String(option.label || option.name || value);
+        return [{value, label}];
+      });
+    }
+
+    function fallbackLanguages(kind) {
+      if (Array.isArray(languageOptions)) return normalizeLanguageOptions(languageOptions);
+      if (!languageOptions || typeof languageOptions !== 'object') return [];
+      const keys = kind === 'reference'
+        ? ['reference', 'reference_languages']
+        : ['target', 'target_languages'];
+      for (const key of keys) {
+        if (Array.isArray(languageOptions[key])) {
+          return normalizeLanguageOptions(languageOptions[key]);
+        }
+      }
+      return [];
+    }
+
+    function renderLanguageSelect(select, options, preferredValue, emptyLabel) {
+      const normalized = normalizeLanguageOptions(options);
+      const preferred = String(preferredValue || '').trim();
+      if (preferred && !normalized.some(option => option.value === preferred)) {
+        normalized.unshift({value: preferred, label: preferred});
+      }
+      select.replaceChildren();
+      if (!normalized.length) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = emptyLabel;
+        select.append(option);
+        select.value = '';
+        return;
+      }
+      for (const language of normalized) {
+        const option = document.createElement('option');
+        option.value = language.value;
+        option.textContent = language.label;
+        select.append(option);
+      }
+      select.value = normalized.some(option => option.value === preferred)
+        ? preferred
+        : normalized[0].value;
+    }
+
+    function refreshLanguageOptions(preferredReference, preferredTarget) {
+      const backend = selectedBackend();
+      const referenceOptions = backend && Array.isArray(backend.reference_languages)
+        ? backend.reference_languages
+        : fallbackLanguages('reference');
+      const targetOptions = backend && Array.isArray(backend.target_languages)
+        ? backend.target_languages
+        : fallbackLanguages('target');
+      renderLanguageSelect(
+        referenceLanguage,
+        referenceOptions,
+        preferredReference || ttsDefaults.reference_language,
+        '由后端自动识别'
+      );
+      renderLanguageSelect(
+        targetLanguage,
+        targetOptions,
+        preferredTarget || ttsDefaults.target_language,
+        '由对话文本决定'
+      );
+    }
+
+    function configureTtsOptions(data) {
+      const primary = data.tts_options && typeof data.tts_options === 'object'
+        ? data.tts_options
+        : null;
+      const advertisedBackends = primary && Array.isArray(primary.backends)
+        ? primary.backends
+        : data.tts_backends;
+      ttsOptionsEnabled = Boolean(primary) || Array.isArray(data.tts_backends);
+      ttsBackends = Array.isArray(advertisedBackends)
+        ? advertisedBackends.filter(backend => backendId(backend))
+        : [];
+      ttsDefaults = (primary && primary.defaults && typeof primary.defaults === 'object')
+        ? primary.defaults
+        : ((data.tts_defaults && typeof data.tts_defaults === 'object') ? data.tts_defaults : {});
+      languageOptions = data.language_options || (primary && primary.language_options) || {};
+      voiceOptions.hidden = !ttsOptionsEnabled;
+      if (!ttsOptionsEnabled) return;
+
+      const previousBackend = ttsBackend.value;
+      ttsBackend.replaceChildren();
+      for (const backend of ttsBackends) {
+        const option = document.createElement('option');
+        const label = String(backend.label || backend.name || backendId(backend));
+        const selectable = backendIsSelectable(backend);
+        const reason = backendDisabledReason(backend.disabled_reason);
+        option.value = backendId(backend);
+        option.disabled = !selectable;
+        option.textContent = selectable ? label : `${label}（不可用：${reason}）`;
+        ttsBackend.append(option);
+      }
+
+      const defaultBackend = String(
+        ttsDefaults.tts_backend
+        || (ttsBackends.find(backend => backend.current === true || backend.selected === true)
+          ? backendId(ttsBackends.find(backend => backend.current === true || backend.selected === true))
+          : '')
+      );
+      const preferredBackend = ttsBackends.find(
+        backend => backendId(backend) === previousBackend && backendIsSelectable(backend)
+      ) || ttsBackends.find(
+        backend => backendId(backend) === defaultBackend && backendIsSelectable(backend)
+      ) || ttsBackends.find(backendIsSelectable);
+      ttsBackend.value = preferredBackend ? backendId(preferredBackend) : '';
+
+      const unavailable = ttsBackends
+        .filter(backend => !backendIsSelectable(backend))
+        .map(backend => `${backend.label || backend.name || backendId(backend)}：${backendDisabledReason(backend.disabled_reason)}`);
+      ttsBackendHint.textContent = unavailable.length ? `暂不可用：${unavailable.join('；')}` : '';
+      refreshLanguageOptions(
+        referenceLanguage.value || ttsDefaults.reference_language,
+        targetLanguage.value || ttsDefaults.target_language
+      );
+    }
+
+    function updateTranscriptGuidance() {
+      if (ttsOptionsEnabled) {
+        transcriptSummary.textContent = '参考文本 · 可自动识别';
+        transcriptHint.textContent = '可留空自动识别；启用前请核对文本与参考声音逐字一致。';
+        return;
+      }
+      transcriptSummary.textContent = transcriptRequired ? '参考文本 · 必填' : '高级选项 · 参考文本';
+      transcriptHint.textContent = transcriptRequired
+        ? 'Fish Speech S2 Pro 必填；文本必须与参考声音完全一致。'
+        : '文本必须与参考声音完全一致；不确定时可以留空。';
     }
 
     function readActivationStartedAt(jobId) {
@@ -531,7 +775,7 @@
         queued: '等待启用',
         activating: '加载头像和声音',
         restarting: '重启实时服务',
-        rolling_back: '恢复上一版本'
+        rolling_back: '尝试恢复上一版本'
       })[state] || '确认服务状态';
     }
 
@@ -572,22 +816,21 @@
       }, 1000);
     }
 
-    function showActivationTimedOut(jobId, message) {
-      const startedAt = readActivationStartedAt(jobId) || Date.now() - ACTIVATION_HARD_LIMIT_MS;
-      const elapsed = Date.now() - startedAt;
-      showState('enabling', message || '5 分钟内尚未确认服务端 ready，已停止自动检查。', {
-        progress: 95,
-        detail: `已用 ${formatElapsed(elapsed)} · 自动检查已停止 · 点击下方按钮仅查询状态，不会重复启用`
+    function showStatusChecking(jobId, message) {
+      const startedAt = readActivationStartedAt(jobId);
+      const elapsed = startedAt ? `已用 ${formatElapsed(Date.now() - startedAt)} · ` : '';
+      showState('checking', message || '实时服务正在重启，暂时无法读取任务结果。', {
+        indeterminate: true,
+        detail: `${elapsed}系统会继续自动检查；“立即检查状态”只查询状态，不会重复启用`
       });
     }
 
-    function stopAtActivationLimit(jobId) {
-      cancelPolling();
+    function continueCheckingAtActivationLimit(jobId) {
       readyForChat = false;
       clearChatCountdown();
-      operationPhase = 'timed_out';
+      operationPhase = 'checking';
       manualStatusCheck = false;
-      showActivationTimedOut(jobId);
+      showStatusChecking(jobId, '5 分钟内尚未确认启用结果，系统已转为低频检查。');
       updateControls();
     }
 
@@ -610,21 +853,29 @@
       imageInput.disabled = locked;
       mediaInput.disabled = locked;
       transcript.disabled = locked;
+      const selectableBackend = !ttsOptionsEnabled || backendIsSelectable(selectedBackend());
+      ttsBackend.disabled = locked || !ttsBackends.some(backendIsSelectable);
+      referenceLanguage.disabled = locked || !referenceLanguage.value;
+      targetLanguage.disabled = locked || !targetLanguage.value;
       uploadGrid.classList.toggle('locked', locked);
       uploadGrid.hidden = chatReady;
+      voiceOptions.hidden = !ttsOptionsEnabled || chatReady;
       advanced.hidden = chatReady;
       generateBtn.hidden = chatReady;
       generateBtn.disabled = locked || !serviceAvailable
-        || (!canContinueJob() && (!hasFiles() || !hasRequiredTranscript()));
+        || !selectableBackend
+        || (canContinueJob()
+          ? !hasActivationTranscript()
+          : (!hasFiles() || !hasRequiredTranscript()));
       generateBtn.textContent = canContinueJob()
-        ? (currentJobState === 'failed' ? '重试启用' : '继续启用')
-        : '生成并启用';
+        ? (currentJobState === 'failed' ? '重试启用' : '确认文本并启用')
+        : '生成素材';
       resetBtn.hidden = chatReady ? false : !(activeJob || currentJob || hasDraft());
       resetBtn.disabled = locked;
       resetBtn.textContent = chatReady ? '再换一个' : '更换数字人';
       chatBtn.hidden = !chatReady;
-      checkStatusBtn.hidden = operationPhase !== 'timed_out';
-      checkStatusBtn.disabled = operationPhase !== 'timed_out' || manualStatusCheck;
+      checkStatusBtn.hidden = operationPhase !== 'checking';
+      checkStatusBtn.disabled = operationPhase !== 'checking' || manualStatusCheck;
     }
 
     function cancelPolling() {
@@ -712,11 +963,25 @@
       draftRevision += 1;
       clearPendingJob();
       if (hasFiles()) {
-        showState('idle', '素材已选好，点击“生成并启用”。');
+        showState('idle', '素材已选好，点击“生成素材”。');
       } else {
         showState('idle', '请选择照片和参考声音。');
       }
       updateControls();
+    }
+
+    function updatePreparedSettings() {
+      if (currentJob && canContinueJob()) {
+        showState(
+          'idle',
+          currentJobState === 'failed'
+            ? '声音设置已更新，可以重试启用。'
+            : '请核对参考文本和声音设置，确认后再启用。'
+        );
+        updateControls();
+        return;
+      }
+      invalidatePreparedJobForDraft();
     }
 
     imageInput.addEventListener('change', () => {
@@ -745,7 +1010,13 @@
       invalidatePreparedJobForDraft();
     });
 
-    transcript.addEventListener('input', invalidatePreparedJobForDraft);
+    transcript.addEventListener('input', updatePreparedSettings);
+    ttsBackend.addEventListener('change', () => {
+      refreshLanguageOptions(ttsDefaults.reference_language, ttsDefaults.target_language);
+      updatePreparedSettings();
+    });
+    referenceLanguage.addEventListener('change', updatePreparedSettings);
+    targetLanguage.addEventListener('change', updatePreparedSettings);
     resetBtn.addEventListener('click', () => resetDraft());
     chatBtn.addEventListener('click', clearChatCountdown);
 
@@ -798,9 +1069,14 @@
         {cache: 'no-store'},
         timeoutMs
       );
-      if (response.status === 404) return null;
+      if (response.status === 404) {
+        markServiceConnected();
+        return null;
+      }
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return response.json();
+      const data = await response.json();
+      markServiceConnected();
+      return data;
     }
 
     async function fetchActiveSnapshot() {
@@ -812,6 +1088,12 @@
       return response.json();
     }
 
+    function markServiceConnected() {
+      serviceAvailable = true;
+      serviceBadge.classList.remove('unavailable');
+      serviceLabel.textContent = '服务已连接';
+    }
+
     async function finishReady(jobId) {
       const readyJob = jobId || currentJob;
       let data;
@@ -819,10 +1101,9 @@
         data = await fetchActiveSnapshot();
       } catch (_) {
         readyForChat = false;
-        setPhase('activating');
-        showActivationProgress(
+        setPhase('checking');
+        showStatusChecking(
           readyJob,
-          'checking',
           '任务已完成，正在确认当前在线数字人…'
         );
         return false;
@@ -831,20 +1112,17 @@
       const authoritativeActive = data.active && data.active.job_id ? data.active : null;
       serviceAvailable = data.available !== false;
       transcriptRequired = data.transcript_required === true;
-      transcriptSummary.textContent = transcriptRequired ? '参考文本 · 必填' : '高级选项 · 参考文本';
-      transcriptHint.textContent = transcriptRequired
-        ? 'Fish Speech S2 Pro 必填；文本必须与参考声音完全一致。'
-        : '文本必须与参考声音完全一致；不确定时可以留空。';
+      configureTtsOptions(data);
+      updateTranscriptGuidance();
       renderActive(authoritativeActive);
       serviceBadge.classList.toggle('unavailable', !serviceAvailable);
       serviceLabel.textContent = serviceAvailable ? '服务已连接' : '服务尚未就绪';
 
       if (!serviceAvailable || !authoritativeActive) {
         readyForChat = false;
-        setPhase('activating');
-        showActivationProgress(
+        setPhase('checking');
+        showStatusChecking(
           readyJob,
-          'checking',
           '任务已完成，正在等待实时服务确认当前人物…'
         );
         return false;
@@ -891,12 +1169,40 @@
       readyForChat = false;
       currentJobState = 'prepared';
       currentJobRetryable = false;
+      const prepared = status && status.prepared && typeof status.prepared === 'object'
+        ? status.prepared
+        : (status || {});
+      const preparedTranscript = typeof prepared.transcript === 'string'
+        ? prepared.transcript.trim()
+        : '';
+      if (preparedTranscript) transcript.value = preparedTranscript;
+      for (const [select, value] of [
+        [ttsBackend, prepared.tts_backend],
+        [referenceLanguage, prepared.reference_language],
+        [targetLanguage, prepared.target_language]
+      ]) {
+        const normalized = String(value || '');
+        if (normalized && Array.from(select.options).some(option => option.value === normalized)) {
+          select.value = normalized;
+        }
+      }
+      if (prepared.tts_backend) {
+        refreshLanguageOptions(prepared.reference_language, prepared.target_language);
+      }
+      if (preparedTranscript || transcriptRequired) advanced.open = true;
       setPhase('idle');
-      const voice = status.voice || {};
+      const voice = prepared.voice || status.voice || {};
       const duration = voice.reference_duration_seconds
         ? `${voice.reference_duration_seconds} 秒`
         : '';
-      showState('idle', '素材已生成，点击“继续启用”。', {detail: duration});
+      const autoTranscript = ['auto', 'sensevoice_auto'].includes(prepared.transcript_source);
+      showState(
+        'idle',
+        autoTranscript
+          ? '已自动识别参考文本，请核对后点击“确认文本并启用”。'
+          : '素材已生成，请核对参考文本和声音设置后再启用。',
+        {detail: duration}
+      );
       updateControls();
     }
 
@@ -907,14 +1213,15 @@
       let phase = initialPhase;
       if (phase === 'activating') ensureActivationStartedAt(jobId);
       setPhase(phase);
+      if (phase === 'checking') showStatusChecking(jobId);
 
       while (token === pollGeneration && currentJob === jobId) {
         if (
           phase === 'activating'
           && Date.now() - ensureActivationStartedAt(jobId) >= ACTIVATION_HARD_LIMIT_MS
         ) {
-          stopAtActivationLimit(jobId);
-          return;
+          phase = 'checking';
+          continueCheckingAtActivationLimit(jobId);
         }
         try {
           const remaining = phase === 'activating'
@@ -935,7 +1242,7 @@
           currentJobState = status.state || '';
           if (status.state === 'ready') {
             if (await finishReady(jobId)) return;
-            phase = 'activating';
+            phase = 'checking';
           } else if (status.state === 'failed') {
             finishFailed(status);
             return;
@@ -950,9 +1257,19 @@
               detail: status.state === 'uploading' ? '素材上传完成' : '素材处理 40%'
             });
           } else if (ACTIVATION_STATES.has(status.state)) {
-            phase = 'activating';
+            const elapsed = Date.now() - ensureActivationStartedAt(jobId);
+            if (elapsed >= ACTIVATION_HARD_LIMIT_MS) {
+              phase = 'checking';
+              continueCheckingAtActivationLimit(jobId);
+            } else {
+              phase = 'activating';
+              setPhase(phase);
+              showActivationProgress(jobId, status.state);
+            }
+          } else {
+            phase = 'checking';
             setPhase(phase);
-            showActivationProgress(jobId, status.state);
+            showStatusChecking(jobId, '服务端返回了未知任务状态，系统将继续检查。');
           }
         } catch (_) {
           if (token !== pollGeneration || currentJob !== jobId) return;
@@ -962,11 +1279,10 @@
               detail: '素材处理 40%'
             });
           } else {
-            phase = 'activating';
+            phase = 'checking';
             setPhase(phase);
-            showActivationProgress(
+            showStatusChecking(
               jobId,
-              currentJobState,
               '服务正在切换，正在等待恢复连接…'
             );
           }
@@ -976,26 +1292,30 @@
           phase === 'activating'
           && Date.now() - ensureActivationStartedAt(jobId) >= ACTIVATION_HARD_LIMIT_MS
         ) {
-          stopAtActivationLimit(jobId);
-          return;
+          phase = 'checking';
+          continueCheckingAtActivationLimit(jobId);
         }
         if (phase === 'preparing' && Date.now() - pollStartedAt > 12 * 60 * 1000) {
-          operationPhase = 'unknown';
-          showState('failed', '等待超过 12 分钟，任务状态暂时无法确认。请刷新页面后重试。');
-          updateControls();
-          return;
+          phase = 'checking';
+          setPhase(phase);
+          showStatusChecking(jobId, '素材处理时间较长，任务结果暂时无法确认。');
         }
         const delay = phase === 'activating'
           ? Math.min(
               2200,
               Math.max(0, ACTIVATION_HARD_LIMIT_MS - (Date.now() - ensureActivationStartedAt(jobId)))
             )
-          : 2200;
+          : (phase === 'checking' ? STATUS_CHECK_POLL_MS : 2200);
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
 
     async function submitActivation(jobId) {
+      if (ttsOptionsEnabled && !backendIsSelectable(selectedBackend())) {
+        showState('failed', '所选 TTS 后端当前不可用，请重新选择。');
+        updateControls();
+        return;
+      }
       clearChatCountdown();
       readyForChat = false;
       currentJobState = 'queued';
@@ -1003,12 +1323,22 @@
       setPhase('activating');
       showActivationProgress(jobId, currentJobState);
       try {
+        const request = {
+          method: 'POST',
+          headers: {'X-DyStream-Customize': '1'}
+        };
+        if (ttsOptionsEnabled) {
+          request.headers['Content-Type'] = 'application/json';
+          request.body = JSON.stringify({
+            tts_backend: ttsBackend.value,
+            reference_language: referenceLanguage.value,
+            target_language: targetLanguage.value,
+            transcript: transcript.value.trim()
+          });
+        }
         const response = await fetchWithTimeout(
           `/api/customization/${jobId}/activate`,
-          {
-            method: 'POST',
-            headers: {'X-DyStream-Customize': '1'}
-          }
+          request
         );
         let status = {};
         try { status = await response.json(); } catch (_) {}
@@ -1038,6 +1368,7 @@
     generateBtn.addEventListener('click', async () => {
       if (operationPhase !== 'idle' || !serviceAvailable) return;
       if (canContinueJob()) {
+        if (!hasActivationTranscript()) return;
         await submitActivation(currentJob);
         return;
       }
@@ -1052,6 +1383,11 @@
       form.append('image', imageInput.files[0]);
       form.append('voice_media', mediaInput.files[0]);
       form.append('transcript', transcript.value.trim());
+      if (ttsOptionsEnabled) {
+        form.append('tts_backend', ttsBackend.value);
+        form.append('reference_language', referenceLanguage.value);
+        form.append('target_language', targetLanguage.value);
+      }
 
       try {
         const result = await uploadForm(form, revision);
@@ -1061,7 +1397,7 @@
         currentJobState = 'prepared';
         currentJobRetryable = false;
         localStorage.setItem('dystreamCustomizationJob', currentJob);
-        await submitActivation(currentJob);
+        restorePrepared(result);
       } catch (error) {
         if (revision !== draftRevision) return;
         setPhase('idle');
@@ -1071,40 +1407,49 @@
     });
 
     checkStatusBtn.addEventListener('click', async () => {
-      if (operationPhase !== 'timed_out' || !currentJob || manualStatusCheck) return;
+      if (operationPhase !== 'checking' || !currentJob || manualStatusCheck) return;
       const jobId = currentJob;
       manualStatusCheck = true;
       updateControls();
-      showActivationTimedOut(jobId, '正在重新检查服务端状态…');
+      showStatusChecking(jobId, '正在检查服务端状态…');
       try {
         const status = await fetchJob(jobId);
-        if (currentJob !== jobId || operationPhase !== 'timed_out') return;
+        if (currentJob !== jobId || operationPhase !== 'checking') return;
         if (!status) {
-          showActivationTimedOut(jobId, '暂时查不到该任务，未重新启用；稍后可再次检查。');
+          showStatusChecking(jobId, '暂时查不到该任务，系统会继续检查。');
           return;
         }
         currentJobState = status.state || '';
         if (status.state === 'ready') {
           if (await finishReady(jobId)) return;
-          operationPhase = 'timed_out';
-          showActivationTimedOut(jobId, '任务已完成，但当前在线人物尚未得到服务端确认。');
+          operationPhase = 'checking';
+          showStatusChecking(jobId, '任务已完成，但当前在线人物尚未得到服务端确认。');
           return;
         }
         if (status.state === 'failed') {
           finishFailed(status);
           return;
         }
-        showActivationTimedOut(
-          jobId,
-          `服务端当前阶段：${activationStage(status.state)}；未重复发起启用。`
-        );
+        if (status.state === 'prepared') {
+          restorePrepared(status);
+          return;
+        }
+        if (PREPARE_STATES.has(status.state)) {
+          showStatusChecking(jobId, '素材仍在处理中，系统会继续检查。');
+          return;
+        }
+        if (ACTIVATION_STATES.has(status.state)) {
+          showStatusChecking(jobId, `服务端当前阶段：${activationStage(status.state)}。`);
+          return;
+        }
+        showStatusChecking(jobId, '服务端返回了未知任务状态，系统会继续检查。');
       } catch (_) {
-        if (currentJob === jobId && operationPhase === 'timed_out') {
-          showActivationTimedOut(jobId, '本次检查未连接成功，未重复发起启用；稍后可再次检查。');
+        if (currentJob === jobId && operationPhase === 'checking') {
+          showStatusChecking(jobId, '本次检查未连接成功，系统会继续自动检查。');
         }
       } finally {
         manualStatusCheck = false;
-        if (operationPhase === 'timed_out') updateControls();
+        if (operationPhase === 'checking') updateControls();
       }
     });
 
@@ -1113,10 +1458,8 @@
         const data = await fetchActiveSnapshot();
         serviceAvailable = data.available !== false;
         transcriptRequired = data.transcript_required === true;
-        transcriptSummary.textContent = transcriptRequired ? '参考文本 · 必填' : '高级选项 · 参考文本';
-        transcriptHint.textContent = transcriptRequired
-          ? 'Fish Speech S2 Pro 必填；文本必须与参考声音完全一致。'
-          : '文本必须与参考声音完全一致；不确定时可以留空。';
+        configureTtsOptions(data);
+        updateTranscriptGuidance();
         renderActive(data.active || null);
         readyForChat = Boolean(activeJob && serviceAvailable && !currentJob);
         serviceBadge.classList.toggle('unavailable', !serviceAvailable);
@@ -1170,7 +1513,7 @@
         currentJobState = status.state || '';
         if (status.state === 'ready') {
           const readyConfirmed = await finishReady(currentJob);
-          if (!readyConfirmed) pollJob(currentJob, 'activating');
+          if (!readyConfirmed) pollJob(currentJob, 'checking');
         }
         else if (status.state === 'prepared') restorePrepared(status);
         else if (status.state === 'failed') finishFailed(status);
@@ -1178,9 +1521,9 @@
         else if (ACTIVATION_STATES.has(status.state)) pollJob(currentJob, 'activating');
         else finishFailed(status, '任务状态异常，请重新选择素材。');
       } catch (_) {
-        // A pending activation intentionally makes the HTTP service disappear
-        // for a short time. Keep the draft locked until persisted status returns.
-        pollJob(currentJob, 'activating');
+        // The realtime service may temporarily disappear while restarting. Do
+        // not infer an activation state until persisted status is available.
+        pollJob(currentJob, 'checking');
       }
       removeNewQuery();
     }

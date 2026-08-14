@@ -111,8 +111,21 @@ class S2SLauncherContractTests(unittest.TestCase):
             env_example,
         )
         self.assertIn("PIPECAT_TTS_PROVIDER=fish_s2pro", env_example)
+        self.assertIn("PIPECAT_TTS_BACKEND=fish_s2_pro", env_example)
+        self.assertIn("PIPECAT_TTS_REFERENCE_LANGUAGE=auto", env_example)
+        self.assertIn("PIPECAT_TTS_TARGET_LANGUAGE=zh-CN", env_example)
         self.assertIn("PIPECAT_TTS_BRIDGE_URI=ws://127.0.0.1:8771", env_example)
         self.assertIn("PIPECAT_TTS_MODEL=fishaudio/s2-pro", env_example)
+
+    def test_target_language_is_appended_to_existing_persona_prompt(self):
+        cascade = (ROOT / "pipecat_dystream" / "custom_cascade.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("_LANGUAGE_REQUIREMENTS", cascade)
+        self.assertIn('return f"{configured}\\n\\n{language_requirement}"', cascade)
+        self.assertIn("answer only in English", cascade)
+        self.assertIn("answer only in Japanese", cascade)
 
     @unittest.skipIf(
         os.name == "nt",

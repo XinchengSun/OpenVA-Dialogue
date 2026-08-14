@@ -176,6 +176,58 @@ class OpenAISpeechPCMBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["ref_text"], "准确的参考音频文本。")
         self.assertNotIn("references", payload)
 
+    async def test_qwen_clone_payload_adds_explicit_target_language(self):
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.method == "GET":
+                return httpx.Response(200)
+            return httpx.Response(
+                200,
+                headers={"content-type": "audio/pcm", "x-sample-rate": "44100"},
+                stream=_ChunkStream([b"\x01\x00"]),
+            )
+
+        backend, _client = self._backend(
+            handler,
+            backend="qwen3_tts_1_7b_base",
+            target_language="zh-CN",
+        )
+        await backend.start()
+        chunks = [chunk async for chunk in backend.generate_pcm16("测试。", "ctx-qwen")]
+        await backend.stop()
+
+        self.assertEqual(chunks, [b"\x01\x00"])
+        payload = json.loads(requests[-1].content)
+        self.assertEqual(payload["language"], "Chinese")
+        self.assertEqual(payload["references"][0]["text"], "准确的参考音频文本。")
+
+    async def test_fish_payload_does_not_gain_an_unsupported_language_field(self):
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.method == "GET":
+                return httpx.Response(200)
+            return httpx.Response(
+                200,
+                headers={"content-type": "audio/pcm", "x-sample-rate": "44100"},
+                stream=_ChunkStream([b"\x01\x00"]),
+            )
+
+        backend, _client = self._backend(
+            handler,
+            backend="fish_s2_pro",
+            target_language="zh-CN",
+        )
+        await backend.start()
+        chunks = [chunk async for chunk in backend.generate_pcm16("测试。", "ctx-fish")]
+        await backend.stop()
+
+        self.assertEqual(chunks, [b"\x01\x00"])
+        self.assertNotIn("language", json.loads(requests[-1].content))
+
     async def test_vllm_local_reference_is_sent_as_file_uri(self):
         requests: list[httpx.Request] = []
 

@@ -25,6 +25,20 @@ from voice_service.voxcpm2_server import VoxCPM2WebSocketBridge, _run_server
 
 logger = logging.getLogger(__name__)
 
+_BACKEND_ALIASES = {
+    "fish_s2pro": "fish_s2_pro",
+    "fish_s2_pro": "fish_s2_pro",
+    "qwen3_tts_1_7b_base": "qwen3_tts_1_7b_base",
+    "cosyvoice3_0_5b": "cosyvoice3_0_5b",
+    "voxcpm2": "voxcpm2",
+}
+_QWEN_LANGUAGE_HINTS = {
+    "auto": "Auto",
+    "zh-CN": "Chinese",
+    "en-US": "English",
+    "ja-JP": "Japanese",
+}
+
 
 def _json_object_env(name: str) -> dict[str, Any]:
     raw = os.getenv(name, "").strip()
@@ -62,6 +76,9 @@ class OpenAISpeechPCMBackend:
         sample_rate: int = 44_100,
         reference_audio: str = "",
         reference_text: str = "",
+        backend: str = "fish_s2_pro",
+        reference_language: str = "auto",
+        target_language: str = "zh-CN",
         request_timeout_sec: float = 120.0,
         connect_timeout_sec: float = 10.0,
         extra_body: dict[str, Any] | None = None,
@@ -79,6 +96,9 @@ class OpenAISpeechPCMBackend:
         self.sample_rate = int(sample_rate)
         self._reference_audio = reference_audio.strip()
         self._reference_text = reference_text.strip()
+        self._backend = _BACKEND_ALIASES.get(backend.strip().lower(), "")
+        self._reference_language = reference_language.strip() or "auto"
+        self._target_language = target_language.strip() or "zh-CN"
         self._request_timeout_sec = float(request_timeout_sec)
         self._connect_timeout_sec = float(connect_timeout_sec)
         self._extra_body = dict(extra_body or {})
@@ -90,6 +110,8 @@ class OpenAISpeechPCMBackend:
             raise ValueError("OpenAI speech base_url must not be empty")
         if not self._model:
             raise ValueError("OpenAI speech model must not be empty")
+        if not self._backend:
+            raise ValueError(f"unsupported logical speech backend: {backend}")
         if self._provider not in {"sglang", "vllm", "openai_compatible"}:
             raise ValueError(
                 "OpenAI speech provider must be sglang, vllm, or openai_compatible"
@@ -102,6 +124,10 @@ class OpenAISpeechPCMBackend:
             raise ValueError(
                 "reference_audio and its exact reference_text must be set together"
             )
+        if self._reference_language not in _QWEN_LANGUAGE_HINTS:
+            raise ValueError(f"unsupported reference language: {self._reference_language}")
+        if self._target_language not in _QWEN_LANGUAGE_HINTS or self._target_language == "auto":
+            raise ValueError(f"unsupported target language: {self._target_language}")
 
     @property
     def model(self) -> str:
@@ -182,6 +208,8 @@ class OpenAISpeechPCMBackend:
                 ]
         elif self._provider == "vllm":
             payload["stream_format"] = "audio"
+        if self._backend == "qwen3_tts_1_7b_base":
+            payload["language"] = _QWEN_LANGUAGE_HINTS[self._target_language]
         return payload
 
     @staticmethod
@@ -308,6 +336,9 @@ def _backend_from_env() -> OpenAISpeechPCMBackend:
         sample_rate=int(os.getenv("OPENAI_SPEECH_SAMPLE_RATE", "44100")),
         reference_audio=os.getenv("OPENAI_SPEECH_REFERENCE_AUDIO", ""),
         reference_text=os.getenv("OPENAI_SPEECH_REFERENCE_TEXT", ""),
+        backend=os.getenv("OPENAI_SPEECH_BACKEND", "fish_s2_pro"),
+        reference_language=os.getenv("OPENAI_SPEECH_REFERENCE_LANGUAGE", "auto"),
+        target_language=os.getenv("OPENAI_SPEECH_TARGET_LANGUAGE", "zh-CN"),
         request_timeout_sec=float(
             os.getenv("OPENAI_SPEECH_REQUEST_TIMEOUT_SEC", "120.0")
         ),

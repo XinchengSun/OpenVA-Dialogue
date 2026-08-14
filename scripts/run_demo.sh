@@ -81,6 +81,30 @@ pid_is_managed_server() {
   [[ "$script_matches" -eq 1 && "$port_matches" -eq 1 ]]
 }
 
+pid_is_managed_mse_instance() {
+  local pid="$1"
+  local expected_env_file=""
+  local process_env_entry=""
+  local process_env_file=""
+  local process_env_port=""
+  pid_is_managed_server "$pid" || return 1
+  expected_env_file="$(readlink -f "$ENV_FILE" 2>/dev/null || true)"
+  while IFS= read -r -d '' process_env_entry; do
+    case "$process_env_entry" in
+      CUSTOMIZATION_MAIN_ENV_FILE=*)
+        process_env_file="${process_env_entry#*=}"
+        ;;
+      CUSTOMIZATION_SERVER_PORT=*)
+        process_env_port="${process_env_entry#*=}"
+        ;;
+    esac
+  done < "/proc/$pid/environ" || return 1
+  process_env_file="$(readlink -f "$process_env_file" 2>/dev/null || true)"
+  [[ -n "$expected_env_file" && "$process_env_file" == "$expected_env_file" ]] \
+    || return 1
+  [[ "$process_env_port" == "$PORT_VALUE" ]]
+}
+
 health_json() {
   curl --fail --silent --show-error --max-time 4 \
     "http://127.0.0.1:$PORT_VALUE/health"
@@ -344,7 +368,13 @@ cleanup_failed_start() {
   fi
 }
 
+cleanup_failed_mse_start() {
+  # The MSE-only lifecycle never owns a speech bridge or TTS engine.
+  stop_mse || true
+}
+
 preflight() {
+  local manage_tts="${1:-1}"
   local required_command=""
   local visible_gpus=""
   local gpu_count=""
@@ -362,19 +392,23 @@ preflight() {
   [[ -n "${PIPECAT_S2S_API_KEY:-${DASHSCOPE_API_KEY:-${PIPECAT_LLM_API_KEY:-${OPENAI_API_KEY:-}}}}" ]] \
     || die "missing PIPECAT_S2S_API_KEY (or reusable DashScope/LLM key) in $ENV_FILE"
 
+  [[ "$manage_tts" == "0" || "$manage_tts" == "1" ]] \
+    || die "internal error: manage_tts must be 0 or 1"
   if [[ "$DIALOG_MODE" == "custom_cascade" ]]; then
     [[ -n "${PIPECAT_LLM_API_KEY:-${OPENAI_API_KEY:-}}" ]] \
       || die "custom_cascade requires PIPECAT_LLM_API_KEY or OPENAI_API_KEY"
     [[ -n "${PIPECAT_LLM_MODEL:-${OPENAI_MODEL:-}}" ]] \
       || die "custom_cascade requires PIPECAT_LLM_MODEL or OPENAI_MODEL"
-    if [[ "$TTS_PROVIDER" == "fish_s2pro" ]]; then
-      require_file "$FISH_MANAGER_SCRIPT" "Fish S2 Pro manager"
-      require_file "$FISH_BRIDGE_SCRIPT" "Fish PCM bridge manager"
-      require_file "$TTS_UPSTREAM_ENV" "Fish S2 Pro environment"
-    else
-      require_file "$VOX_BRIDGE_SCRIPT" "VoxCPM2 bridge manager"
+    if [[ "$manage_tts" == "1" ]]; then
+      if [[ "$TTS_PROVIDER" == "fish_s2pro" ]]; then
+        require_file "$FISH_MANAGER_SCRIPT" "Fish S2 Pro manager"
+        require_file "$FISH_BRIDGE_SCRIPT" "Fish PCM bridge manager"
+        require_file "$TTS_UPSTREAM_ENV" "Fish S2 Pro environment"
+      else
+        require_file "$VOX_BRIDGE_SCRIPT" "VoxCPM2 bridge manager"
+      fi
+      require_file "$(bridge_env_file)" "TTS bridge environment"
     fi
-    require_file "$(bridge_env_file)" "TTS bridge environment"
   fi
 
   visible_gpus="${CUDA_VISIBLE_DEVICES:-0,1}"
@@ -594,11 +628,136 @@ stop_demo() {
   return "$result"
 }
 
+show_mse_status() {
+  local pid=""
+  local summary=""
+  pid="$(read_managed_pid)"
+  if [[ -z "$pid" ]]; then
+    echo "DEMO_STOPPED pid_file=$PID_FILE"
+    return 1
+  fi
+  if ! pid_is_alive "$pid"; then
+    echo "DEMO_STOPPED stale_pid=$pid"
+    return 1
+  fi
+  pid_is_managed_mse_instance "$pid" \
+    || die "PID file points to an unrelated process; refusing to manage pid=$pid"
+  summary="$(health_summary)" \
+    || die "managed server pid=$pid is running but health validation failed"
+  ready_marker_matches "$pid" \
+    || die "server pid=$pid is healthy but has not completed the media smoke test"
+  echo "DEMO_READY pid=$pid remote_port=$PORT_VALUE $summary"
+}
+
+start_mse() {
+  local pid=""
+  local summary=""
+  rm -f -- "$READY_FILE"
+  preflight 0
+  pid="$(read_managed_pid)"
+  if [[ -n "$pid" ]] && pid_is_alive "$pid"; then
+    pid_is_managed_mse_instance "$pid" \
+      || die "PID file points to an unrelated process; refusing to manage pid=$pid"
+    summary="$(health_summary)" \
+      || die "managed server pid=$pid is running but unhealthy; inspect $LOG_FILE"
+    media_smoke \
+      || die "managed server pid=$pid failed the decodable-media smoke test"
+    write_ready_marker "$pid"
+    echo "DEMO_READY pid=$pid remote_port=$PORT_VALUE $summary"
+    return 0
+  fi
+  if [[ -n "$pid" ]]; then
+    rm -f -- "$PID_FILE"
+  fi
+
+  if "$PYTHON_BIN" -c "
+import socket
+s = socket.socket()
+s.settimeout(0.5)
+try:
+    occupied = s.connect_ex(('127.0.0.1', int('$PORT_VALUE'))) == 0
+finally:
+    s.close()
+raise SystemExit(0 if occupied else 1)
+"; then
+    die "port $PORT_VALUE is already occupied by an unmanaged process"
+  fi
+
+  if ! PIPECAT_PYTHON="$PYTHON_BIN" \
+    ENV_FILE="$ENV_FILE" \
+    PORT="$PORT_VALUE" \
+    PIPECAT_STARTUP_WAIT_SEC="${PIPECAT_STARTUP_WAIT_SEC:-240}" \
+    bash "$START_SCRIPT" 9>&-; then
+    cleanup_failed_mse_start
+    die "MSE start script failed"
+  fi
+
+  pid="$(read_managed_pid)"
+  if ! pid_is_managed_mse_instance "$pid"; then
+    cleanup_failed_mse_start
+    die "start script returned without a valid managed server"
+  fi
+  if ! summary="$(health_summary)"; then
+    cleanup_failed_mse_start
+    die "server started but full health validation failed; inspect $LOG_FILE"
+  fi
+  if ! media_smoke; then
+    cleanup_failed_mse_start
+    die "server started but failed the decodable-media smoke test"
+  fi
+  write_ready_marker "$pid"
+  echo "DEMO_READY pid=$pid remote_port=$PORT_VALUE $summary"
+}
+
+stop_mse() {
+  local pid=""
+  local deadline=0
+  local stop_wait_sec="${PIPECAT_STOP_WAIT_SEC:-240}"
+  pid="$(read_managed_pid)"
+  if [[ -z "$pid" ]]; then
+    rm -f -- "$READY_FILE"
+    echo "DEMO_STOPPED already_stopped=1"
+    return 0
+  fi
+  if ! pid_is_alive "$pid"; then
+    rm -f -- "$PID_FILE"
+    rm -f -- "$READY_FILE"
+    echo "DEMO_STOPPED removed_stale_pid=$pid"
+    return 0
+  fi
+  if ! pid_is_managed_mse_instance "$pid"; then
+    echo "ERROR: PID file points to an unrelated process; refusing to stop pid=$pid" >&2
+    return 1
+  fi
+
+  if [[ ! "$stop_wait_sec" =~ ^[1-9][0-9]*$ ]]; then
+    echo "WARNING: invalid PIPECAT_STOP_WAIT_SEC; using 240 seconds" >&2
+    stop_wait_sec=240
+  fi
+  if ! kill -TERM "$pid" && pid_is_alive "$pid"; then
+    echo "ERROR: could not signal managed server pid=$pid" >&2
+    return 1
+  fi
+  if pid_is_alive "$pid"; then
+    deadline=$((SECONDS + stop_wait_sec))
+    while pid_is_alive "$pid" && (( SECONDS < deadline )); do
+      sleep 1
+    done
+  fi
+  if pid_is_alive "$pid"; then
+    echo "ERROR: server pid=$pid did not exit after ${stop_wait_sec}s; no SIGKILL was sent" >&2
+    return 1
+  fi
+  rm -f -- "$PID_FILE"
+  rm -f -- "$READY_FILE"
+  echo "DEMO_STOPPED pid=$pid"
+}
+
 case "$ACTION" in
-  start | status | stop | restart)
+  start | status | stop | restart | start-mse | status-mse | stop-mse | restart-mse)
     ;;
   *)
-    die "usage: bash scripts/run_demo.sh [start|status|stop|restart]"
+    die "usage: bash scripts/run_demo.sh [start|status|stop|restart|start-mse|status-mse|stop-mse|restart-mse]"
     ;;
 esac
 
@@ -620,5 +779,18 @@ case "$ACTION" in
   restart)
     stop_demo
     start_demo
+    ;;
+  start-mse)
+    start_mse
+    ;;
+  status-mse)
+    show_mse_status
+    ;;
+  stop-mse)
+    stop_mse
+    ;;
+  restart-mse)
+    stop_mse
+    start_mse
     ;;
 esac

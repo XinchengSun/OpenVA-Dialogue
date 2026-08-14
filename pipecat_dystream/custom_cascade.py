@@ -38,6 +38,45 @@ DEFAULT_SYSTEM_INSTRUCTION = (
     "每次回答必须把最后一句说完整，不能为了缩短长度在半句话处截断。"
 )
 
+_LANGUAGE_SYSTEM_INSTRUCTIONS = {
+    "zh-CN": DEFAULT_SYSTEM_INSTRUCTION,
+    "en-US": (
+        "You are a friendly, natural English voice assistant. Always answer in English, "
+        "even when the user speaks another language. Answer directly in conversational "
+        "speech: one or two sentences for simple questions and no more than three unless "
+        "the user asks for detail. Do not use Markdown, lists, or numbering, and always "
+        "finish the final sentence."
+    ),
+    "ja-JP": (
+        "あなたは親しみやすく自然な日本語の音声アシスタントです。ユーザーがどの言語で話しても、"
+        "必ず日本語で答えてください。簡単な質問には一、二文、通常の質問には二、三文で、"
+        "自然な話し言葉として直接答えてください。詳しい説明を求められない限り三文を超えず、"
+        "Markdown、箇条書き、番号付きリストは使わず、最後の文を必ず言い切ってください。"
+    ),
+}
+
+_LANGUAGE_REQUIREMENTS = {
+    "zh-CN": "Language requirement: answer only in Chinese.",
+    "en-US": "Language requirement: answer only in English.",
+    "ja-JP": "Language requirement: answer only in Japanese.",
+}
+
+
+def _system_instruction() -> str:
+    language = os.getenv("PIPECAT_TTS_TARGET_LANGUAGE", "zh-CN").strip() or "zh-CN"
+    try:
+        default_instruction = _LANGUAGE_SYSTEM_INSTRUCTIONS[language]
+        language_requirement = _LANGUAGE_REQUIREMENTS[language]
+    except KeyError as exc:
+        raise RuntimeError(f"unsupported PIPECAT_TTS_TARGET_LANGUAGE: {language}") from exc
+    configured = os.getenv("PIPECAT_SYSTEM_INSTRUCTION", "").strip()
+    if not configured:
+        return default_instruction
+    # Preserve the deployment's persona/task prompt while making the user's
+    # explicit output-language choice authoritative, even when an older env
+    # file still contains the default Chinese system instruction.
+    return f"{configured}\n\n{language_requirement}"
+
 
 def _required_env(name: str, *fallbacks: str) -> str:
     for key in (name, *fallbacks):
@@ -336,9 +375,7 @@ def create_custom_cascade_components(
         settings=RecoveringOpenAILLMService.Settings(
             model=llm_model,
             extra=llm_extra,
-            system_instruction=os.getenv(
-                "PIPECAT_SYSTEM_INSTRUCTION", DEFAULT_SYSTEM_INSTRUCTION
-            ),
+            system_instruction=_system_instruction(),
             temperature=float(os.getenv("PIPECAT_LLM_TEMPERATURE", "0.3")),
             max_tokens=int(os.getenv("PIPECAT_LLM_MAX_TOKENS", "256")),
         ),
