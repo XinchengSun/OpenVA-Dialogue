@@ -3,8 +3,25 @@ from __future__ import annotations
 import hmac
 import ipaddress
 
+from aiohttp.abc import AbstractAccessLogger
+
 
 ACCESS_COOKIE_NAME = "dystream_public_access"
+
+
+class RedactedAccessLogger(AbstractAccessLogger):
+    """Log request paths without query strings or authentication tokens."""
+
+    def log(self, request, response, elapsed: float) -> None:
+        self.logger.info(
+            '%s "%s %s" %s %s %.6f',
+            request.remote or "-",
+            request.method,
+            request.path,
+            response.status,
+            response.body_length,
+            elapsed,
+        )
 
 
 def host_without_port(value: str) -> str:

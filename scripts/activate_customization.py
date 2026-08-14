@@ -679,11 +679,16 @@ def verify_health(port: int, expected_launch_token: str) -> None:
             ) as response:
                 health = json.loads(response.read().decode("utf-8"))
             dialog = health.get("dialog_session") or {}
+            # Older server versions exposed the provider as a suffix on the
+            # launch token. Match the token field while allowing that legacy
+            # suffix; verify_loaded_assets separately validates the backend.
+            actual_launch_token = str(health.get("launch_token") or "")
+            marker_launch_token = actual_launch_token.split(maxsplit=1)[0]
             if (
                 health.get("status") == "ok"
                 and health.get("frame_ready") is True
                 and health.get("launch_ready") is True
-                and health.get("launch_token") == expected_launch_token
+                and marker_launch_token == expected_launch_token
                 and dialog.get("custom_cascade_ready") is True
             ):
                 return

@@ -29,6 +29,7 @@ import websockets
 from customization_runtime import register_customization_routes
 from pipecat_dystream.public_access import (
     ACCESS_COOKIE_NAME,
+    RedactedAccessLogger,
     is_loopback_host,
     token_matches,
 )
@@ -2997,10 +2998,10 @@ class RealtimeMSEEngine:
         launch_token = ""
         launch_ready_path = Path(__file__).resolve().parent / "logs" / "demo_ready.pid"
         try:
-            marker_pid, marker_version, launch_token = launch_ready_path.read_text(
-                encoding="utf-8"
-            ).split(maxsplit=2)
-            launch_token = launch_token.strip()
+            marker_fields = launch_ready_path.read_text(encoding="utf-8").split()
+            if len(marker_fields) < 3:
+                raise ValueError("invalid demo-ready marker")
+            marker_pid, marker_version, launch_token = marker_fields[:3]
             launch_ready = (
                 int(marker_pid) == os.getpid()
                 and marker_version.strip() == ENGINE_VERSION
@@ -3048,16 +3049,36 @@ async def index(request: web.Request):
     return web.FileResponse(path)
 
 
+async def close_open_websockets(app: web.Application) -> None:
+    sockets = list(app.get("open_websockets", ()))
+    if sockets:
+        await asyncio.gather(
+            *(
+                ws.close(
+                    code=aiohttp.WSCloseCode.GOING_AWAY,
+                    message=b"server shutdown",
+                )
+                for ws in sockets
+            ),
+            return_exceptions=True,
+        )
+
+
 async def media_ws(request: web.Request):
     engine: RealtimeMSEEngine = request.app["engine"]
-    ws = web.WebSocketResponse(max_msg_size=0)
+    ws = web.WebSocketResponse(max_msg_size=0, timeout=2.0)
     await ws.prepare(request)
-    client = engine.register_media_client()
-    await ws.send_str(json.dumps({"type": "mime", "mime": 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"'}))
-    await ws.send_str(json.dumps({"type": "log", "message": "[MEDIA] connected pipe encoder"}))
-    out_task = asyncio.create_task(client.out_q.get())
-    recv_task = asyncio.create_task(ws.receive())
+    open_websockets: set[web.WebSocketResponse] = request.app["open_websockets"]
+    open_websockets.add(ws)
+    client = None
+    out_task = None
+    recv_task = None
     try:
+        client = engine.register_media_client()
+        await ws.send_str(json.dumps({"type": "mime", "mime": 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"'}))
+        await ws.send_str(json.dumps({"type": "log", "message": "[MEDIA] connected pipe encoder"}))
+        out_task = asyncio.create_task(client.out_q.get())
+        recv_task = asyncio.create_task(ws.receive())
         while True:
             done, _ = await asyncio.wait(
                 {out_task, recv_task},
@@ -3084,28 +3105,64 @@ async def media_ws(request: web.Request):
     except Exception:
         pass
     finally:
-        for task in (out_task, recv_task):
+        tasks = [task for task in (out_task, recv_task) if task is not None]
+        for task in tasks:
             if not task.done():
                 task.cancel()
-        await asyncio.to_thread(engine.unregister_media_client, client)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if client is not None:
+            await asyncio.to_thread(engine.unregister_media_client, client)
+        open_websockets.discard(ws)
     return ws
 
 
 async def logs_ws(request: web.Request):
     engine: RealtimeMSEEngine = request.app["engine"]
-    ws = web.WebSocketResponse(max_msg_size=0)
+    ws = web.WebSocketResponse(max_msg_size=0, timeout=2.0)
     await ws.prepare(request)
+    open_websockets: set[web.WebSocketResponse] = request.app["open_websockets"]
+    open_websockets.add(ws)
     q: asyncio.Queue = asyncio.Queue(maxsize=256)
-    engine.register_log_client(q)
-    await ws.send_str(json.dumps({"type": "log", "message": "[LOG] connected"}))
+    registered = False
+    send_task = None
+    recv_task = None
     try:
+        engine.register_log_client(q)
+        registered = True
+        await ws.send_str(json.dumps({"type": "log", "message": "[LOG] connected"}))
+        send_task = asyncio.create_task(q.get())
+        recv_task = asyncio.create_task(ws.receive())
         while True:
-            item = await q.get()
-            await ws.send_str(json.dumps(item, ensure_ascii=False))
+            done, _ = await asyncio.wait(
+                {send_task, recv_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if recv_task in done:
+                message = recv_task.result()
+                if message.type in (
+                    aiohttp.WSMsgType.CLOSE,
+                    aiohttp.WSMsgType.CLOSED,
+                    aiohttp.WSMsgType.CLOSING,
+                    aiohttp.WSMsgType.ERROR,
+                ):
+                    break
+                recv_task = asyncio.create_task(ws.receive())
+            if send_task in done:
+                await ws.send_str(json.dumps(send_task.result(), ensure_ascii=False))
+                send_task = asyncio.create_task(q.get())
     except Exception:
         pass
     finally:
-        engine.unregister_log_client(q)
+        tasks = [task for task in (send_task, recv_task) if task is not None]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if registered:
+            engine.unregister_log_client(q)
+        open_websockets.discard(ws)
     return ws
 
 
@@ -3116,8 +3173,10 @@ async def mic_ws(request: web.Request):
     shared_live = request.app.get("dialog_session")
     owner_lock: asyncio.Lock = request.app["mic_owner_lock"]
     input_lock: asyncio.Lock = request.app["mic_input_lock"]
-    ws = web.WebSocketResponse(max_msg_size=0)
+    ws = web.WebSocketResponse(max_msg_size=0, timeout=2.0)
     await ws.prepare(request)
+    open_websockets: set[web.WebSocketResponse] = request.app["open_websockets"]
+    open_websockets.add(ws)
 
     instruction = "请用自然口语直接回答，默认一到三句；只有我明确要求时才详细展开。"
     live: Any = shared_live
@@ -3240,6 +3299,7 @@ async def mic_ws(request: web.Request):
                     request.app["active_mic_ws"] = None
         if live is not None and backend_name == "doubao":
             await live.close()
+        open_websockets.discard(ws)
     return ws
 
 
@@ -3310,6 +3370,7 @@ def build_app(args):
         client_max_size=1024**3,
         middlewares=[public_access_gate],
     )
+    app["open_websockets"] = set()
 
     async def on_startup(app_obj: web.Application):
         # Important: use the actual aiohttp running loop, not a stale loop.
@@ -3352,6 +3413,7 @@ def build_app(args):
             engine.shutdown()
 
     app.on_startup.append(on_startup)
+    app.on_shutdown.append(close_open_websockets)
     app.on_cleanup.append(on_cleanup)
 
     app.router.add_get("/", index)
@@ -3369,7 +3431,12 @@ def main():
     app = build_app(args)
     bind_host = os.getenv("SERVER_BIND_HOST", "127.0.0.1").strip() or "127.0.0.1"
     print(f"[SERVER] http://{bind_host}:{args.port}", flush=True)
-    web.run_app(app, host=bind_host, port=args.port)
+    web.run_app(
+        app,
+        host=bind_host,
+        port=args.port,
+        access_log_class=RedactedAccessLogger,
+    )
 
 
 if __name__ == "__main__":

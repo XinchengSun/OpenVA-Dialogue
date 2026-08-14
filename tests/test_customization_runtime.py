@@ -54,6 +54,62 @@ STATIC_ROOT = Path(__file__).resolve().parents[1] / "static"
 
 
 class CustomizationRuntimeTests(unittest.TestCase):
+    def test_backend_live_probe_is_cached_for_five_seconds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / "bridge.env"
+            env_path.write_text("OPENAI_SPEECH_BASE_URL=http://127.0.0.1:8003\n")
+            with customization._BACKEND_LIVE_CACHE_LOCK:
+                customization._BACKEND_LIVE_CACHE.clear()
+            with mock.patch.object(
+                customization,
+                "_probe_configured_backend_is_live",
+                return_value=True,
+            ) as probe:
+                self.assertTrue(
+                    customization._configured_backend_is_live(
+                        "qwen3_tts_1_7b_base", env_path
+                    )
+                )
+                self.assertTrue(
+                    customization._configured_backend_is_live(
+                        "qwen3_tts_1_7b_base", env_path
+                    )
+                )
+            probe.assert_called_once_with("qwen3_tts_1_7b_base", env_path)
+
+    def test_verify_health_accepts_ready_marker_provider_suffix(self):
+        health = {
+            "status": "ok",
+            "frame_ready": True,
+            "launch_ready": True,
+            "launch_token": "custom-abc qwen3_tts_1_7b_base",
+            "dialog_session": {"custom_cascade_ready": True},
+        }
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(health).encode()
+        with mock.patch.object(
+            CONTROLLER.urllib.request, "urlopen", return_value=response
+        ):
+            CONTROLLER.verify_health(7862, "custom-abc")
+
+    def test_verify_health_rejects_different_ready_marker_token(self):
+        health = {
+            "status": "ok",
+            "frame_ready": True,
+            "launch_ready": True,
+            "launch_token": "custom-other qwen3_tts_1_7b_base",
+            "dialog_session": {"custom_cascade_ready": True},
+        }
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(health).encode()
+        with mock.patch.object(
+            CONTROLLER.urllib.request, "urlopen", return_value=response
+        ), mock.patch.object(
+            CONTROLLER.time, "monotonic", side_effect=[0.0, 0.0, 16.0]
+        ), mock.patch.object(CONTROLLER.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "did not become healthy"):
+                CONTROLLER.verify_health(7862, "custom-abc")
+
     def test_product_pages_use_current_names_and_switch_flow(self):
         customize = (STATIC_ROOT / "customize.html").read_text(encoding="utf-8")
         realtime = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")

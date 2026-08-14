@@ -136,7 +136,7 @@
     </div>
     <div class="topActions">
       <div class="status" id="status">未连接</div>
-      <a class="customizeLink" href="/customize?new=1">更换数字人</a>
+      <a class="customizeLink" id="customizeLink" href="/customize?new=1">更换数字人</a>
     </div>
   </header>
   <div class="videoBox avatarStage" id="avatarStage">
@@ -173,6 +173,7 @@ const interruptBtn = document.getElementById('interruptBtn');
 const instructionEl = document.getElementById('instruction');
 const logEl = document.getElementById('log');
 const statusEl = document.getElementById('status');
+const customizeLink = document.getElementById('customizeLink');
 
 let mediaWs = null, logWs = null, micWs = null, currentMime = null;
 let audioCtx = null, processor = null, micStream = null, zeroGain = null;
@@ -1328,6 +1329,27 @@ function stopMic() {
   setStatus('mic stopped');
   log('mic stopped');
 }
+
+function closePageSocket(ws) {
+  if (!ws || ws.readyState >= WebSocket.CLOSING) return;
+  try { ws.close(1000, 'leaving conversation'); } catch (_) {}
+}
+
+function releaseRealtimePage() {
+  stopMic();
+  const oldMediaWs = mediaWs;
+  mediaWs = null;
+  mediaWsGeneration += 1;
+  closePageSocket(oldMediaWs);
+  const oldLogWs = logWs;
+  logWs = null;
+  logWsGeneration += 1;
+  closePageSocket(oldLogWs);
+  teardownMSE();
+}
+
+customizeLink.addEventListener('click', releaseRealtimePage);
+window.addEventListener('pagehide', releaseRealtimePage);
 
 startBtn.onclick = async () => {
   if (startInProgress) return;

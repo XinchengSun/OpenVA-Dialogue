@@ -9,10 +9,10 @@ import os
 import re
 import shlex
 import shutil
-import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 import uuid
 import wave
@@ -41,6 +41,10 @@ MAX_REFERENCE_SECONDS = 30.0
 REFERENCE_TARGET_DBFS = -29.0
 REFERENCE_MAX_PEAK_DBFS = -6.0
 MAX_REQUEST_BYTES = MAX_IMAGE_BYTES + MAX_MEDIA_BYTES + 1024 * 1024
+BACKEND_LIVE_CACHE_TTL_SEC = 5.0
+
+_BACKEND_LIVE_CACHE: dict[tuple[str, str], tuple[int, int, float, bool]] = {}
+_BACKEND_LIVE_CACHE_LOCK = threading.Lock()
 
 DEFAULT_TTS_SELECTION = {
     "tts_backend": "fish_s2_pro",
@@ -208,23 +212,36 @@ def _read_env_file(path: Path) -> dict[str, str]:
     return values
 
 
-def _loopback_port_is_open(host: str, port: int) -> bool:
+def _bridge_websocket_is_live(host: str, port: int) -> bool:
     if host not in {"127.0.0.1", "localhost", "::1"}:
         return False
     try:
-        with socket.create_connection((host, port), timeout=0.25):
-            return True
-    except OSError:
+        from websockets.exceptions import WebSocketException
+        from websockets.sync.client import connect
+    except ImportError:
+        return False
+    uri_host = f"[{host}]" if ":" in host else host
+    try:
+        with connect(
+            f"ws://{uri_host}:{port}",
+            open_timeout=0.5,
+            close_timeout=0.25,
+        ) as websocket:
+            websocket.send(json.dumps({"type": "health"}))
+            raw = websocket.recv(timeout=0.5)
+        health = json.loads(raw)
+        return health.get("type") == "health" and health.get("status") == "ok"
+    except (OSError, TimeoutError, UnicodeError, ValueError, WebSocketException):
         return False
 
 
-def _configured_backend_is_live(backend: str, env_path: Path) -> bool:
+def _probe_configured_backend_is_live(backend: str, env_path: Path) -> bool:
     try:
         values = _read_env_file(env_path)
         if backend == "voxcpm2":
             host = values.get("VOXCPM2_BRIDGE_HOST", "127.0.0.1")
             port = int(values.get("VOXCPM2_BRIDGE_PORT", "8770"))
-            return _loopback_port_is_open(host, port)
+            return _bridge_websocket_is_live(host, port)
         base_url = values.get("OPENAI_SPEECH_BASE_URL", "")
         parsed = urlparse(base_url)
         if parsed.scheme != "http" or parsed.hostname not in {
@@ -239,9 +256,37 @@ def _configured_backend_is_live(backend: str, env_path: Path) -> bool:
                 return False
         bridge_host = values.get("OPENAI_SPEECH_BRIDGE_HOST", "127.0.0.1")
         bridge_port = int(values.get("OPENAI_SPEECH_BRIDGE_PORT", "8771"))
-        return _loopback_port_is_open(bridge_host, bridge_port)
+        return _bridge_websocket_is_live(bridge_host, bridge_port)
     except (OSError, ValueError, UnicodeError):
         return False
+
+
+def _configured_backend_is_live(backend: str, env_path: Path) -> bool:
+    try:
+        stat_result = env_path.stat()
+        resolved_path = str(env_path.resolve())
+    except OSError:
+        return False
+    cache_key = (backend, resolved_path)
+    now = time.monotonic()
+    with _BACKEND_LIVE_CACHE_LOCK:
+        cached = _BACKEND_LIVE_CACHE.get(cache_key)
+        if (
+            cached is not None
+            and cached[0] == stat_result.st_mtime_ns
+            and cached[1] == stat_result.st_size
+            and cached[2] > now
+        ):
+            return cached[3]
+    live = _probe_configured_backend_is_live(backend, env_path)
+    with _BACKEND_LIVE_CACHE_LOCK:
+        _BACKEND_LIVE_CACHE[cache_key] = (
+            stat_result.st_mtime_ns,
+            stat_result.st_size,
+            now + BACKEND_LIVE_CACHE_TTL_SEC,
+            live,
+        )
+    return live
 
 
 def _openai_bridge_endpoint(env_path: Path) -> tuple[str, int] | None:
