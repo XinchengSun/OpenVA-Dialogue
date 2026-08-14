@@ -10,7 +10,9 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
+import re
 import time
 from collections import defaultdict
 from collections.abc import AsyncIterator, Callable
@@ -38,6 +40,56 @@ _QWEN_LANGUAGE_HINTS = {
     "en-US": "English",
     "ja-JP": "Japanese",
 }
+_QWEN_DEFAULT_HARD_MAX_NEW_TOKENS = 320
+_QWEN_MIN_HARD_MAX_NEW_TOKENS = 192
+_QWEN_MAX_HARD_MAX_NEW_TOKENS = 512
+_QWEN_CODEC_TOKENS_PER_SECOND = 12.0
+_QWEN_LATIN_WORD_RE = re.compile(r"[A-Za-z]+(?:['\u2019-][A-Za-z]+)*")
+_QWEN_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
+_QWEN_PAUSE_CHARS = frozenset("\uff0c\u3002\uff01\uff1f\uff1b\uff1a,.!?;:")
+
+
+def _is_cjk_or_kana(char: str) -> bool:
+    codepoint = ord(char)
+    return (
+        0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0x3040 <= codepoint <= 0x30FF
+        or 0xAC00 <= codepoint <= 0xD7AF
+    )
+
+
+def _qwen_generation_budget(text: str, *, hard_cap: int) -> int:
+    """Estimate a per-sentence 12 Hz codec budget without a fixed cutoff."""
+
+    latin_spans = list(_QWEN_LATIN_WORD_RE.finditer(text))
+    number_spans = list(_QWEN_NUMBER_RE.finditer(text))
+    spoken_digits = sum(
+        sum(char.isdigit() for char in match.group()) for match in number_spans
+    )
+    covered = {
+        index
+        for match in (*latin_spans, *number_spans)
+        for index in range(match.start(), match.end())
+    }
+    cjk_chars = sum(_is_cjk_or_kana(char) for char in text)
+    pause_chars = sum(char in _QWEN_PAUSE_CHARS for char in text)
+    other_chars = sum(
+        not char.isspace()
+        and index not in covered
+        and not _is_cjk_or_kana(char)
+        and char not in _QWEN_PAUSE_CHARS
+        for index, char in enumerate(text)
+    )
+    estimated = math.ceil(
+        24
+        + 3.25 * cjk_chars
+        + 5.0 * len(latin_spans)
+        + 3.0 * spoken_digits
+        + 3.0 * other_chars
+        + 2.0 * pause_chars
+    )
+    return min(hard_cap, max(48, estimated))
 
 
 def _json_object_env(name: str) -> dict[str, Any]:
@@ -105,6 +157,7 @@ class OpenAISpeechPCMBackend:
         self._client_factory = client_factory or httpx.AsyncClient
         self._client: httpx.AsyncClient | None = None
         self._active_responses: dict[str, set[httpx.Response]] = defaultdict(set)
+        self._qwen_hard_max_new_tokens = _QWEN_DEFAULT_HARD_MAX_NEW_TOKENS
 
         if not self._base_url:
             raise ValueError("OpenAI speech base_url must not be empty")
@@ -128,6 +181,25 @@ class OpenAISpeechPCMBackend:
             raise ValueError(f"unsupported reference language: {self._reference_language}")
         if self._target_language not in _QWEN_LANGUAGE_HINTS or self._target_language == "auto":
             raise ValueError(f"unsupported target language: {self._target_language}")
+        if self._backend == "qwen3_tts_1_7b_base":
+            raw_limit = self._extra_body.pop(
+                "max_new_tokens", _QWEN_DEFAULT_HARD_MAX_NEW_TOKENS
+            )
+            try:
+                hard_limit = int(raw_limit)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Qwen max_new_tokens must be an integer") from exc
+            if not (
+                _QWEN_MIN_HARD_MAX_NEW_TOKENS
+                <= hard_limit
+                <= _QWEN_MAX_HARD_MAX_NEW_TOKENS
+            ):
+                raise ValueError(
+                    "Qwen max_new_tokens hard cap must be between "
+                    f"{_QWEN_MIN_HARD_MAX_NEW_TOKENS} and "
+                    f"{_QWEN_MAX_HARD_MAX_NEW_TOKENS}"
+                )
+            self._qwen_hard_max_new_tokens = hard_limit
 
     @property
     def model(self) -> str:
@@ -211,6 +283,18 @@ class OpenAISpeechPCMBackend:
         if self._backend == "qwen3_tts_1_7b_base":
             payload["language"] = _QWEN_LANGUAGE_HINTS[self._target_language]
             payload["task_type"] = "Base"
+            payload["max_new_tokens"] = _qwen_generation_budget(
+                text,
+                hard_cap=self._qwen_hard_max_new_tokens,
+            )
+            if (
+                self._reference_language == "auto"
+                or self._reference_language != self._target_language
+            ):
+                # ICL continues from reference speech codes and can fail to emit
+                # EOS unless the reference language is known to match. Speaker-
+                # embedding mode is the safe path for auto/cross-language use.
+                payload["x_vector_only_mode"] = True
         return payload
 
     @staticmethod
@@ -241,11 +325,13 @@ class OpenAISpeechPCMBackend:
 
         started_at = time.perf_counter()
         first_pcm_at: float | None = None
+        pcm_bytes = 0
         pending = b""
+        payload = self._payload(clean_text)
         async with client.stream(
             "POST",
             self._url(self._endpoint),
-            json=self._payload(clean_text),
+            json=payload,
         ) as response:
             if response.is_error:
                 detail = await self._error_excerpt(response)
@@ -285,6 +371,7 @@ class OpenAISpeechPCMBackend:
                                 (first_pcm_at - started_at) * 1000.0,
                                 self._model,
                             )
+                        pcm_bytes += aligned
                         yield data[:aligned]
                     pending = data[aligned:]
             finally:
@@ -298,6 +385,23 @@ class OpenAISpeechPCMBackend:
             raise RuntimeError("speech API ended with an incomplete PCM16 sample")
         if first_pcm_at is None:
             raise RuntimeError("speech API completed without PCM audio")
+        duration_s = pcm_bytes / (2.0 * self.sample_rate)
+        token_budget = payload.get("max_new_tokens")
+        probable_length_stop = bool(
+            self._backend == "qwen3_tts_1_7b_base"
+            and isinstance(token_budget, int)
+            and duration_s >= token_budget / _QWEN_CODEC_TOKENS_PER_SECOND - 0.1
+        )
+        logger.log(
+            logging.WARNING if probable_length_stop else logging.INFO,
+            "[OPENAI SPEECH] completed chars=%d pcm_seconds=%.3f "
+            "max_new_tokens=%s x_vector_only_mode=%s probable_length_stop=%s",
+            len(clean_text),
+            duration_s,
+            token_budget,
+            payload.get("x_vector_only_mode"),
+            probable_length_stop,
+        )
 
     async def release_context(self, context_id: str) -> None:
         responses = list(self._active_responses.pop(context_id, ()))

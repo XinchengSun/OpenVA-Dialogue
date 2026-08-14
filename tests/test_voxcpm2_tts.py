@@ -519,6 +519,16 @@ class VoxCPM2BridgeTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipIf(VoxCPM2LocalTTSService is None, "Pipecat is not installed")
 class VoxCPM2PipecatAdapterTests(unittest.IsolatedAsyncioTestCase):
+    def test_stop_frame_timeout_allows_a_queued_sentence_to_start(self):
+        with patch.dict(
+            os.environ,
+            {"PIPECAT_TTS_STOP_FRAME_TIMEOUT_SEC": "10.0"},
+            clear=True,
+        ):
+            service = LocalPCMTTSService(connector=lambda uri: None)
+
+        self.assertEqual(service._stop_frame_timeout_s, 10.0)
+
     def test_generic_fish_config_takes_precedence_and_reports_provider(self):
         with patch.dict(
             os.environ,

@@ -8,7 +8,10 @@ from pathlib import Path
 
 import httpx
 
-from voice_service.openai_speech_server import OpenAISpeechPCMBackend
+from voice_service.openai_speech_server import (
+    OpenAISpeechPCMBackend,
+    _qwen_generation_budget,
+)
 
 
 class _ChunkStream(httpx.AsyncByteStream):
@@ -204,6 +207,158 @@ class OpenAISpeechPCMBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["language"], "Chinese")
         self.assertEqual(payload["task_type"], "Base")
         self.assertEqual(payload["references"][0]["text"], "准确的参考音频文本。")
+
+    async def test_qwen_cross_language_uses_xvector_and_dynamic_budget(self):
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.method == "GET":
+                return httpx.Response(200)
+            return httpx.Response(
+                200,
+                headers={"content-type": "audio/pcm", "x-sample-rate": "24000"},
+                stream=_ChunkStream([b"\x01\x00"]),
+            )
+
+        backend, _client = self._backend(
+            handler,
+            backend="qwen3_tts_1_7b_base",
+            sample_rate=24_000,
+            reference_language="en-US",
+            target_language="zh-CN",
+            extra_body={
+                "max_new_tokens": 320,
+                "x_vector_only_mode": False,
+            },
+        )
+        text = "\u6c49" * 48 + "\u3002"
+        await backend.start()
+        chunks = [chunk async for chunk in backend.generate_pcm16(text, "ctx-xvec")]
+        await backend.stop()
+
+        self.assertEqual(chunks, [b"\x01\x00"])
+        payload = json.loads(requests[-1].content)
+        self.assertIs(payload["x_vector_only_mode"], True)
+        self.assertGreater(payload["max_new_tokens"], 96)
+        self.assertLessEqual(payload["max_new_tokens"], 320)
+
+    async def test_qwen_same_language_keeps_icl_mode(self):
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.method == "GET":
+                return httpx.Response(200)
+            return httpx.Response(
+                200,
+                headers={"content-type": "audio/pcm", "x-sample-rate": "24000"},
+                stream=_ChunkStream([b"\x01\x00"]),
+            )
+
+        backend, _client = self._backend(
+            handler,
+            backend="qwen3_tts_1_7b_base",
+            sample_rate=24_000,
+            reference_language="zh-CN",
+            target_language="zh-CN",
+            extra_body={"max_new_tokens": 320},
+        )
+        await backend.start()
+        chunks = [
+            chunk
+            async for chunk in backend.generate_pcm16("\u4f60\u597d\u3002", "ctx-icl")
+        ]
+        await backend.stop()
+
+        self.assertEqual(chunks, [b"\x01\x00"])
+        payload = json.loads(requests[-1].content)
+        self.assertNotIn("x_vector_only_mode", payload)
+
+    async def test_qwen_auto_reference_language_prefers_xvector_mode(self):
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.method == "GET":
+                return httpx.Response(200)
+            return httpx.Response(
+                200,
+                headers={"content-type": "audio/pcm", "x-sample-rate": "24000"},
+                stream=_ChunkStream([b"\x01\x00"]),
+            )
+
+        backend, _client = self._backend(
+            handler,
+            backend="qwen3_tts_1_7b_base",
+            sample_rate=24_000,
+            reference_language="auto",
+            target_language="zh-CN",
+            extra_body={"max_new_tokens": 320},
+        )
+        await backend.start()
+        chunks = [
+            chunk
+            async for chunk in backend.generate_pcm16("\u4f60\u597d\u3002", "ctx-auto")
+        ]
+        await backend.stop()
+
+        self.assertEqual(chunks, [b"\x01\x00"])
+        self.assertIs(json.loads(requests[-1].content)["x_vector_only_mode"], True)
+
+    def test_qwen_generation_budget_scales_and_respects_hard_cap(self):
+        short = _qwen_generation_budget("\u4f60\u597d\u3002", hard_cap=320)
+        medium = _qwen_generation_budget("\u6c49" * 48 + "\u3002", hard_cap=320)
+        long_number = _qwen_generation_budget("13800138000", hard_cap=320)
+        capped = _qwen_generation_budget("\u6c49" * 200 + "\u3002", hard_cap=320)
+
+        self.assertGreaterEqual(short, 48)
+        self.assertLess(short, 96)
+        self.assertGreater(medium, 96)
+        self.assertLess(medium, 320)
+        self.assertGreater(long_number, 48)
+        self.assertEqual(capped, 320)
+
+    def test_qwen_rejects_an_unsafe_static_hard_cap(self):
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200)
+
+        with self.assertRaisesRegex(ValueError, "hard cap must be between"):
+            self._backend(
+                handler,
+                backend="qwen3_tts_1_7b_base",
+                extra_body={"max_new_tokens": 96},
+            )
+
+    async def test_qwen_logs_when_pcm_duration_reaches_its_dynamic_budget(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET":
+                return httpx.Response(200)
+            return httpx.Response(
+                200,
+                headers={"content-type": "audio/pcm", "x-sample-rate": "24"},
+                stream=_ChunkStream([b"\x01\x00" * 96]),
+            )
+
+        backend, _client = self._backend(
+            handler,
+            backend="qwen3_tts_1_7b_base",
+            sample_rate=24,
+            reference_language="en-US",
+            target_language="zh-CN",
+            extra_body={"max_new_tokens": 192},
+        )
+        await backend.start()
+        with self.assertLogs(
+            "voice_service.openai_speech_server", level="WARNING"
+        ) as captured:
+            chunks = [
+                chunk async for chunk in backend.generate_pcm16("Hi.", "ctx-length")
+            ]
+        await backend.stop()
+
+        self.assertEqual(chunks, [b"\x01\x00" * 96])
+        self.assertIn("probable_length_stop=True", "\n".join(captured.output))
 
     async def test_fish_payload_does_not_gain_an_unsupported_language_field(self):
         requests: list[httpx.Request] = []

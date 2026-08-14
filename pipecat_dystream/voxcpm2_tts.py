@@ -63,6 +63,9 @@ class LocalPCMTTSService(TTSService):
             push_start_frame=True,
             push_stop_frames=True,
             reuse_context_id_within_turn=True,
+            stop_frame_timeout_s=float(
+                os.getenv("PIPECAT_TTS_STOP_FRAME_TIMEOUT_SEC", "10.0")
+            ),
             settings=TTSSettings(
                 model=self._model,
                 voice=self._voice,
