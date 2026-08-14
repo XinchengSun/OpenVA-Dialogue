@@ -190,6 +190,9 @@ load_dialog_config() {
   PORT_VALUE="${PORT:-7860}"
   PYTHON_BIN="${PIPECAT_PYTHON:-$PYTHON_BIN}"
   EXPECTED_ENGINE_VERSION="${EXPECTED_ENGINE_VERSION:-FLASHAV2AV_0.1.0}"
+  TTS_LIFECYCLE="${PIPECAT_TTS_LIFECYCLE:-managed}"
+  [[ "$TTS_LIFECYCLE" == "managed" || "$TTS_LIFECYCLE" == "external" ]] \
+    || die "PIPECAT_TTS_LIFECYCLE must be managed or external"
   if [[ "$DIALOG_MODE" == "custom_cascade" ]]; then
     if [[ -n "${PIPECAT_TTS_PROVIDER:-}" ]]; then
       TTS_PROVIDER="$PIPECAT_TTS_PROVIDER"
@@ -198,6 +201,7 @@ load_dialog_config() {
     else
       TTS_PROVIDER="fish_s2pro"
     fi
+    [[ "$TTS_PROVIDER" == "fish_s2_pro" ]] && TTS_PROVIDER="fish_s2pro"
     case "$TTS_PROVIDER" in
       fish_s2pro)
         TTS_BRIDGE_ENV="${PIPECAT_TTS_BRIDGE_ENV_FILE:-}"
@@ -209,11 +213,27 @@ load_dialog_config() {
         TTS_UPSTREAM_ENV=""
         EXPECTED_TTS_MODEL="${PIPECAT_TTS_MODEL:-VoxCPM2}"
         ;;
-      *) die "PIPECAT_TTS_PROVIDER must be fish_s2pro or voxcpm2" ;;
+      qwen3_tts_1_7b_base)
+        TTS_BRIDGE_ENV="${PIPECAT_TTS_BRIDGE_ENV_FILE:-}"
+        TTS_UPSTREAM_ENV=""
+        EXPECTED_TTS_MODEL="${PIPECAT_TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-Base}"
+        ;;
+      cosyvoice3_0_5b)
+        TTS_BRIDGE_ENV="${PIPECAT_TTS_BRIDGE_ENV_FILE:-}"
+        TTS_UPSTREAM_ENV=""
+        EXPECTED_TTS_MODEL="${PIPECAT_TTS_MODEL:-FunAudioLLM/Fun-CosyVoice3-0.5B-2512}"
+        ;;
+      *) die "unsupported PIPECAT_TTS_PROVIDER: $TTS_PROVIDER" ;;
     esac
   else
     TTS_PROVIDER="none"
   fi
+}
+
+provider_uses_external_engine() {
+  [[ "$TTS_LIFECYCLE" == "external" \
+      || "$TTS_PROVIDER" == "qwen3_tts_1_7b_base" \
+      || "$TTS_PROVIDER" == "cosyvoice3_0_5b" ]]
 }
 
 bridge_env_file() {
@@ -768,17 +788,22 @@ load_dialog_config
 
 case "$ACTION" in
   start)
-    start_demo
+    if provider_uses_external_engine; then start_mse; else start_demo; fi
     ;;
   status)
-    show_status
+    if provider_uses_external_engine; then show_mse_status; else show_status; fi
     ;;
   stop)
-    stop_demo
+    if provider_uses_external_engine; then stop_mse; else stop_demo; fi
     ;;
   restart)
-    stop_demo
-    start_demo
+    if provider_uses_external_engine; then
+      stop_mse
+      start_mse
+    else
+      stop_demo
+      start_demo
+    fi
     ;;
   start-mse)
     start_mse

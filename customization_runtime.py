@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -17,6 +18,8 @@ import uuid
 import wave
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+from urllib.request import urlopen
 
 from aiohttp import web
 from PIL import Image, ImageOps
@@ -68,11 +71,14 @@ TTS_BACKEND_SPECS = (
     },
 )
 TTS_BACKEND_IDS = {item["id"] for item in TTS_BACKEND_SPECS}
+TRANSCRIPT_REQUIRED_BACKENDS = {
+    "fish_s2_pro",
+    "qwen3_tts_1_7b_base",
+    "cosyvoice3_0_5b",
+}
 TTS_BACKEND_ENV_KEYS = {
     "fish_s2_pro": (
         "CUSTOMIZATION_FISH_S2_PRO_ENV_FILE",
-        "CUSTOMIZATION_TTS_ENV_FILE",
-        "PIPECAT_TTS_BRIDGE_ENV_FILE",
     ),
     "qwen3_tts_1_7b_base": (
         "CUSTOMIZATION_QWEN3_TTS_1_7B_ENV_FILE",
@@ -83,6 +89,12 @@ TTS_BACKEND_ENV_KEYS = {
         "CUSTOMIZATION_COSYVOICE3_TTS_ENV_FILE",
     ),
     "voxcpm2": ("CUSTOMIZATION_VOXCPM2_ENV_FILE", "VOXCPM2_ENV_FILE"),
+}
+TTS_BACKEND_BRIDGE_INSTANCE_KEYS = {
+    "fish_s2_pro": "CUSTOMIZATION_FISH_S2_PRO_BRIDGE_INSTANCE",
+    "qwen3_tts_1_7b_base": "CUSTOMIZATION_QWEN3_TTS_1_7B_BRIDGE_INSTANCE",
+    "cosyvoice3_0_5b": "CUSTOMIZATION_COSYVOICE3_BRIDGE_INSTANCE",
+    "voxcpm2": "CUSTOMIZATION_VOXCPM2_BRIDGE_INSTANCE",
 }
 TTS_LANGUAGE_OPTIONS = {
     "reference": (
@@ -162,6 +174,86 @@ def _explicit_backend_env(backend: str) -> str:
     return ""
 
 
+def _configured_ready_backends() -> set[str]:
+    ready: set[str] = set()
+    for item in os.getenv("CUSTOMIZATION_TTS_READY_BACKENDS", "").split(","):
+        value = item.strip().lower()
+        if not value:
+            continue
+        value = TTS_BACKEND_ALIASES.get(value, value)
+        if value in TTS_BACKEND_IDS:
+            ready.add(value)
+    return ready
+
+
+def _bridge_instance_for_backend(backend: str, default: str) -> str:
+    key = TTS_BACKEND_BRIDGE_INSTANCE_KEYS[backend]
+    value = os.getenv(key, "").strip() or default
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise RuntimeError(f"{key} must contain only letters, digits, _ or -")
+    return value
+
+
+def _read_env_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, raw = stripped.partition("=")
+        if not re.fullmatch(r"[A-Z0-9_]+", key):
+            continue
+        parsed = shlex.split(raw, comments=False)
+        values[key] = parsed[0] if parsed else ""
+    return values
+
+
+def _loopback_port_is_open(host: str, port: int) -> bool:
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+def _configured_backend_is_live(backend: str, env_path: Path) -> bool:
+    try:
+        values = _read_env_file(env_path)
+        if backend == "voxcpm2":
+            host = values.get("VOXCPM2_BRIDGE_HOST", "127.0.0.1")
+            port = int(values.get("VOXCPM2_BRIDGE_PORT", "8770"))
+            return _loopback_port_is_open(host, port)
+        base_url = values.get("OPENAI_SPEECH_BASE_URL", "")
+        parsed = urlparse(base_url)
+        if parsed.scheme != "http" or parsed.hostname not in {
+            "127.0.0.1", "localhost", "::1",
+        }:
+            return False
+        health_path = values.get("OPENAI_SPEECH_HEALTH_PATH", "/health")
+        if not health_path.startswith("/"):
+            health_path = f"/{health_path}"
+        with urlopen(f"{base_url.rstrip('/')}{health_path}", timeout=0.5) as response:
+            if not 200 <= response.status < 300:
+                return False
+        bridge_host = values.get("OPENAI_SPEECH_BRIDGE_HOST", "127.0.0.1")
+        bridge_port = int(values.get("OPENAI_SPEECH_BRIDGE_PORT", "8771"))
+        return _loopback_port_is_open(bridge_host, bridge_port)
+    except (OSError, ValueError, UnicodeError):
+        return False
+
+
+def _openai_bridge_endpoint(env_path: Path) -> tuple[str, int] | None:
+    try:
+        values = _read_env_file(env_path)
+        host = values.get("OPENAI_SPEECH_BRIDGE_HOST", "127.0.0.1")
+        port = int(values.get("OPENAI_SPEECH_BRIDGE_PORT", "8771"))
+        return host, port
+    except (OSError, ValueError, UnicodeError):
+        return None
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -238,7 +330,7 @@ def _runtime_paths() -> dict[str, Any]:
         or DEFAULT_TTS_SELECTION["tts_backend"]
     )
     provider = TTS_BACKEND_ALIASES.get(provider, provider)
-    if provider not in {"fish_s2_pro", "voxcpm2"}:
+    if provider not in TTS_BACKEND_IDS:
         provider = "unsupported"
     configured_main = os.getenv("CUSTOMIZATION_MAIN_ENV_FILE", "").strip()
     if configured_main:
@@ -246,18 +338,15 @@ def _runtime_paths() -> dict[str, Any]:
     else:
         main_env = (REPO_ROOT / ".env").resolve()
 
-    configured_tts = os.getenv("CUSTOMIZATION_TTS_ENV_FILE", "").strip()
-    if not configured_tts and provider == "fish_s2_pro":
-        configured_tts = (
-            os.getenv("CUSTOMIZATION_FISH_S2_PRO_ENV_FILE", "").strip()
-            or os.getenv("PIPECAT_TTS_BRIDGE_ENV_FILE", "").strip()
-        )
+    configured_tts = (
+        _explicit_backend_env(provider) if provider in TTS_BACKEND_IDS else ""
+    )
+    if not configured_tts:
+        configured_tts = os.getenv("CUSTOMIZATION_TTS_ENV_FILE", "").strip()
+    if not configured_tts:
+        configured_tts = os.getenv("PIPECAT_TTS_BRIDGE_ENV_FILE", "").strip()
     if not configured_tts and provider == "voxcpm2":
-        configured_tts = (
-            os.getenv("CUSTOMIZATION_VOXCPM2_ENV_FILE", "").strip()
-            or os.getenv("PIPECAT_TTS_BRIDGE_ENV_FILE", "").strip()
-            or os.getenv("VOXCPM2_ENV_FILE", "").strip()
-        )
+        configured_tts = os.getenv("VOXCPM2_ENV_FILE", "").strip()
     tts_env = Path(configured_tts).expanduser().resolve() if configured_tts else None
     if tts_env is None and provider == "fish_s2_pro":
         port = "8773"
@@ -278,7 +367,7 @@ def _runtime_paths() -> dict[str, Any]:
             if matches:
                 tts_env = matches[-1].resolve()
     if tts_env is None:
-        fallback = ".env.openai_speech" if provider == "fish_s2_pro" else ".env.voxcpm2"
+        fallback = ".env.voxcpm2" if provider == "voxcpm2" else ".env.openai_speech"
         tts_env = (REPO_ROOT / "voice_service" / fallback).resolve()
 
     configured_root = os.getenv("CUSTOMIZATION_ROOT", "").strip()
@@ -295,6 +384,28 @@ def _runtime_paths() -> dict[str, Any]:
         raise RuntimeError(
             "CUSTOMIZATION_TTS_BRIDGE_INSTANCE must contain only letters, digits, _ or -"
         )
+    backend_envs: dict[str, Path | None] = {}
+    backend_bridge_instances: dict[str, str] = {}
+    default_instances = {
+        "fish_s2_pro": bridge_instance,
+        "qwen3_tts_1_7b_base": "qwen3",
+        "cosyvoice3_0_5b": "cosyvoice3",
+        "voxcpm2": "voxcpm2",
+    }
+    for backend in TTS_BACKEND_IDS:
+        configured_backend_env = _explicit_backend_env(backend)
+        backend_env = (
+            Path(configured_backend_env).expanduser().resolve()
+            if configured_backend_env
+            else None
+        )
+        if backend == provider and backend_env is None:
+            backend_env = tts_env
+        backend_envs[backend] = backend_env
+        backend_bridge_instances[backend] = _bridge_instance_for_backend(
+            backend,
+            default_instances[backend],
+        )
     return {
         "tts_provider": provider,
         "legacy_tts_provider": legacy_provider or (
@@ -304,6 +415,8 @@ def _runtime_paths() -> dict[str, Any]:
         "main_env": main_env,
         "tts_env": tts_env,
         "bridge_instance": bridge_instance,
+        "backend_envs": backend_envs,
+        "backend_bridge_instances": backend_bridge_instances,
         "run_demo": (REPO_ROOT / "scripts" / "run_demo.sh").resolve(),
         "bridge_manager": (
             REPO_ROOT / "voice_service" / "run_openai_speech_bridge.sh"
@@ -322,11 +435,11 @@ def _runtime_missing(paths: dict[str, Any]) -> list[str]:
         )
         if not paths[key].is_file()
     ]
-    if paths["tts_provider"] == "fish_s2_pro":
+    if paths["tts_provider"] in TRANSCRIPT_REQUIRED_BACKENDS:
         for key in ("bridge_manager", "transcriber"):
             if not paths[key].is_file():
                 missing.append(key)
-    if paths["tts_provider"] not in {"fish_s2_pro", "voxcpm2"}:
+    if paths["tts_provider"] not in TTS_BACKEND_IDS:
         missing.append("tts_provider")
     return missing
 
@@ -334,12 +447,58 @@ def _runtime_missing(paths: dict[str, Any]) -> list[str]:
 def _tts_options(paths: dict[str, Any]) -> dict[str, Any]:
     current_backend = paths["tts_provider"]
     current_ready = not _runtime_missing(paths)
+    configured_ready = _configured_ready_backends()
+    openai_backends = {
+        "fish_s2_pro", "qwen3_tts_1_7b_base", "cosyvoice3_0_5b",
+    }
+    instance_counts: dict[str, int] = {}
+    endpoint_counts: dict[tuple[str, int], int] = {}
+    for backend in openai_backends:
+        env_path = paths["backend_envs"].get(backend)
+        if env_path is None or not env_path.is_file():
+            continue
+        instance = paths["backend_bridge_instances"][backend]
+        instance_counts[instance] = instance_counts.get(instance, 0) + 1
+        endpoint = _openai_bridge_endpoint(env_path)
+        if endpoint is not None:
+            endpoint_counts[endpoint] = endpoint_counts.get(endpoint, 0) + 1
     backends: list[dict[str, Any]] = []
     for spec in TTS_BACKEND_SPECS:
         backend = spec["id"]
-        configured = bool(_explicit_backend_env(backend))
-        ready = backend == current_backend and current_ready
-        configured = configured or (backend == current_backend and paths["tts_env"].is_file())
+        backend_env = paths["backend_envs"].get(backend)
+        configured = bool(backend_env and backend_env.is_file())
+        operator_ready = backend in configured_ready and configured
+        live_health = bool(
+            configured
+            and backend_env is not None
+            and _configured_backend_is_live(backend, backend_env)
+        )
+        instance_conflict = bool(
+            backend in openai_backends
+            and configured
+            and (
+                instance_counts.get(paths["backend_bridge_instances"][backend], 0) > 1
+                or (
+                    backend_env is not None
+                    and (endpoint := _openai_bridge_endpoint(backend_env)) is not None
+                    and endpoint_counts.get(endpoint, 0) > 1
+                )
+            )
+            and backend != current_backend
+        )
+        ready = (
+            backend == current_backend and current_ready and live_health
+        ) or (operator_ready and live_health and not instance_conflict)
+        disabled_reason = spec["disabled_reason"]
+        if configured:
+            disabled_reason = (
+                "bridge_instance_conflict"
+                if instance_conflict
+                else "service_not_ready"
+                if (backend == current_backend or backend in configured_ready)
+                and not live_health
+                else "installed_not_started"
+            )
         backends.append({
             "id": backend,
             "label": spec["label"],
@@ -347,8 +506,9 @@ def _tts_options(paths: dict[str, Any]) -> dict[str, Any]:
             "configured": configured,
             "ready": ready,
             "selectable": ready,
-            "disabled_reason": None if ready else spec["disabled_reason"],
+            "disabled_reason": None if ready else disabled_reason,
             "supports_voice_clone": True,
+            "transcript_required": backend in TRANSCRIPT_REQUIRED_BACKENDS,
             "reference_languages": [
                 dict(item) for item in TTS_LANGUAGE_OPTIONS["reference"]
             ],
@@ -374,6 +534,13 @@ def _backend_status(paths: dict[str, Any], backend: str) -> dict[str, Any]:
         if item["id"] == backend:
             return item
     raise CustomizationInputError(f"unknown TTS backend: {backend}")
+
+
+def _backend_env_path(paths: dict[str, Any], backend: str) -> Path:
+    value = paths["backend_envs"].get(backend)
+    if value is None or not value.is_file():
+        raise CustomizationInputError(f"TTS backend environment is missing: {backend}")
+    return value
 
 
 def _probe_media(path: Path) -> dict[str, Any]:
@@ -661,7 +828,7 @@ def _prepare_job(
     os.chmod(voice_path, 0o600)
     transcript = transcript.strip()
     transcript_source = "user" if transcript else "none"
-    if not transcript and selection["tts_backend"] == "fish_s2_pro":
+    if not transcript and selection["tts_backend"] in TRANSCRIPT_REQUIRED_BACKENDS:
         transcript = _transcribe_reference(
             voice_path, selection["reference_language"]
         )
@@ -840,9 +1007,9 @@ def register_customization_routes(app: web.Application) -> None:
             "available": not missing and not runtime_root_error,
             "missing_components": missing,
             "tts_provider": paths["legacy_tts_provider"],
-            "transcript_required": paths["tts_provider"] == "fish_s2_pro",
+            "transcript_required": paths["tts_provider"] in TRANSCRIPT_REQUIRED_BACKENDS,
             "active": active,
-            "tts_options": _tts_options(paths),
+            "tts_options": await asyncio.to_thread(_tts_options, paths),
             "requirements": {
                 "image": "JPG/PNG/WebP，至少 512×512，单人正脸且清晰",
                 "voice": "WAV/MP3/M4A/FLAC/OGG 或含音轨的视频，至少 3 秒，建议 5–15 秒",
@@ -923,7 +1090,11 @@ def register_customization_routes(app: web.Application) -> None:
             if image_source is None or media_source is None:
                 raise CustomizationInputError("必须同时上传一张照片和一段音频或视频")
             selection = _normalize_tts_selection(text_fields)
-            backend = _backend_status(paths, selection["tts_backend"])
+            options = await asyncio.to_thread(_tts_options, paths)
+            backend = next(
+                item for item in options["backends"]
+                if item["id"] == selection["tts_backend"]
+            )
             if not backend["selectable"]:
                 raise CustomizationInputError(
                     f"selected TTS backend is unavailable: {backend['disabled_reason']}"
@@ -1040,7 +1211,11 @@ def register_customization_routes(app: web.Application) -> None:
             })
         except CustomizationInputError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
-        backend = _backend_status(paths, selection["tts_backend"])
+        options = await asyncio.to_thread(_tts_options, paths)
+        backend = next(
+            item for item in options["backends"]
+            if item["id"] == selection["tts_backend"]
+        )
         if not backend["selectable"]:
             return web.json_response({
                 **current,
@@ -1049,10 +1224,17 @@ def register_customization_routes(app: web.Application) -> None:
                 "message": "selected TTS backend is unavailable",
                 "disabled_reason": backend["disabled_reason"],
             }, status=409)
+        try:
+            selected_tts_env = _backend_env_path(paths, selection["tts_backend"])
+        except CustomizationInputError as exc:
+            raise web.HTTPConflict(text=str(exc)) from exc
+        selected_bridge_instance = paths["backend_bridge_instances"][
+            selection["tts_backend"]
+        ]
         transcript = overrides.get("transcript", _manifest_transcript(manifest)).strip()
-        if selection["tts_backend"] == "fish_s2_pro" and not transcript:
+        if selection["tts_backend"] in TRANSCRIPT_REQUIRED_BACKENDS and not transcript:
             raise web.HTTPBadRequest(
-                text="Fish Speech S2 Pro requires an exact reference transcript"
+                text="selected TTS backend requires an exact reference transcript"
             )
         if "transcript" in overrides:
             transcript_path = job_dir / "assets" / "voice_reference.txt"
@@ -1078,9 +1260,14 @@ def register_customization_routes(app: web.Application) -> None:
             "--runtime-root", str(paths["runtime_root"]),
             "--repo-root", str(REPO_ROOT),
             "--main-env", str(paths["main_env"]),
-            "--tts-provider", str(paths["tts_provider"]),
-            "--tts-env", str(paths["tts_env"]),
-            "--bridge-instance", str(paths["bridge_instance"]),
+            "--tts-provider", selection["tts_backend"],
+            "--tts-env", str(selected_tts_env),
+            "--bridge-instance", selected_bridge_instance,
+            "--previous-tts-provider", paths["tts_provider"],
+            "--previous-tts-env", str(paths["tts_env"]),
+            "--previous-bridge-instance", paths["backend_bridge_instances"][
+                paths["tts_provider"]
+            ],
             "--port", str(_current_server_port()),
         ]
         try:

@@ -193,6 +193,7 @@ class OpenAISpeechPCMBackendTests(unittest.IsolatedAsyncioTestCase):
             handler,
             backend="qwen3_tts_1_7b_base",
             target_language="zh-CN",
+            extra_body={"task_type": "CustomVoice"},
         )
         await backend.start()
         chunks = [chunk async for chunk in backend.generate_pcm16("测试。", "ctx-qwen")]
@@ -201,6 +202,7 @@ class OpenAISpeechPCMBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chunks, [b"\x01\x00"])
         payload = json.loads(requests[-1].content)
         self.assertEqual(payload["language"], "Chinese")
+        self.assertEqual(payload["task_type"], "Base")
         self.assertEqual(payload["references"][0]["text"], "准确的参考音频文本。")
 
     async def test_fish_payload_does_not_gain_an_unsupported_language_field(self):

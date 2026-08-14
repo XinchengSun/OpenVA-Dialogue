@@ -210,6 +210,7 @@ class OpenAISpeechPCMBackend:
             payload["stream_format"] = "audio"
         if self._backend == "qwen3_tts_1_7b_base":
             payload["language"] = _QWEN_LANGUAGE_HINTS[self._target_language]
+            payload["task_type"] = "Base"
         return payload
 
     @staticmethod

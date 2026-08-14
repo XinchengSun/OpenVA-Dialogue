@@ -19,6 +19,110 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 
+BACKEND_ENV_KEYS = {
+    "fish_s2_pro": "CUSTOMIZATION_FISH_S2_PRO_ENV_FILE",
+    "qwen3_tts_1_7b_base": "CUSTOMIZATION_QWEN3_TTS_1_7B_ENV_FILE",
+    "cosyvoice3_0_5b": "CUSTOMIZATION_COSYVOICE3_ENV_FILE",
+    "voxcpm2": "CUSTOMIZATION_VOXCPM2_ENV_FILE",
+}
+BACKEND_INSTANCE_KEYS = {
+    "fish_s2_pro": "CUSTOMIZATION_FISH_S2_PRO_BRIDGE_INSTANCE",
+    "qwen3_tts_1_7b_base": "CUSTOMIZATION_QWEN3_TTS_1_7B_BRIDGE_INSTANCE",
+    "cosyvoice3_0_5b": "CUSTOMIZATION_COSYVOICE3_BRIDGE_INSTANCE",
+    "voxcpm2": "CUSTOMIZATION_VOXCPM2_BRIDGE_INSTANCE",
+}
+BACKEND_ALIASES = {
+    "fish": "fish_s2_pro",
+    "fish_s2pro": "fish_s2_pro",
+}
+
+
+def canonical_backend(value: str) -> str:
+    normalized = value.strip().lower()
+    return BACKEND_ALIASES.get(normalized, normalized)
+
+
+def backend_bridge_uri(bridge_env: Path, backend: str) -> str:
+    if backend == "voxcpm2":
+        host = read_env_value(bridge_env, "VOXCPM2_BRIDGE_HOST") or "127.0.0.1"
+        port = read_env_value(bridge_env, "VOXCPM2_BRIDGE_PORT") or "8770"
+        if host not in {"127.0.0.1", "localhost", "::1"}:
+            raise RuntimeError("VoxCPM2 bridge must bind to localhost")
+        if not port.isdigit() or not 1 <= int(port) <= 65535:
+            raise RuntimeError("VoxCPM2 bridge port is invalid")
+        uri_host = f"[{host}]" if ":" in host else host
+        return f"ws://{uri_host}:{port}"
+    return openai_bridge_uri(bridge_env)
+
+
+def backend_selection_env_updates(
+    args: argparse.Namespace,
+    backend: str,
+    bridge_env: Path,
+    main_env: Path | None = None,
+) -> dict[str, str]:
+    previous_backend = canonical_backend(args.previous_tts_provider or backend)
+    ready_raw = (
+        read_env_value(main_env, "CUSTOMIZATION_TTS_READY_BACKENDS")
+        if main_env is not None and main_env.is_file()
+        else os.environ.get("CUSTOMIZATION_TTS_READY_BACKENDS", "")
+    ) or os.environ.get("CUSTOMIZATION_TTS_READY_BACKENDS", "")
+    ready_backends = {
+        canonical_backend(item)
+        for item in ready_raw.split(",")
+        if canonical_backend(item) in BACKEND_ENV_KEYS
+    }
+    ready_backends.update({previous_backend, backend})
+    updates = {
+        "PIPECAT_TTS_LIFECYCLE": "external",
+        "PIPECAT_TTS_PROVIDER": (
+            "fish_s2pro" if backend == "fish_s2_pro" else backend
+        ),
+        "PIPECAT_TTS_BACKEND": backend,
+        "PIPECAT_TTS_BRIDGE_ENV_FILE": str(bridge_env),
+        "CUSTOMIZATION_TTS_READY_BACKENDS": ",".join(sorted(ready_backends)),
+        BACKEND_ENV_KEYS[backend]: str(bridge_env),
+        BACKEND_INSTANCE_KEYS[backend]: args.bridge_instance,
+    }
+    if previous_backend in BACKEND_ENV_KEYS and args.previous_tts_env is not None:
+        updates.setdefault(
+            BACKEND_ENV_KEYS[previous_backend], str(args.previous_tts_env.resolve())
+        )
+        updates.setdefault(
+            BACKEND_INSTANCE_KEYS[previous_backend],
+            args.previous_bridge_instance
+            or ("voxcpm2" if previous_backend == "voxcpm2" else "realtime"),
+        )
+    return updates
+
+
+def assert_backend_switch_is_isolated(
+    selected_backend: str,
+    selected_env: Path,
+    selected_instance: str,
+    previous_backend: str,
+    previous_env: Path,
+    previous_instance: str,
+) -> None:
+    if selected_backend == previous_backend:
+        return
+    if not previous_env.is_file():
+        raise RuntimeError("previous TTS environment is unavailable for safe rollback")
+    openai_backends = {
+        "fish_s2_pro", "qwen3_tts_1_7b_base", "cosyvoice3_0_5b",
+    }
+    if (
+        selected_backend in openai_backends
+        and previous_backend in openai_backends
+        and selected_instance == previous_instance
+    ):
+        raise RuntimeError("selected TTS bridge instance collides with the active backend")
+    if backend_bridge_uri(selected_env, selected_backend) == backend_bridge_uri(
+        previous_env, previous_backend
+    ):
+        raise RuntimeError("selected TTS bridge port collides with the active backend")
+
+
 def read_json(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -127,7 +231,7 @@ def run_demo_full_restart(
     return launch_token
 
 
-def restart_fish_bridge(
+def restart_openai_speech_bridge(
     repo_root: Path, bridge_env: Path, bridge_instance: str = "realtime"
 ) -> None:
     environment = os.environ.copy()
@@ -139,7 +243,7 @@ def restart_fish_bridge(
         else f"{repo_root}{os.pathsep}{inherited_pythonpath}"
     )
     environment["OPENAI_SPEECH_INSTANCE"] = bridge_instance
-    print("[CUSTOMIZE] reloading Fish Speech reference voice", flush=True)
+    print("[CUSTOMIZE] reloading OpenAI-compatible reference voice", flush=True)
     subprocess.run(
         [
             "bash",
@@ -152,6 +256,52 @@ def restart_fish_bridge(
         check=True,
         timeout=180,
     )
+
+
+# Backward-compatible import surface for existing tests and operators.
+restart_fish_bridge = restart_openai_speech_bridge
+
+
+def restart_voxcpm2_bridge(repo_root: Path, bridge_env: Path) -> None:
+    environment = os.environ.copy()
+    environment.pop("PYTHONSAFEPATH", None)
+    inherited_pythonpath = environment.get("PYTHONPATH", "").strip()
+    environment["PYTHONPATH"] = (
+        str(repo_root)
+        if not inherited_pythonpath
+        else f"{repo_root}{os.pathsep}{inherited_pythonpath}"
+    )
+    print("[CUSTOMIZE] reloading VoxCPM2 reference voice", flush=True)
+    subprocess.run(
+        [
+            "bash",
+            str(repo_root / "voice_service" / "run_bridge.sh"),
+            "restart",
+            str(bridge_env),
+        ],
+        cwd=str(repo_root),
+        env=environment,
+        check=True,
+        timeout=180,
+    )
+
+
+def restart_backend_bridge(
+    repo_root: Path,
+    backend: str,
+    bridge_env: Path,
+    bridge_instance: str,
+) -> None:
+    if backend == "voxcpm2":
+        restart_voxcpm2_bridge(repo_root, bridge_env)
+    else:
+        restart_openai_speech_bridge(repo_root, bridge_env, bridge_instance)
+
+
+def probe_backend_bridge(backend: str, bridge_env: Path) -> PCMProbeMetrics:
+    if backend == "voxcpm2":
+        return probe_restarted_voxcpm2_bridge(bridge_env)
+    return probe_restarted_fish_bridge(bridge_env)
 
 
 def transcribe_reference(
@@ -214,6 +364,17 @@ def read_env_value(path: Path, key: str) -> str:
     return ""
 
 
+def openai_bridge_uri(bridge_env: Path) -> str:
+    host = read_env_value(bridge_env, "OPENAI_SPEECH_BRIDGE_HOST") or "127.0.0.1"
+    port = read_env_value(bridge_env, "OPENAI_SPEECH_BRIDGE_PORT") or "8771"
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        raise RuntimeError("OpenAI speech bridge must bind to localhost")
+    if not port.isdigit() or not 1 <= int(port) <= 65535:
+        raise RuntimeError("OpenAI speech bridge port is invalid")
+    uri_host = f"[{host}]" if ":" in host else host
+    return f"ws://{uri_host}:{port}"
+
+
 def stage_fish_reference(
     bridge_env: Path,
     voice_path: Path,
@@ -239,13 +400,14 @@ def apply_fish_reference_env(
     transcript: str,
     reference_language: str = "auto",
     target_language: str = "zh-CN",
+    backend: str = "fish_s2_pro",
 ) -> None:
     patch_env_file(
         bridge_env,
         {
             "OPENAI_SPEECH_REFERENCE_AUDIO": str(managed_reference),
             "OPENAI_SPEECH_REFERENCE_TEXT": transcript,
-            "OPENAI_SPEECH_BACKEND": "fish_s2_pro",
+            "OPENAI_SPEECH_BACKEND": backend,
             "OPENAI_SPEECH_REFERENCE_LANGUAGE": reference_language,
             "OPENAI_SPEECH_TARGET_LANGUAGE": target_language,
         },
@@ -333,12 +495,19 @@ def probe_fish_reference(
     bridge_env: Path,
     reference_audio: Path,
     reference_text: str,
+    target_language: str | None = None,
 ) -> PCMProbeMetrics:
     base_url = read_env_value(bridge_env, "OPENAI_SPEECH_BASE_URL").rstrip("/")
     endpoint = read_env_value(bridge_env, "OPENAI_SPEECH_ENDPOINT") or "/v1/audio/speech"
     if not endpoint.startswith("/"):
         endpoint = f"/{endpoint}"
     provider = (read_env_value(bridge_env, "OPENAI_SPEECH_PROVIDER") or "sglang").lower()
+    backend = (
+        read_env_value(bridge_env, "OPENAI_SPEECH_BACKEND") or "fish_s2_pro"
+    ).lower()
+    target_language = target_language or (
+        read_env_value(bridge_env, "OPENAI_SPEECH_TARGET_LANGUAGE") or "zh-CN"
+    )
     payload: dict[str, Any] = {
         "model": read_env_value(bridge_env, "OPENAI_SPEECH_MODEL"),
         "voice": read_env_value(bridge_env, "OPENAI_SPEECH_VOICE") or "default",
@@ -364,6 +533,14 @@ def probe_fish_reference(
         payload["references"] = [
             {"audio_path": str(reference_audio.resolve()), "text": reference_text}
         ]
+    if backend == "qwen3_tts_1_7b_base":
+        language_map = {
+            "zh-CN": "Chinese",
+            "en-US": "English",
+            "ja-JP": "Japanese",
+        }
+        payload["language"] = language_map[target_language]
+        payload["task_type"] = "Base"
     request = urllib.request.Request(
         f"{base_url}{endpoint}",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -399,24 +576,37 @@ def preflight_fish_reference(
     bridge_env: Path,
     candidate_audio: Path,
     candidate_text: str,
+    target_language: str | None = None,
 ) -> tuple[PCMProbeMetrics, PCMProbeMetrics]:
     current_audio_raw = read_env_value(bridge_env, "OPENAI_SPEECH_REFERENCE_AUDIO")
     current_text = read_env_value(bridge_env, "OPENAI_SPEECH_REFERENCE_TEXT")
     if not current_audio_raw or not current_text:
         raise RuntimeError("current Fish reference is unavailable for preflight")
-    current = probe_fish_reference(bridge_env, Path(current_audio_raw), current_text)
-    candidate = probe_fish_reference(bridge_env, candidate_audio, candidate_text)
+    current = probe_fish_reference(
+        bridge_env, Path(current_audio_raw), current_text, target_language
+    )
+    candidate = probe_fish_reference(
+        bridge_env, candidate_audio, candidate_text, target_language
+    )
     validate_candidate_probe(candidate, current)
     return current, candidate
 
 
-def probe_restarted_fish_bridge(bridge_env: Path) -> PCMProbeMetrics:
-    host = read_env_value(bridge_env, "OPENAI_SPEECH_BRIDGE_HOST") or "127.0.0.1"
-    port = int(read_env_value(bridge_env, "OPENAI_SPEECH_BRIDGE_PORT") or "8773")
-    configured_rate = int(
-        read_env_value(bridge_env, "OPENAI_SPEECH_SAMPLE_RATE") or "44100"
-    )
-    max_bytes = 20 * configured_rate * 2
+def probe_restarted_bridge(
+    bridge_env: Path, *, voxcpm2: bool = False
+) -> PCMProbeMetrics:
+    if voxcpm2:
+        host = read_env_value(bridge_env, "VOXCPM2_BRIDGE_HOST") or "127.0.0.1"
+        port = int(read_env_value(bridge_env, "VOXCPM2_BRIDGE_PORT") or "8770")
+        configured_rate = 0
+        max_bytes = 20 * 48_000 * 2
+    else:
+        host = read_env_value(bridge_env, "OPENAI_SPEECH_BRIDGE_HOST") or "127.0.0.1"
+        port = int(read_env_value(bridge_env, "OPENAI_SPEECH_BRIDGE_PORT") or "8773")
+        configured_rate = int(
+            read_env_value(bridge_env, "OPENAI_SPEECH_SAMPLE_RATE") or "44100"
+        )
+        max_bytes = 20 * configured_rate * 2
 
     async def synthesize() -> tuple[bytes, int]:
         from websockets.asyncio.client import connect
@@ -450,7 +640,7 @@ def probe_restarted_fish_bridge(bridge_env: Path) -> PCMProbeMetrics:
                     if event.get("type") == "start":
                         sample_rate = int(event.get("sample_rate", 0))
                         if (
-                            sample_rate != configured_rate
+                            (configured_rate and sample_rate != configured_rate)
                             or int(event.get("channels", 0)) != 1
                             or int(event.get("sample_width", 0)) != 2
                             or event.get("audio_format") != "pcm_s16le"
@@ -468,6 +658,14 @@ def probe_restarted_fish_bridge(bridge_env: Path) -> PCMProbeMetrics:
     metrics = validate_probe_pcm(pcm, sample_rate)
     validate_absolute_probe(metrics)
     return metrics
+
+
+def probe_restarted_fish_bridge(bridge_env: Path) -> PCMProbeMetrics:
+    return probe_restarted_bridge(bridge_env)
+
+
+def probe_restarted_voxcpm2_bridge(bridge_env: Path) -> PCMProbeMetrics:
+    return probe_restarted_bridge(bridge_env, voxcpm2=True)
 
 
 def verify_health(port: int, expected_launch_token: str) -> None:
@@ -515,6 +713,8 @@ def verify_loaded_assets(
     image_path: Path,
     bridge_reference_path: Path,
     bridge_instance: str = "realtime",
+    expected_backend: str = "",
+    expected_bridge_uri: str = "",
 ) -> None:
     mse_env = process_environment(repo_root / "logs" / "pipecat_mse.pid")
     suffix = "" if bridge_instance == "default" else f".{bridge_instance}"
@@ -523,6 +723,25 @@ def verify_loaded_assets(
     )
     if Path(mse_env.get("DYSTREAM_REF_IMAGE", "")).resolve() != image_path:
         raise RuntimeError("managed MSE process did not load the selected reference image")
+    mse_backend = canonical_backend(
+        mse_env.get("PIPECAT_TTS_BACKEND")
+        or mse_env.get("PIPECAT_TTS_PROVIDER")
+        or "fish_s2_pro"
+    )
+    bridge_backend = canonical_backend(
+        bridge_env.get("OPENAI_SPEECH_BACKEND") or "fish_s2_pro"
+    )
+    if expected_backend and mse_backend != canonical_backend(expected_backend):
+        raise RuntimeError("managed MSE process did not load the selected TTS backend")
+    actual_bridge_uri = (
+        mse_env.get("PIPECAT_TTS_BRIDGE_URI")
+        or mse_env.get("VOXCPM2_BRIDGE_URI")
+        or ""
+    )
+    if expected_bridge_uri and actual_bridge_uri != expected_bridge_uri:
+        raise RuntimeError("managed MSE process did not load the selected TTS bridge URI")
+    if expected_backend and bridge_backend != canonical_backend(expected_backend):
+        raise RuntimeError("managed speech bridge did not load the selected backend")
     if (
         Path(bridge_env.get("OPENAI_SPEECH_REFERENCE_AUDIO", "")).resolve()
         != bridge_reference_path
@@ -531,14 +750,140 @@ def verify_loaded_assets(
 
 
 def verify_loaded_voxcpm2_assets(
-    repo_root: Path, image_path: Path, voice_path: Path
+    repo_root: Path,
+    image_path: Path,
+    voice_path: Path,
+    expected_bridge_uri: str = "",
+    expected_backend: str = "voxcpm2",
 ) -> None:
     mse_env = process_environment(repo_root / "logs" / "pipecat_mse.pid")
     bridge_env = process_environment(repo_root / "logs" / "voxcpm2_bridge.pid")
     if Path(mse_env.get("DYSTREAM_REF_IMAGE", "")).resolve() != image_path:
         raise RuntimeError("managed MSE process did not load the selected reference image")
+    mse_backend = canonical_backend(
+        mse_env.get("PIPECAT_TTS_BACKEND")
+        or mse_env.get("PIPECAT_TTS_PROVIDER")
+        or ""
+    )
+    if expected_backend and mse_backend != canonical_backend(expected_backend):
+        raise RuntimeError("managed MSE process did not load VoxCPM2")
+    actual_bridge_uri = (
+        mse_env.get("PIPECAT_TTS_BRIDGE_URI")
+        or mse_env.get("VOXCPM2_BRIDGE_URI")
+        or ""
+    )
+    if expected_bridge_uri and actual_bridge_uri != expected_bridge_uri:
+        raise RuntimeError("managed MSE process did not load the VoxCPM2 bridge URI")
     if Path(bridge_env.get("VOXCPM2_PROMPT_WAV", "")).resolve() != voice_path:
         raise RuntimeError("managed VoxCPM2 bridge did not load the selected reference audio")
+
+
+def restore_active_state(
+    active_path: Path,
+    active_backup: Path,
+    active_existed: bool,
+) -> None:
+    if active_existed:
+        shutil.copy2(active_backup, active_path)
+    elif active_path.exists():
+        active_path.unlink()
+
+
+def verify_backend_runtime(
+    repo_root: Path,
+    backend: str,
+    bridge_env: Path,
+    bridge_instance: str,
+    image_path: Path,
+) -> None:
+    probe_backend_bridge(backend, bridge_env)
+    bridge_uri = backend_bridge_uri(bridge_env, backend)
+    if backend == "voxcpm2":
+        voice_raw = read_env_value(bridge_env, "VOXCPM2_PROMPT_WAV")
+        if not voice_raw:
+            raise RuntimeError("previous VoxCPM2 reference audio is missing")
+        verify_loaded_voxcpm2_assets(
+            repo_root,
+            image_path,
+            Path(voice_raw).expanduser().resolve(),
+            bridge_uri,
+        )
+        return
+    voice_raw = read_env_value(bridge_env, "OPENAI_SPEECH_REFERENCE_AUDIO")
+    if not voice_raw:
+        raise RuntimeError("previous OpenAI speech reference audio is missing")
+    verify_loaded_assets(
+        repo_root,
+        image_path,
+        Path(voice_raw).expanduser().resolve(),
+        bridge_instance,
+        backend,
+        bridge_uri,
+    )
+
+
+def rollback_backend_switch(
+    *,
+    args: argparse.Namespace,
+    repo_root: Path,
+    main_env: Path,
+    main_backup: Path,
+    selected_backend: str,
+    selected_bridge_env: Path,
+    selected_bridge_backup: Path,
+    active_path: Path,
+    active_backup: Path,
+    active_existed: bool,
+    job_id: str,
+) -> None:
+    previous_backend = canonical_backend(args.previous_tts_provider)
+    previous_bridge_env = args.previous_tts_env.resolve()
+    previous_instance = args.previous_bridge_instance
+    same_runtime = (
+        previous_backend == selected_backend
+        or previous_bridge_env == selected_bridge_env
+    )
+
+    shutil.copy2(main_backup, main_env)
+    shutil.copy2(selected_bridge_backup, selected_bridge_env)
+    restore_active_state(active_path, active_backup, active_existed)
+
+    if same_runtime:
+        restart_backend_bridge(
+            repo_root, previous_backend, previous_bridge_env, previous_instance
+        )
+        probe_backend_bridge(previous_backend, previous_bridge_env)
+
+    rollback_token = run_demo_restart(
+        repo_root, main_env, args.port, f"rollback-{job_id}"[:32]
+    )
+    verify_health(args.port, rollback_token)
+    previous_image_raw = read_env_value(main_env, "DYSTREAM_REF_IMAGE")
+    if not previous_image_raw:
+        raise RuntimeError("previous avatar reference image is missing")
+    verify_backend_runtime(
+        repo_root,
+        previous_backend,
+        previous_bridge_env,
+        previous_instance,
+        Path(previous_image_raw).expanduser().resolve(),
+    )
+
+    if not same_runtime:
+        try:
+            restart_backend_bridge(
+                repo_root,
+                selected_backend,
+                selected_bridge_env,
+                args.bridge_instance,
+            )
+            probe_backend_bridge(selected_backend, selected_bridge_env)
+        except Exception as cleanup_error:
+            print(
+                "[CUSTOMIZE] inactive candidate bridge cleanup failed after "
+                f"successful rollback: {cleanup_error!r}",
+                flush=True,
+            )
 
 
 def activate_voxcpm2(
@@ -595,12 +940,6 @@ def activate_voxcpm2(
             message="正在写入头像与克隆音色配置",
         )
         try:
-            patch_env_file(main_env, {
-                "DYSTREAM_REF_IMAGE": str(image_path),
-                "PIPECAT_TTS_BACKEND": "voxcpm2",
-                "PIPECAT_TTS_REFERENCE_LANGUAGE": reference_language,
-                "PIPECAT_TTS_TARGET_LANGUAGE": target_language,
-            })
             patch_env_file(bridge_env, {
                 "VOXCPM2_PROMPT_WAV": str(voice_path),
                 "VOXCPM2_PROMPT_TEXT": "",
@@ -612,11 +951,33 @@ def activate_voxcpm2(
                 message="模型正在重启并缓存新头像、新音色，请等待",
             )
             time.sleep(1.5)
-            launch_token = run_demo_full_restart(
-                repo_root, main_env, args.port, job_id
+            restart_voxcpm2_bridge(repo_root, bridge_env)
+            bridge_probe = probe_restarted_voxcpm2_bridge(bridge_env)
+            print(
+                "[CUSTOMIZE] restarted VoxCPM2 bridge probe passed "
+                f"rms_dbfs={bridge_probe.rms_dbfs:.2f} "
+                f"peak_dbfs={bridge_probe.peak_dbfs:.2f}",
+                flush=True,
             )
+            bridge_uri = backend_bridge_uri(bridge_env, "voxcpm2")
+            patch_env_file(main_env, {
+                **backend_selection_env_updates(
+                    args, "voxcpm2", bridge_env, main_env
+                ),
+                "DYSTREAM_REF_IMAGE": str(image_path),
+                "PIPECAT_TTS_BRIDGE_URI": bridge_uri,
+                "VOXCPM2_ENV_FILE": str(bridge_env),
+                "VOXCPM2_BRIDGE_URI": bridge_uri,
+                "PIPECAT_TTS_MODEL": "VoxCPM2",
+                "PIPECAT_TTS_VOICE": "cloned",
+                "PIPECAT_TTS_REFERENCE_LANGUAGE": reference_language,
+                "PIPECAT_TTS_TARGET_LANGUAGE": target_language,
+            })
+            launch_token = run_demo_restart(repo_root, main_env, args.port, job_id)
             verify_health(args.port, launch_token)
-            verify_loaded_voxcpm2_assets(repo_root, image_path, voice_path)
+            verify_loaded_voxcpm2_assets(
+                repo_root, image_path, voice_path, bridge_uri
+            )
             active = {
                 "job_id": job_id,
                 "activated_at": time.time(),
@@ -647,24 +1008,18 @@ def activate_voxcpm2(
             )
             rollback_error: Exception | None = None
             try:
-                shutil.copy2(main_backup, main_env)
-                shutil.copy2(bridge_backup, bridge_env)
-                if active_existed:
-                    shutil.copy2(active_backup, active_path)
-                elif active_path.exists():
-                    active_path.unlink()
-                rollback_token = run_demo_full_restart(
-                    repo_root, main_env, args.port, f"rollback-{job_id}"[:32]
-                )
-                verify_health(args.port, rollback_token)
-                previous_image = Path(
-                    read_env_value(main_env, "DYSTREAM_REF_IMAGE")
-                ).resolve()
-                previous_voice = Path(
-                    read_env_value(bridge_env, "VOXCPM2_PROMPT_WAV")
-                ).resolve()
-                verify_loaded_voxcpm2_assets(
-                    repo_root, previous_image, previous_voice
+                rollback_backend_switch(
+                    args=args,
+                    repo_root=repo_root,
+                    main_env=main_env,
+                    main_backup=main_backup,
+                    selected_backend="voxcpm2",
+                    selected_bridge_env=bridge_env,
+                    selected_bridge_backup=bridge_backup,
+                    active_path=active_path,
+                    active_backup=active_backup,
+                    active_existed=active_existed,
+                    job_id=job_id,
                 )
             except Exception as exc:
                 rollback_error = exc
@@ -695,13 +1050,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--main-env", type=Path, required=True)
     parser.add_argument(
         "--tts-provider",
-        choices=("fish_s2pro", "fish_s2_pro", "voxcpm2"),
+        choices=(
+            "fish_s2pro",
+            "fish_s2_pro",
+            "qwen3_tts_1_7b_base",
+            "cosyvoice3_0_5b",
+            "voxcpm2",
+        ),
     )
     parser.add_argument(
         "--tts-env", "--bridge-env", "--vox-env",
         dest="tts_env", type=Path, required=True,
     )
     parser.add_argument("--bridge-instance", default="realtime")
+    parser.add_argument("--previous-tts-provider")
+    parser.add_argument("--previous-tts-env", type=Path)
+    parser.add_argument("--previous-bridge-instance")
     # Accepted for CLI compatibility with the former Fish manager contract.
     parser.add_argument("--fish-env", type=Path)
     parser.add_argument("--port", type=int, required=True)
@@ -714,6 +1078,35 @@ def activate(args: argparse.Namespace) -> int:
     repo_root = args.repo_root.resolve()
     main_env = args.main_env.resolve()
     bridge_env = args.tts_env.resolve()
+    previous_backend = canonical_backend(
+        getattr(args, "previous_tts_provider", None)
+        or read_env_value(main_env, "PIPECAT_TTS_BACKEND")
+        or read_env_value(main_env, "PIPECAT_TTS_PROVIDER")
+        or args.tts_provider
+        or "fish_s2_pro"
+    )
+    previous_bridge_env = (
+        getattr(args, "previous_tts_env", None).resolve()
+        if getattr(args, "previous_tts_env", None) is not None
+        else Path(
+            read_env_value(main_env, BACKEND_ENV_KEYS.get(previous_backend, ""))
+            or read_env_value(main_env, "PIPECAT_TTS_BRIDGE_ENV_FILE")
+            or str(bridge_env)
+        ).expanduser().resolve()
+    )
+    previous_bridge_instance = (
+        getattr(args, "previous_bridge_instance", None)
+        or read_env_value(main_env, BACKEND_INSTANCE_KEYS.get(previous_backend, ""))
+        or (
+            args.bridge_instance
+            if previous_backend == canonical_backend(args.tts_provider or previous_backend)
+            else ""
+        )
+        or ("voxcpm2" if previous_backend == "voxcpm2" else "realtime")
+    )
+    args.previous_tts_provider = previous_backend
+    args.previous_tts_env = previous_bridge_env
+    args.previous_bridge_instance = previous_bridge_instance
     if job_dir.parent != runtime_root or job_dir.name != job_dir.name.lower():
         raise RuntimeError("job directory is outside the configured runtime root")
     manifest_path = job_dir / "manifest.json"
@@ -722,19 +1115,22 @@ def activate(args: argparse.Namespace) -> int:
     job_id = str(manifest.get("job_id") or "")
     if job_id != job_dir.name:
         raise RuntimeError("job manifest does not match its directory")
-    backend = str(
+    backend = canonical_backend(str(
         manifest.get("tts_backend")
         or manifest.get("tts_provider")
         or args.tts_provider
         or "fish_s2_pro"
-    ).strip().lower()
-    if backend == "fish_s2pro":
-        backend = "fish_s2_pro"
+    ))
     reference_language = str(
         manifest.get("reference_language") or "auto"
     ).strip()
     target_language = str(manifest.get("target_language") or "zh-CN").strip()
-    if backend not in {"fish_s2_pro", "voxcpm2"}:
+    if backend not in {
+        "fish_s2_pro",
+        "qwen3_tts_1_7b_base",
+        "cosyvoice3_0_5b",
+        "voxcpm2",
+    }:
         raise RuntimeError(f"selected TTS backend is not available: {backend}")
     if reference_language not in {"auto", "zh-CN", "en-US", "ja-JP"}:
         raise RuntimeError(f"unsupported reference language: {reference_language}")
@@ -749,6 +1145,14 @@ def activate(args: argparse.Namespace) -> int:
             raise RuntimeError(f"required activation file is missing: {path}")
     if image_path.parent.parent != job_dir or voice_path.parent.parent != job_dir:
         raise RuntimeError("prepared assets are outside the selected job")
+    assert_backend_switch_is_isolated(
+        backend,
+        bridge_env,
+        args.bridge_instance,
+        previous_backend,
+        previous_bridge_env,
+        previous_bridge_instance,
+    )
     if transcript_path is not None:
         if not transcript_path.is_file() or transcript_path.parent.parent != job_dir:
             raise RuntimeError("prepared transcript is outside the selected job")
@@ -790,7 +1194,7 @@ def activate(args: argparse.Namespace) -> int:
             return 2
 
         main_backup = rollback_dir / "custom_cascade.env"
-        bridge_backup = rollback_dir / "fish_bridge.env"
+        bridge_backup = rollback_dir / f"{backend}_bridge.env"
         active_path = runtime_root / "active.json"
         active_backup = rollback_dir / "active.json"
         active_existed = active_path.is_file()
@@ -825,10 +1229,12 @@ def activate(args: argparse.Namespace) -> int:
             else:
                 transcript = transcript_path.read_text(encoding="utf-8").strip()
             if not transcript:
-                raise RuntimeError("Fish Speech requires a non-empty reference transcript")
+                raise RuntimeError(
+                    "selected TTS backend requires a non-empty reference transcript"
+                )
             bridge_reference = stage_fish_reference(bridge_env, voice_path, job_id)
             current_probe, candidate_probe = preflight_fish_reference(
-                bridge_env, bridge_reference, transcript
+                bridge_env, bridge_reference, transcript, target_language
             )
             print(
                 "[CUSTOMIZE] Fish preflight passed "
@@ -843,11 +1249,19 @@ def activate(args: argparse.Namespace) -> int:
                 transcript,
                 reference_language,
                 target_language,
+                backend,
             )
             online_configuration_changed = True
+            bridge_uri = openai_bridge_uri(bridge_env)
+            tts_model = read_env_value(bridge_env, "OPENAI_SPEECH_MODEL")
+            tts_voice = read_env_value(bridge_env, "OPENAI_SPEECH_VOICE") or "cloned"
             patch_env_file(main_env, {
+                **backend_selection_env_updates(args, backend, bridge_env, main_env),
                 "DYSTREAM_REF_IMAGE": str(image_path),
-                "PIPECAT_TTS_BACKEND": backend,
+                "PIPECAT_TTS_BRIDGE_URI": bridge_uri,
+                "VOXCPM2_BRIDGE_URI": bridge_uri,
+                "PIPECAT_TTS_MODEL": tts_model,
+                "PIPECAT_TTS_VOICE": tts_voice,
                 "PIPECAT_TTS_REFERENCE_LANGUAGE": reference_language,
                 "PIPECAT_TTS_TARGET_LANGUAGE": target_language,
             })
@@ -868,7 +1282,12 @@ def activate(args: argparse.Namespace) -> int:
             launch_token = run_demo_restart(repo_root, main_env, args.port, job_id)
             verify_health(args.port, launch_token)
             verify_loaded_assets(
-                repo_root, image_path, bridge_reference, args.bridge_instance
+                repo_root,
+                image_path,
+                bridge_reference,
+                args.bridge_instance,
+                backend,
+                bridge_uri,
             )
             active = {
                 "job_id": job_id,
@@ -911,33 +1330,21 @@ def activate(args: argparse.Namespace) -> int:
             )
             rollback_error: Exception | None = None
             try:
-                shutil.copy2(main_backup, main_env)
-                shutil.copy2(bridge_backup, bridge_env)
-                if active_existed:
-                    shutil.copy2(active_backup, active_path)
-                elif active_path.exists():
-                    active_path.unlink()
-                restart_fish_bridge(repo_root, bridge_env, args.bridge_instance)
-                probe_restarted_fish_bridge(bridge_env)
-                rollback_token = run_demo_restart(
-                    repo_root, main_env, args.port, f"rollback-{job_id}"[:32]
-                )
-                verify_health(args.port, rollback_token)
-                previous_image = Path(
-                    read_env_value(main_env, "DYSTREAM_REF_IMAGE")
-                ).resolve()
-                previous_voice = Path(
-                    read_env_value(bridge_env, "OPENAI_SPEECH_REFERENCE_AUDIO")
-                ).resolve()
-                verify_loaded_assets(
-                    repo_root,
-                    previous_image,
-                    previous_voice,
-                    args.bridge_instance,
+                rollback_backend_switch(
+                    args=args,
+                    repo_root=repo_root,
+                    main_env=main_env,
+                    main_backup=main_backup,
+                    selected_backend=backend,
+                    selected_bridge_env=bridge_env,
+                    selected_bridge_backup=bridge_backup,
+                    active_path=active_path,
+                    active_backup=active_backup,
+                    active_existed=active_existed,
+                    job_id=job_id,
                 )
                 if (
                     bridge_reference is not None
-                    and bridge_reference != previous_voice
                     and bridge_reference.name == f"custom-{job_id}.wav"
                     and bridge_reference.is_file()
                 ):

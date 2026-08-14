@@ -191,6 +191,8 @@ class CustomizationRuntimeTests(unittest.TestCase):
                     "VOXCPM2_ENV_FILE": str(vox_env),
                 },
                 clear=True,
+            ), mock.patch.object(
+                customization, "_configured_backend_is_live", return_value=True
             ):
                 paths = _runtime_paths()
                 options = _tts_options(paths)
@@ -202,6 +204,125 @@ class CustomizationRuntimeTests(unittest.TestCase):
             self.assertTrue(selected["voxcpm2"]["selectable"])
             self.assertFalse(selected["fish_s2_pro"]["selectable"])
             self.assertEqual(options["defaults"]["tts_backend"], "voxcpm2")
+
+    def test_configured_sidecar_is_selectable_only_after_explicit_ready_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config"
+            config.mkdir()
+            main_env = config / "custom_cascade.env"
+            fish_env = config / "fish.env"
+            qwen_env = config / "qwen.env"
+            main_env.write_text("READY=1\n", encoding="utf-8")
+            fish_env.write_text(
+                "OPENAI_SPEECH_BRIDGE_PORT=8773\n", encoding="utf-8"
+            )
+            qwen_env.write_text(
+                "OPENAI_SPEECH_BRIDGE_PORT=8774\n", encoding="utf-8"
+            )
+            environment = {
+                "PIPECAT_TTS_BACKEND": "fish_s2_pro",
+                "CUSTOMIZATION_MAIN_ENV_FILE": str(main_env),
+                "CUSTOMIZATION_FISH_S2_PRO_ENV_FILE": str(fish_env),
+                "CUSTOMIZATION_QWEN3_TTS_1_7B_ENV_FILE": str(qwen_env),
+            }
+            with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(
+                customization, "_configured_backend_is_live", return_value=True
+            ):
+                options = {
+                    item["id"]: item for item in _tts_options(_runtime_paths())["backends"]
+                }
+            self.assertTrue(options["fish_s2_pro"]["selectable"])
+            self.assertFalse(options["qwen3_tts_1_7b_base"]["selectable"])
+            self.assertEqual(
+                options["qwen3_tts_1_7b_base"]["disabled_reason"],
+                "installed_not_started",
+            )
+
+            environment["CUSTOMIZATION_TTS_READY_BACKENDS"] = (
+                "qwen3_tts_1_7b_base"
+            )
+            with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(
+                customization, "_configured_backend_is_live", return_value=True
+            ):
+                options = {
+                    item["id"]: item for item in _tts_options(_runtime_paths())["backends"]
+                }
+            self.assertTrue(options["qwen3_tts_1_7b_base"]["selectable"])
+            self.assertTrue(options["qwen3_tts_1_7b_base"]["configured"])
+
+    def test_current_backend_is_not_selectable_when_live_health_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config"
+            config.mkdir()
+            main_env = config / "custom_cascade.env"
+            fish_env = config / "fish.env"
+            main_env.write_text("READY=1\n", encoding="utf-8")
+            fish_env.write_text(
+                "OPENAI_SPEECH_BASE_URL=http://127.0.0.1:8002\n"
+                "OPENAI_SPEECH_BRIDGE_PORT=8773\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PIPECAT_TTS_BACKEND": "fish_s2_pro",
+                    "CUSTOMIZATION_MAIN_ENV_FILE": str(main_env),
+                    "CUSTOMIZATION_FISH_S2_PRO_ENV_FILE": str(fish_env),
+                },
+                clear=True,
+            ), mock.patch.object(
+                customization, "_configured_backend_is_live", return_value=False
+            ):
+                options = {
+                    item["id"]: item
+                    for item in _tts_options(_runtime_paths())["backends"]
+                }
+            self.assertFalse(options["fish_s2_pro"]["selectable"])
+            self.assertEqual(
+                options["fish_s2_pro"]["disabled_reason"], "service_not_ready"
+            )
+
+    def test_candidate_with_distinct_instance_but_duplicate_bridge_port_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config"
+            config.mkdir()
+            main_env = config / "custom_cascade.env"
+            fish_env = config / "fish.env"
+            qwen_env = config / "qwen.env"
+            main_env.write_text("READY=1\n", encoding="utf-8")
+            for path in (fish_env, qwen_env):
+                path.write_text(
+                    "OPENAI_SPEECH_BASE_URL=http://127.0.0.1:8002\n"
+                    "OPENAI_SPEECH_BRIDGE_PORT=8773\n",
+                    encoding="utf-8",
+                )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PIPECAT_TTS_BACKEND": "fish_s2_pro",
+                    "CUSTOMIZATION_MAIN_ENV_FILE": str(main_env),
+                    "CUSTOMIZATION_FISH_S2_PRO_ENV_FILE": str(fish_env),
+                    "CUSTOMIZATION_QWEN3_TTS_1_7B_ENV_FILE": str(qwen_env),
+                    "CUSTOMIZATION_FISH_S2_PRO_BRIDGE_INSTANCE": "fish",
+                    "CUSTOMIZATION_QWEN3_TTS_1_7B_BRIDGE_INSTANCE": "qwen3",
+                    "CUSTOMIZATION_TTS_READY_BACKENDS": "qwen3_tts_1_7b_base",
+                },
+                clear=True,
+            ), mock.patch.object(
+                customization, "_configured_backend_is_live", return_value=True
+            ):
+                options = {
+                    item["id"]: item
+                    for item in _tts_options(_runtime_paths())["backends"]
+                }
+            self.assertFalse(options["qwen3_tts_1_7b_base"]["selectable"])
+            self.assertEqual(
+                options["qwen3_tts_1_7b_base"]["disabled_reason"],
+                "bridge_instance_conflict",
+            )
 
     def test_new_fish_backend_keeps_legacy_provider_api_value(self):
         with mock.patch.dict(
@@ -271,8 +392,13 @@ class CustomizationRuntimeTests(unittest.TestCase):
                 bridge_instance="flashav2av",
                 port=7860,
             )
+            metrics = CONTROLLER.PCMProbeMetrics(-30.0, -10.0, 0, 1000)
             with mock.patch.object(
-                CONTROLLER, "run_demo_full_restart", return_value="custom-token"
+                CONTROLLER, "restart_voxcpm2_bridge"
+            ) as restart_bridge, mock.patch.object(
+                CONTROLLER, "probe_restarted_voxcpm2_bridge", return_value=metrics
+            ), mock.patch.object(
+                CONTROLLER, "run_demo_restart", return_value="custom-token"
             ) as restart, mock.patch.object(
                 CONTROLLER, "verify_health"
             ), mock.patch.object(
@@ -280,6 +406,7 @@ class CustomizationRuntimeTests(unittest.TestCase):
             ), mock.patch.object(CONTROLLER.time, "sleep"):
                 result = CONTROLLER.activate(args)
             self.assertEqual(result, 0)
+            restart_bridge.assert_called_once_with(repo.resolve(), vox_env.resolve())
             restart.assert_called_once_with(repo.resolve(), main_env.resolve(), 7860, job_id)
             self.assertEqual(
                 CONTROLLER.read_env_value(main_env, "PIPECAT_TTS_BACKEND"),
@@ -316,6 +443,251 @@ class CustomizationRuntimeTests(unittest.TestCase):
         self.assertNotIn("voxcpm2", flattened.lower())
         self.assertNotIn("8002", flattened)
         self.assertNotRegex(flattened, r"run_demo\.sh restart(?:\s|$)")
+
+    def test_voxcpm2_bridge_restart_invokes_its_manager(self):
+        repo = Path("/srv/dystream")
+        bridge_env = Path("/runtime/voxcpm2.env")
+        with mock.patch.object(CONTROLLER.subprocess, "run") as run:
+            CONTROLLER.restart_voxcpm2_bridge(repo, bridge_env)
+        command = run.call_args.args[0]
+        self.assertEqual(command[-2:], ["restart", str(bridge_env)])
+        self.assertEqual(Path(command[1]).name, "run_bridge.sh")
+        self.assertEqual(run.call_args.kwargs["cwd"], str(repo))
+
+    def test_backend_switch_persists_previous_fish_and_external_lifecycle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            previous_env = root / "fish.env"
+            selected_env = root / "qwen.env"
+            args = SimpleNamespace(
+                previous_tts_provider="fish_s2_pro",
+                previous_tts_env=previous_env,
+                previous_bridge_instance="fish",
+                bridge_instance="qwen3",
+            )
+            with mock.patch.dict(
+                CONTROLLER.os.environ,
+                {"CUSTOMIZATION_TTS_READY_BACKENDS": "cosyvoice3_0_5b"},
+                clear=False,
+            ):
+                updates = CONTROLLER.backend_selection_env_updates(
+                    args,
+                    "qwen3_tts_1_7b_base",
+                    selected_env,
+                )
+            self.assertEqual(updates["PIPECAT_TTS_LIFECYCLE"], "external")
+            self.assertEqual(
+                set(updates["CUSTOMIZATION_TTS_READY_BACKENDS"].split(",")),
+                {
+                    "cosyvoice3_0_5b",
+                    "fish_s2_pro",
+                    "qwen3_tts_1_7b_base",
+                },
+            )
+            self.assertEqual(
+                updates["PIPECAT_TTS_PROVIDER"], "qwen3_tts_1_7b_base"
+            )
+            self.assertEqual(
+                updates["CUSTOMIZATION_FISH_S2_PRO_ENV_FILE"],
+                str(previous_env.resolve()),
+            )
+            self.assertEqual(
+                updates["CUSTOMIZATION_FISH_S2_PRO_BRIDGE_INSTANCE"], "fish"
+            )
+            self.assertEqual(
+                updates["CUSTOMIZATION_QWEN3_TTS_1_7B_ENV_FILE"],
+                str(selected_env),
+            )
+
+    def test_controller_rejects_cross_backend_instance_or_port_collision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fish_env = root / "fish.env"
+            qwen_env = root / "qwen.env"
+            fish_env.write_text(
+                "OPENAI_SPEECH_BRIDGE_PORT=8773\n", encoding="utf-8"
+            )
+            qwen_env.write_text(
+                "OPENAI_SPEECH_BRIDGE_PORT=8774\n", encoding="utf-8"
+            )
+            with mock.patch.object(CONTROLLER, "restart_backend_bridge") as restart:
+                with self.assertRaisesRegex(RuntimeError, "instance collides"):
+                    CONTROLLER.assert_backend_switch_is_isolated(
+                        "qwen3_tts_1_7b_base",
+                        qwen_env,
+                        "shared",
+                        "fish_s2_pro",
+                        fish_env,
+                        "shared",
+                    )
+                restart.assert_not_called()
+
+            qwen_env.write_text(
+                "OPENAI_SPEECH_BRIDGE_PORT=8773\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(RuntimeError, "port collides"):
+                CONTROLLER.assert_backend_switch_is_isolated(
+                    "qwen3_tts_1_7b_base",
+                    qwen_env,
+                    "qwen3",
+                    "fish_s2_pro",
+                    fish_env,
+                    "fish",
+                )
+
+    def test_same_backend_rollback_restores_bridge_before_mse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            repo.mkdir()
+            main_env = root / "main.env"
+            main_backup = root / "main.backup.env"
+            bridge_env = root / "fish.env"
+            bridge_backup = root / "fish.backup.env"
+            active_path = root / "active.json"
+            active_backup = root / "active.backup.json"
+            previous_image = root / "previous.png"
+            previous_voice = root / "previous.wav"
+            main_env.write_text("BROKEN=1\n", encoding="utf-8")
+            main_backup.write_text(
+                f"DYSTREAM_REF_IMAGE={previous_image}\n"
+                "PIPECAT_TTS_PROVIDER=fish_s2pro\n",
+                encoding="utf-8",
+            )
+            bridge_env.write_text("NEW=1\n", encoding="utf-8")
+            bridge_backup.write_text(
+                f"OPENAI_SPEECH_REFERENCE_AUDIO={previous_voice}\n"
+                "OPENAI_SPEECH_BRIDGE_PORT=8773\n",
+                encoding="utf-8",
+            )
+            active_path.write_text('{"job_id":"new"}\n', encoding="utf-8")
+            active_backup.write_text('{"job_id":"old"}\n', encoding="utf-8")
+            args = SimpleNamespace(
+                previous_tts_provider="fish_s2_pro",
+                previous_tts_env=bridge_env,
+                previous_bridge_instance="fish",
+                bridge_instance="fish",
+                port=7862,
+            )
+            events = []
+
+            def restart_bridge(*_args):
+                events.append("restart-old-bridge")
+
+            def probe_bridge(*_args):
+                events.append("probe-old-bridge")
+                return CONTROLLER.PCMProbeMetrics(-30.0, -10.0, 0, 1000)
+
+            def restart_mse(*_args):
+                events.append("restart-old-mse")
+                return "rollback-token"
+
+            with mock.patch.object(
+                CONTROLLER, "restart_backend_bridge", side_effect=restart_bridge
+            ), mock.patch.object(
+                CONTROLLER, "probe_backend_bridge", side_effect=probe_bridge
+            ), mock.patch.object(
+                CONTROLLER, "run_demo_restart", side_effect=restart_mse
+            ), mock.patch.object(
+                CONTROLLER, "verify_health"
+            ), mock.patch.object(
+                CONTROLLER, "verify_loaded_assets"
+            ):
+                CONTROLLER.rollback_backend_switch(
+                    args=args,
+                    repo_root=repo,
+                    main_env=main_env,
+                    main_backup=main_backup,
+                    selected_backend="fish_s2_pro",
+                    selected_bridge_env=bridge_env,
+                    selected_bridge_backup=bridge_backup,
+                    active_path=active_path,
+                    active_backup=active_backup,
+                    active_existed=True,
+                    job_id="b" * 32,
+                )
+            self.assertEqual(
+                events,
+                ["restart-old-bridge", "probe-old-bridge", "restart-old-mse", "probe-old-bridge"],
+            )
+
+    def test_cross_backend_rollback_restores_old_mse_before_candidate_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            repo.mkdir()
+            main_env = root / "main.env"
+            main_backup = root / "main.backup.env"
+            previous_env = root / "fish.env"
+            candidate_env = root / "qwen.env"
+            candidate_backup = root / "qwen.backup.env"
+            active_path = root / "active.json"
+            active_backup = root / "active.backup.json"
+            previous_image = root / "previous.png"
+            previous_voice = root / "previous.wav"
+            main_env.write_text("BROKEN=1\n", encoding="utf-8")
+            main_backup.write_text(
+                f"DYSTREAM_REF_IMAGE={previous_image}\n"
+                "PIPECAT_TTS_BACKEND=fish_s2_pro\n",
+                encoding="utf-8",
+            )
+            previous_env.write_text(
+                f"OPENAI_SPEECH_REFERENCE_AUDIO={previous_voice}\n"
+                "OPENAI_SPEECH_BRIDGE_PORT=8773\n",
+                encoding="utf-8",
+            )
+            candidate_env.write_text("NEW=1\n", encoding="utf-8")
+            candidate_backup.write_text("OLD=1\n", encoding="utf-8")
+            active_path.write_text('{"job_id":"new"}\n', encoding="utf-8")
+            active_backup.write_text('{"job_id":"old"}\n', encoding="utf-8")
+            args = SimpleNamespace(
+                previous_tts_provider="fish_s2_pro",
+                previous_tts_env=previous_env,
+                previous_bridge_instance="fish",
+                bridge_instance="qwen3",
+                port=7862,
+            )
+            metrics = CONTROLLER.PCMProbeMetrics(-30.0, -10.0, 0, 1000)
+            events = []
+
+            def restart_mse(*_args):
+                events.append("restart-old-mse")
+                return "rollback-token"
+
+            def fail_candidate_cleanup(*_args):
+                events.append("cleanup-candidate")
+                raise RuntimeError("candidate remains unavailable")
+
+            with mock.patch.object(
+                CONTROLLER, "run_demo_restart", side_effect=restart_mse
+            ), mock.patch.object(
+                CONTROLLER, "verify_health"
+            ), mock.patch.object(
+                CONTROLLER, "probe_backend_bridge", return_value=metrics
+            ), mock.patch.object(
+                CONTROLLER, "verify_loaded_assets"
+            ), mock.patch.object(
+                CONTROLLER,
+                "restart_backend_bridge",
+                side_effect=fail_candidate_cleanup,
+            ):
+                CONTROLLER.rollback_backend_switch(
+                    args=args,
+                    repo_root=repo,
+                    main_env=main_env,
+                    main_backup=main_backup,
+                    selected_backend="qwen3_tts_1_7b_base",
+                    selected_bridge_env=candidate_env,
+                    selected_bridge_backup=candidate_backup,
+                    active_path=active_path,
+                    active_backup=active_backup,
+                    active_existed=True,
+                    job_id="a" * 32,
+                )
+            self.assertEqual(events, ["restart-old-mse", "cleanup-candidate"])
+            self.assertEqual(main_env.read_bytes(), main_backup.read_bytes())
+            self.assertEqual(candidate_env.read_bytes(), candidate_backup.read_bytes())
+            self.assertEqual(active_path.read_bytes(), active_backup.read_bytes())
 
     def test_fish_reference_is_copied_next_to_current_allowlisted_reference(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -376,6 +748,117 @@ class CustomizationRuntimeTests(unittest.TestCase):
                     bridge_env, "OPENAI_SPEECH_REFERENCE_AUDIO"
                 ),
                 str(current),
+            )
+
+    def test_qwen_sidecar_env_keeps_its_backend_and_dedicated_bridge_uri(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "ref.wav"
+            reference.write_bytes(b"voice")
+            bridge_env = root / "qwen.env"
+            bridge_env.write_text(
+                "OPENAI_SPEECH_BRIDGE_HOST=127.0.0.1\n"
+                "OPENAI_SPEECH_BRIDGE_PORT=8774\n",
+                encoding="utf-8",
+            )
+            CONTROLLER.apply_fish_reference_env(
+                bridge_env,
+                reference,
+                "exact transcript",
+                "en-US",
+                "zh-CN",
+                "qwen3_tts_1_7b_base",
+            )
+            self.assertEqual(
+                CONTROLLER.read_env_value(bridge_env, "OPENAI_SPEECH_BACKEND"),
+                "qwen3_tts_1_7b_base",
+            )
+            self.assertEqual(CONTROLLER.openai_bridge_uri(bridge_env), "ws://127.0.0.1:8774")
+
+    def test_qwen_activation_switches_main_env_to_dedicated_bridge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            repo.mkdir()
+            runtime_root = root / "customizations"
+            job_id = "9" * 32
+            job = runtime_root / job_id
+            assets = job / "assets"
+            assets.mkdir(parents=True)
+            image = assets / "reference.png"
+            voice = assets / "voice_reference.wav"
+            transcript = assets / "voice_reference.txt"
+            image.write_bytes(b"image")
+            voice.write_bytes(b"voice")
+            transcript.write_text("exact transcript\n", encoding="utf-8")
+            CONTROLLER.write_json(
+                job / "manifest.json",
+                {
+                    "job_id": job_id,
+                    "image_path": str(image),
+                    "voice_path": str(voice),
+                    "transcript_path": str(transcript),
+                    "transcript_source": "user",
+                    "tts_backend": "qwen3_tts_1_7b_base",
+                    "reference_language": "en-US",
+                    "target_language": "zh-CN",
+                },
+            )
+            CONTROLLER.write_json(job / "status.json", {"state": "prepared"})
+            main_env = root / "main.env"
+            main_env.write_text("DYSTREAM_REF_IMAGE=/old.png\n", encoding="utf-8")
+            references = root / "references"
+            references.mkdir()
+            current = references / "ref.wav"
+            current.write_bytes(b"old")
+            bridge_env = root / "qwen.env"
+            bridge_env.write_text(
+                f"OPENAI_SPEECH_REFERENCE_AUDIO={current}\n"
+                "OPENAI_SPEECH_REFERENCE_TEXT=old transcript\n"
+                "OPENAI_SPEECH_PROVIDER=vllm\n"
+                "OPENAI_SPEECH_BACKEND=qwen3_tts_1_7b_base\n"
+                "OPENAI_SPEECH_BRIDGE_HOST=127.0.0.1\n"
+                "OPENAI_SPEECH_BRIDGE_PORT=8774\n",
+                encoding="utf-8",
+            )
+            args = SimpleNamespace(
+                job_dir=job,
+                runtime_root=runtime_root,
+                repo_root=repo,
+                main_env=main_env,
+                tts_env=bridge_env,
+                tts_provider="qwen3_tts_1_7b_base",
+                fish_env=None,
+                bridge_instance="qwen3",
+                port=7862,
+            )
+            metrics = CONTROLLER.PCMProbeMetrics(-30.0, -10.0, 0, 1000)
+            with mock.patch.object(
+                CONTROLLER, "preflight_fish_reference", return_value=(metrics, metrics)
+            ), mock.patch.object(
+                CONTROLLER, "restart_fish_bridge"
+            ), mock.patch.object(
+                CONTROLLER, "probe_restarted_fish_bridge", return_value=metrics
+            ), mock.patch.object(
+                CONTROLLER, "run_demo_restart", return_value="custom-token"
+            ), mock.patch.object(
+                CONTROLLER, "verify_health"
+            ), mock.patch.object(
+                CONTROLLER, "verify_loaded_assets"
+            ), mock.patch.object(CONTROLLER.time, "sleep"):
+                result = CONTROLLER.activate(args)
+            self.assertEqual(result, 0)
+            self.assertEqual(
+                CONTROLLER.read_env_value(main_env, "PIPECAT_TTS_BACKEND"),
+                "qwen3_tts_1_7b_base",
+            )
+            self.assertEqual(
+                CONTROLLER.read_env_value(main_env, "PIPECAT_TTS_BRIDGE_URI"),
+                "ws://127.0.0.1:8774",
+            )
+            self.assertEqual(
+                CONTROLLER.read_env_value(bridge_env, "OPENAI_SPEECH_BACKEND"),
+                "qwen3_tts_1_7b_base",
             )
 
     def test_candidate_probe_rejects_large_rms_jump(self):
@@ -609,8 +1092,11 @@ class CustomizationApiTests(unittest.IsolatedAsyncioTestCase):
         main_env = config / "custom_cascade.env"
         tts_env = config / "fish_speech_bridge.env"
         fish_env = config / "fish_s2_pro.env"
-        for path in (main_env, tts_env, fish_env):
-            path.write_text("READY=1\n", encoding="utf-8")
+        main_env.write_text("READY=1\n", encoding="utf-8")
+        tts_env.write_text(
+            "OPENAI_SPEECH_BRIDGE_PORT=8773\n", encoding="utf-8"
+        )
+        fish_env.write_text("READY=1\n", encoding="utf-8")
         self.environment = {
             "PIPECAT_TTS_PROVIDER": "fish_s2pro",
             "PIPECAT_TTS_BRIDGE_ENV_FILE": str(tts_env),
@@ -623,6 +1109,10 @@ class CustomizationApiTests(unittest.IsolatedAsyncioTestCase):
             os.environ, self.environment, clear=True
         )
         self.environment_patch.start()
+        self.live_health_patch = mock.patch.object(
+            customization, "_configured_backend_is_live", return_value=True
+        )
+        self.live_health_patch.start()
         app = web.Application()
         app["engine"] = SimpleNamespace(log=lambda _message: None)
         register_customization_routes(app)
@@ -632,6 +1122,7 @@ class CustomizationApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.client.close()
+        self.live_health_patch.stop()
         self.environment_patch.stop()
         self.temporary.cleanup()
 
@@ -838,6 +1329,37 @@ class CustomizationApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["disabled_reason"], "dependency_and_weights_missing")
         self.assertEqual((job_dir / "manifest.json").read_bytes(), original)
         popen.assert_not_called()
+
+    async def test_activation_routes_ready_sidecar_to_its_own_env_and_instance(self):
+        job_id = "f" * 32
+        self._create_prepared_job(job_id=job_id)
+        qwen_env = self.root / "config" / "qwen_bridge.env"
+        qwen_env.write_text(
+            "OPENAI_SPEECH_BRIDGE_PORT=8774\n", encoding="utf-8"
+        )
+        paths = self.client.server.app["customization_paths"]
+        paths["backend_envs"]["qwen3_tts_1_7b_base"] = qwen_env
+        paths["backend_bridge_instances"]["qwen3_tts_1_7b_base"] = "qwen3"
+        with mock.patch.dict(
+            os.environ,
+            {"CUSTOMIZATION_TTS_READY_BACKENDS": "qwen3_tts_1_7b_base"},
+            clear=False,
+        ), mock.patch.object(
+            customization, "_configured_backend_is_live", return_value=True
+        ), mock.patch.object(customization.subprocess, "Popen") as popen:
+            response = await self.client.post(
+                f"/api/customization/{job_id}/activate",
+                json={"tts_backend": "qwen3_tts_1_7b_base"},
+                headers={"X-DyStream-Customize": "1"},
+            )
+        self.assertEqual(response.status, 202)
+        command = popen.call_args.args[0]
+        self.assertEqual(
+            command[command.index("--tts-provider") + 1],
+            "qwen3_tts_1_7b_base",
+        )
+        self.assertEqual(command[command.index("--tts-env") + 1], str(qwen_env))
+        self.assertEqual(command[command.index("--bridge-instance") + 1], "qwen3")
 
     async def test_activation_empty_body_preserves_old_client_contract(self):
         job_id = "e" * 32

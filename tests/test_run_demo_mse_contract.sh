@@ -25,6 +25,10 @@ extract_function() {
   ' "$SCRIPT"
 }
 
+external_body="$(extract_function provider_uses_external_engine)"
+grep -q 'TTS_LIFECYCLE.*external' <<< "$external_body" \
+  || fail "external selector lifecycle must route every backend through MSE-only actions"
+
 for function_name in start_mse stop_mse show_mse_status cleanup_failed_mse_start; do
   body="$(extract_function "$function_name")"
   [[ -n "$body" ]] || fail "missing function $function_name"

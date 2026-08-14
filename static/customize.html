@@ -578,7 +578,10 @@
         fish_runtime_unavailable: 'Fish S2 Pro 运行时未就绪',
         dependency_and_weights_missing: '缺少运行依赖和模型权重',
         runtime_and_weights_missing_on_host: '当前主机未安装运行时和模型权重',
-        installed_stopped_gpu_conflict: '已安装，但当前 GPU 被占用，服务未启动'
+        installed_stopped_gpu_conflict: '已安装，但当前 GPU 被占用，服务未启动',
+        installed_not_started: '已安装，等待服务启动与语音验收',
+        service_not_ready: '已配置，但服务当前未通过健康检查',
+        bridge_instance_conflict: 'Bridge 实例名或监听端口与其他后端冲突'
       };
       return labels[String(reason || '')] || String(reason || '当前未配置');
     }
