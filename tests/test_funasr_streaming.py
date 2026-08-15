@@ -216,6 +216,23 @@ class ParaformerStreamingSTTTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service._audio_buffer, bytearray())
         self.assertEqual(self.service._pre_roll_buffer, bytearray())
 
+    async def test_session_reset_fences_partial_audio_for_next_browser(self):
+        await self.service.process_frame(
+            self._audio(100), FrameDirection.DOWNSTREAM
+        )
+        await self._start_speaking()
+        previous_generation = self.service._generation
+        previous_cache = self.service._cache
+
+        self.service.reset_session()
+
+        self.assertGreater(self.service._generation, previous_generation)
+        self.assertIsNot(self.service._cache, previous_cache)
+        self.assertFalse(self.service._vad_active)
+        self.assertEqual(self.service._audio_buffer, bytearray())
+        self.assertEqual(self.service._pre_roll_buffer, bytearray())
+        self.assertEqual(self.provider.calls, [])
+
     async def test_end_finalizes_active_audio_and_clears_state(self):
         self.provider = _FakeProvider(["end"])
         self.service._provider = self.provider

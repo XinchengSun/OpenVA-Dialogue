@@ -51,6 +51,13 @@
     .status[data-state="ready"]::before { background: var(--green); box-shadow: 0 0 11px rgba(69,212,156,.75); }
     .status[data-state="working"]::before { background: #ffc55f; box-shadow: 0 0 11px rgba(255,197,95,.5); }
     .status[data-state="error"]::before { background: var(--red); }
+    .capacityStatus {
+      margin: 0 0 14px; padding: 10px 13px; border: 1px solid var(--line); border-radius: 11px;
+      color: #b8c1d1; background: rgba(15,19,28,.72); font-size: 13px;
+    }
+    .capacityStatus[data-state="available"] { color: #a8efd2; border-color: rgba(69,212,156,.32); }
+    .capacityStatus[data-state="busy"] { color: #ffd690; border-color: rgba(255,197,95,.34); }
+    .capacityStatus[data-state="unavailable"] { color: #ffb6bd; border-color: rgba(255,107,120,.34); }
     .videoBox {
       background: #000; border: 1px solid #222a39; border-radius: 20px; overflow: hidden;
       box-shadow: 0 28px 90px rgba(0,0,0,.42);
@@ -139,6 +146,7 @@
       <a class="customizeLink" id="customizeLink" href="/customize?new=1">更换数字人</a>
     </div>
   </header>
+  <div class="capacityStatus" id="capacityStatus" data-state="loading">正在获取服务器状态</div>
   <div class="videoBox avatarStage" id="avatarStage">
     <video id="idleVideo" class="avatarLayer idleLayer" muted playsinline preload="none"></video>
     <video id="videoA" class="avatarLayer liveLayer liveActive" muted playsinline></video>
@@ -173,11 +181,18 @@ const interruptBtn = document.getElementById('interruptBtn');
 const instructionEl = document.getElementById('instruction');
 const logEl = document.getElementById('log');
 const statusEl = document.getElementById('status');
+const capacityStatusEl = document.getElementById('capacityStatus');
 const customizeLink = document.getElementById('customizeLink');
+const realtimeClientId = (() => {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('');
+})();
 
 let mediaWs = null, logWs = null, micWs = null, currentMime = null;
 let audioCtx = null, processor = null, micStream = null, zeroGain = null;
 let appStarted = false, startInProgress = false, liveVisible = false;
+let micLeaseOwned = false;
 let micPending16 = new Float32Array(0);
 let micResampleSourceRate = 0;
 let micResampleWeightedSum = 0;
@@ -191,6 +206,11 @@ let mediaWatchdogTimer = null;
 let lastMediaBytesAt = 0;
 let logWsGeneration = 0;
 let micLifecycleGeneration = 0;
+let micLeaseHeartbeatTimer = null;
+let realtimeStatusTimer = null;
+let realtimeStatusAbort = null;
+let realtimeStatusGeneration = 0;
+let latestRealtimeStatus = null;
 let activeSlot = null;
 let ingestSlot = null;
 let liveAudioHeld = true;
@@ -241,6 +261,9 @@ const MEDIA_RECONNECT_MAX_DELAY_MS = 2000;
 const MEDIA_CONNECT_TIMEOUT_MS = 5000;
 const MEDIA_STALL_TIMEOUT_MS = 2000;
 const MEDIA_WATCHDOG_INTERVAL_MS = 500;
+const REALTIME_STATUS_POLL_MS = 2000;
+const REALTIME_STATUS_HIDDEN_POLL_MS = 10000;
+const REALTIME_STATUS_TIMEOUT_MS = 1500;
 let logLineCount = 0;
 
 function log(line) {
@@ -279,6 +302,128 @@ function setStatus(s) {
   }
   statusEl.dataset.state = state;
   statusEl.textContent = label;
+}
+
+function syncStartButtonWithCapacity() {
+  if (startInProgress) return;
+  if (appStarted && micLeaseOwned) {
+    startBtn.disabled = true;
+    startBtn.textContent = '对话中';
+    return;
+  }
+  const ready = !!(latestRealtimeStatus && latestRealtimeStatus.service_ready);
+  const conversationState = latestRealtimeStatus && latestRealtimeStatus.conversation
+    ? latestRealtimeStatus.conversation.state
+    : 'unavailable';
+  if (!ready) {
+    startBtn.disabled = true;
+    startBtn.textContent = '服务恢复中';
+  } else if (latestRealtimeStatus.phase === 'customizing') {
+    startBtn.disabled = true;
+    startBtn.textContent = '数字人定制中';
+  } else if (conversationState === 'yours') {
+    startBtn.disabled = true;
+    startBtn.textContent = micLeaseOwned ? '对话中' : '正在连接';
+  } else if (conversationState === 'busy') {
+    startBtn.disabled = true;
+    startBtn.textContent = '正在服务其他访客';
+  } else if (conversationState === 'unavailable') {
+    startBtn.disabled = true;
+    startBtn.textContent = '服务暂不可用';
+  } else {
+    startBtn.disabled = false;
+    startBtn.textContent = '开始对话';
+  }
+}
+
+function renderRealtimeStatus(snapshot) {
+  latestRealtimeStatus = snapshot;
+  const viewers = Math.max(0, Number(snapshot.media_clients || 0));
+  const speech = snapshot.speech || {};
+  const conversationState = snapshot.conversation
+    ? snapshot.conversation.state
+    : 'unavailable';
+  const activity = speech.tts_active || Number(speech.active_requests || 0) > 0
+    ? '语音生成中'
+    : '语音待机';
+  if (!snapshot.service_ready) {
+    capacityStatusEl.dataset.state = 'unavailable';
+    capacityStatusEl.textContent = `服务暂不可用，正在恢复 · 视频流连接 ${viewers}`;
+  } else if (snapshot.phase === 'customizing') {
+    capacityStatusEl.dataset.state = 'unavailable';
+    capacityStatusEl.textContent = `正在更换数字人，服务暂不可用 · 视频流连接 ${viewers}`;
+  } else if (conversationState === 'yours') {
+    capacityStatusEl.dataset.state = 'available';
+    capacityStatusEl.textContent = `当前对话由你使用 · 视频流连接 ${viewers} · ${activity}`;
+  } else if (conversationState === 'busy') {
+    capacityStatusEl.dataset.state = 'busy';
+    capacityStatusEl.textContent = `正在服务其他访客，当前不排队，请稍后再试 · 视频流连接 ${viewers}`;
+  } else if (conversationState === 'unavailable') {
+    capacityStatusEl.dataset.state = 'unavailable';
+    capacityStatusEl.textContent = `服务暂不可用，请稍后再试 · 视频流连接 ${viewers}`;
+  } else {
+    capacityStatusEl.dataset.state = 'available';
+    capacityStatusEl.textContent = `服务器空闲，可以开始 · 视频流连接 ${viewers} · ${activity}`;
+  }
+  syncStartButtonWithCapacity();
+}
+
+function stopRealtimeStatusPolling() {
+  realtimeStatusGeneration += 1;
+  if (realtimeStatusTimer !== null) {
+    clearTimeout(realtimeStatusTimer);
+    realtimeStatusTimer = null;
+  }
+  if (realtimeStatusAbort) {
+    realtimeStatusAbort.abort();
+    realtimeStatusAbort = null;
+  }
+}
+
+function scheduleRealtimeStatusPoll(generation, delayMs) {
+  if (generation !== realtimeStatusGeneration) return;
+  if (realtimeStatusTimer !== null) clearTimeout(realtimeStatusTimer);
+  realtimeStatusTimer = setTimeout(() => {
+    realtimeStatusTimer = null;
+    pollRealtimeStatus(generation);
+  }, delayMs);
+}
+
+async function pollRealtimeStatus(generation) {
+  if (generation !== realtimeStatusGeneration) return;
+  const controller = new AbortController();
+  realtimeStatusAbort = controller;
+  const timeout = setTimeout(() => controller.abort(), REALTIME_STATUS_TIMEOUT_MS);
+  try {
+    const response = await fetch(withClientId('/api/realtime/status'), {
+      cache: 'no-store',
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`status ${response.status}`);
+    const snapshot = await response.json();
+    if (generation !== realtimeStatusGeneration) return;
+    renderRealtimeStatus(snapshot);
+  } catch (error) {
+    if (generation !== realtimeStatusGeneration) return;
+    capacityStatusEl.dataset.state = 'unavailable';
+    capacityStatusEl.textContent = '暂时无法获取服务器状态';
+    latestRealtimeStatus = null;
+    syncStartButtonWithCapacity();
+  } finally {
+    clearTimeout(timeout);
+    if (realtimeStatusAbort === controller) realtimeStatusAbort = null;
+    const delay = document.visibilityState === 'hidden'
+      ? REALTIME_STATUS_HIDDEN_POLL_MS
+      : REALTIME_STATUS_POLL_MS;
+    scheduleRealtimeStatusPoll(generation, delay);
+  }
+}
+
+function startRealtimeStatusPolling() {
+  stopRealtimeStatusPolling();
+  const generation = realtimeStatusGeneration;
+  pollRealtimeStatus(generation);
 }
 
 function setLiveVisible(show, reason = '') {
@@ -611,6 +756,15 @@ function armSlotActivation(slot) {
       activateSlot(slot, 'ready-state-fallback');
     }
   }, 1500);
+}
+
+function withClientId(path) {
+  const separator = path.includes('?') ? '&' : '?';
+  return `${path}${separator}client_id=${encodeURIComponent(realtimeClientId)}`;
+}
+
+function isLoopbackFrontend() {
+  return ['127.0.0.1', 'localhost', '::1'].includes(location.hostname);
 }
 
 function enterPlaybackRebuffer(slot, reason) {
@@ -1235,6 +1389,7 @@ function startMediaConnectTimeout(ws, generation) {
 
 function handleMediaVisibilityChange() {
   if (document.visibilityState !== 'visible') return;
+  scheduleRealtimeStatusPoll(realtimeStatusGeneration, 0);
   const slot = ingestSlot || activeSlot;
   if (slot && slot.rebuffering) maybePlay(slot);
   if (mediaWs) {
@@ -1254,7 +1409,7 @@ function connectMedia() {
     startMediaConnectTimeout(mediaWs, mediaWsGeneration);
     return mediaWs;
   }
-  const ws = new WebSocket(wsUrl('/ws/media'));
+  const ws = new WebSocket(wsUrl(withClientId('/ws/media')));
   const generation = ++mediaWsGeneration;
   mediaWs = ws;
   ws.binaryType = 'arraybuffer';
@@ -1332,22 +1487,64 @@ function connectMedia() {
   return ws;
 }
 
+function clearMicLeaseHeartbeat() {
+  if (micLeaseHeartbeatTimer === null) return;
+  clearInterval(micLeaseHeartbeatTimer);
+  micLeaseHeartbeatTimer = null;
+}
+
+function startMicLeaseHeartbeat(ws, generation, heartbeatMs) {
+  clearMicLeaseHeartbeat();
+  const intervalMs = Math.max(1000, Number(heartbeatMs) || 5000);
+  micLeaseHeartbeatTimer = setInterval(() => {
+    if (
+      generation !== micLifecycleGeneration
+      || micWs !== ws
+      || !ws.leaseOwned
+      || ws.readyState !== WebSocket.OPEN
+    ) return;
+    ws.send(JSON.stringify({ type: 'lease_heartbeat' }));
+  }, intervalMs);
+}
+
 function connectMicWS(generation) {
   if (micWs && (micWs.readyState === WebSocket.OPEN || micWs.readyState === WebSocket.CONNECTING)) return micWs;
-  const ws = new WebSocket(wsUrl('/ws/mic'));
+  const ws = new WebSocket(wsUrl(withClientId('/ws/mic')));
   micWs = ws;
   ws.binaryType = 'arraybuffer';
+  ws.leaseOwned = false;
+  ws.leaseSettled = false;
+  ws.leasePromise = new Promise((resolve, reject) => {
+    ws.resolveLease = value => {
+      if (ws.leaseSettled) return;
+      ws.leaseSettled = true;
+      resolve(value);
+    };
+    ws.rejectLease = error => {
+      if (ws.leaseSettled) return;
+      ws.leaseSettled = true;
+      reject(error);
+    };
+  });
   ws.onopen = () => {
     if (micWs !== ws || generation !== micLifecycleGeneration) return;
     log('mic ws connected');
-    ws.send(JSON.stringify({ type: 'config', instruction: instructionEl.value || '' }));
   };
   ws.onclose = () => {
     if (micWs !== ws) return;
+    const wasOwner = ws.leaseOwned;
+    if (!ws.leaseSettled) {
+      const error = new Error('mic websocket closed before lease grant');
+      error.code = 'LEASE_CLOSED';
+      ws.rejectLease(error);
+    }
     micWs = null;
+    micLeaseOwned = false;
+    clearMicLeaseHeartbeat();
     resetMicPending16();
     if (generation !== micLifecycleGeneration) return;
     log('mic ws closed');
+    if (wasOwner) stopMic();
   };
   ws.onerror = () => {
     if (micWs !== ws || generation !== micLifecycleGeneration) return;
@@ -1355,6 +1552,25 @@ function connectMicWS(generation) {
   };
   ws.onmessage = ev => {
     if (micWs !== ws || generation !== micLifecycleGeneration) return;
+    let obj = null;
+    try { obj = JSON.parse(ev.data); } catch (e) {}
+    if (obj && obj.type === 'lease_granted') {
+      ws.leaseOwned = true;
+      micLeaseOwned = true;
+      startMicLeaseHeartbeat(ws, generation, obj.heartbeat_ms);
+      ws.resolveLease(obj);
+      log('mic lease granted');
+      return;
+    }
+    if (obj && (obj.type === 'lease_busy' || obj.type === 'service_busy')) {
+      const serviceBusy = obj.type === 'service_busy';
+      const error = new Error(serviceBusy ? 'realtime service is unavailable' : 'conversation busy');
+      error.code = serviceBusy ? 'SERVICE_BUSY' : 'LEASE_BUSY';
+      error.reason = obj.reason || '';
+      ws.rejectLease(error);
+      log('mic lease busy');
+      return;
+    }
     log('mic ws: ' + ev.data);
   };
   return ws;
@@ -1459,6 +1675,26 @@ async function waitForMicOpen(ws, generation, timeoutMs = 5000) {
   }
 }
 
+async function waitForMicAdmission(ws, generation, timeoutMs = 5000) {
+  let timeoutId = null;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      const error = new Error(`mic lease grant timeout after ${timeoutMs}ms`);
+      error.code = 'LEASE_TIMEOUT';
+      reject(error);
+    }, timeoutMs);
+  });
+  try {
+    const admission = await Promise.race([ws.leasePromise, timeout]);
+    if (generation !== micLifecycleGeneration || micWs !== ws || !ws.leaseOwned) {
+      throw new Error('mic start cancelled');
+    }
+    return admission;
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+  }
+}
+
 async function startMic(generation) {
   if (processor && micStream && audioCtx && audioCtx.state !== 'closed') {
     if (audioCtx.state === 'suspended') await audioCtx.resume();
@@ -1473,7 +1709,10 @@ async function startMic(generation) {
   let nextProcessor = null;
   let nextZeroGain = null;
   try {
-    await waitForMicOpen(ws, generation);
+    await waitForMicAdmission(ws, generation);
+    ws.send(JSON.stringify({ type: 'config', instruction: instructionEl.value || '' }));
+    connectMedia();
+    if (isLoopbackFrontend()) connectLogs();
     nextAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
     nextStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
@@ -1513,14 +1752,35 @@ async function startMic(generation) {
     if (nextAudioCtx && nextAudioCtx.state !== 'closed') {
       nextAudioCtx.close().catch(() => {});
     }
+    closeRealtimeAuxiliarySockets();
+    micLeaseOwned = false;
+    clearMicLeaseHeartbeat();
     if (micWs === ws && ws.readyState < WebSocket.CLOSING) ws.close();
     throw e;
   }
 }
 
+function closeRealtimeAuxiliarySockets() {
+  cancelMediaReconnect();
+  cancelMediaConnectTimeout();
+  cancelMediaWatchdog();
+  mediaReconnectAttempt = 0;
+  const oldMediaWs = mediaWs;
+  mediaWs = null;
+  mediaWsGeneration += 1;
+  closePageSocket(oldMediaWs);
+  const oldLogWs = logWs;
+  logWs = null;
+  logWsGeneration += 1;
+  closePageSocket(oldLogWs);
+  teardownMSE();
+}
+
 function stopMic() {
   micLifecycleGeneration += 1;
   startInProgress = false;
+  micLeaseOwned = false;
+  clearMicLeaseHeartbeat();
   if (processor) {
     processor.onaudioprocess = null;
     processor.disconnect();
@@ -1541,13 +1801,9 @@ function stopMic() {
   micWs = null;
   if (oldMicWs && oldMicWs.readyState < WebSocket.CLOSING) oldMicWs.close();
   appStarted = false;
-  cancelMediaReconnect();
-  cancelMediaConnectTimeout();
-  cancelMediaWatchdog();
-  mediaReconnectAttempt = 0;
+  closeRealtimeAuxiliarySockets();
   holdLiveAudio('mic stopped');
-  startBtn.disabled = false;
-  startBtn.textContent = '开始对话';
+  syncStartButtonWithCapacity();
   setLiveVisible(false, 'mic stopped');
   setStatus('mic stopped');
   log('mic stopped');
@@ -1559,6 +1815,7 @@ function closePageSocket(ws) {
 }
 
 function releaseRealtimePage() {
+  stopRealtimeStatusPolling();
   stopMic();
   cancelMediaReconnect();
   cancelMediaConnectTimeout();
@@ -1594,8 +1851,6 @@ startBtn.onclick = async () => {
   startBtn.textContent = '对话中';
   try {
     ensureIdlePlaying();
-    connectLogs();
-    connectMedia();
     await startMic(generation);
     if (generation !== micLifecycleGeneration) throw new Error('mic start cancelled');
     appStarted = true;
@@ -1611,11 +1866,30 @@ startBtn.onclick = async () => {
       return;
     }
     appStarted = false;
-    startBtn.disabled = false;
-    startBtn.textContent = '开始对话';
+    if (e && (e.code === 'LEASE_BUSY' || e.code === 'SERVICE_BUSY')) {
+      const serviceBusy = e.code === 'SERVICE_BUSY';
+      const customizing = serviceBusy && e.reason === 'customizing';
+      capacityStatusEl.dataset.state = serviceBusy ? 'unavailable' : 'busy';
+      capacityStatusEl.textContent = customizing
+        ? '正在更换数字人，服务暂不可用'
+        : serviceBusy
+          ? '服务暂不可用，请稍后再试'
+        : '正在服务其他访客，当前不排队，请稍后再试';
+      if (latestRealtimeStatus && latestRealtimeStatus.conversation) {
+        latestRealtimeStatus.conversation.state = serviceBusy
+          ? 'unavailable'
+          : 'busy';
+        latestRealtimeStatus.conversation.active = !serviceBusy;
+        if (customizing) latestRealtimeStatus.phase = 'customizing';
+      }
+    }
     log('start error: ' + e);
   } finally {
-    if (generation === micLifecycleGeneration) startInProgress = false;
+    if (generation === micLifecycleGeneration) {
+      startInProgress = false;
+      syncStartButtonWithCapacity();
+      scheduleRealtimeStatusPoll(realtimeStatusGeneration, 0);
+    }
   }
 };
 
@@ -1633,6 +1907,7 @@ setInterval(() => {
   maybeReturnToListenerAtBoundary();
 }, 20);
 ensureIdlePlaying();
+startRealtimeStatusPolling();
 </script>
 </body>
 </html>

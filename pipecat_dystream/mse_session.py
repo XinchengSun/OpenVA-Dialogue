@@ -14,6 +14,7 @@ import audioop
 import os
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -22,6 +23,7 @@ from pipecat.frames.frames import (
     EndFrame,
     InputAudioRawFrame,
     InterruptionFrame,
+    SystemFrame,
     TTSAudioRawFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
@@ -273,6 +275,36 @@ class DyStreamMSEAudioSink(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+@dataclass
+class DialogResetFrame(SystemFrame):
+    """Ordered, acknowledged context reset that cannot be interrupted."""
+
+    event: asyncio.Event = field(default_factory=asyncio.Event)
+    error: Exception | None = field(default=None, init=False, repr=False)
+
+
+class DialogResetProcessor(FrameProcessor):
+    """Reset shared dialog state after both context aggregators saw interruption."""
+
+    def __init__(self, components: Any, **kwargs):
+        super().__init__(**kwargs)
+        self._components = components
+
+    async def process_frame(self, frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if direction is not FrameDirection.DOWNSTREAM or not isinstance(
+            frame, DialogResetFrame
+        ):
+            await self.push_frame(frame, direction)
+            return
+        try:
+            await self._components.reset_dialog()
+        except Exception as exc:
+            frame.error = exc
+        finally:
+            frame.event.set()
+
+
 class PipecatMSESession:
     """One process-lifetime Pipecat dialog session feeding the stable MSE host."""
 
@@ -312,6 +344,7 @@ class PipecatMSESession:
                 self._custom.tts,
                 DyStreamMSEAudioSink(self._adapter),
                 self._custom.assistant_aggregator,
+                DialogResetProcessor(self._custom),
             ]
             worker_name = "pipecat-mse-custom-cascade"
 
@@ -410,6 +443,32 @@ class PipecatMSESession:
                     )
                 raise
         return dropped
+
+    async def reset_dialog(self):
+        """Clear browser-specific dialog state while keeping heavy services warm."""
+
+        if self._mode == "custom_cascade":
+            # Both are SystemFrames, so every processor sees interruption first.
+            # The reset processor sits after the assistant aggregator and only
+            # acknowledges after all shared ASR/aggregation/context state clears.
+            frame = DialogResetFrame()
+            await self.worker.queue_frame(InterruptionFrame())
+            await self.worker.queue_frame(frame)
+            timeout = float(os.getenv("PIPECAT_DIALOG_RESET_TIMEOUT_SEC", "5.0"))
+            try:
+                await asyncio.wait_for(frame.event.wait(), timeout=max(0.1, timeout))
+            except asyncio.TimeoutError as exc:
+                self.connected.clear()
+                raise RuntimeError("Pipecat dialog reset barrier timed out") from exc
+            if frame.error is not None:
+                self.connected.clear()
+                raise RuntimeError("Pipecat dialog reset failed") from frame.error
+            self.connected.set()
+            return
+        # Native S2S owns its history inside the provider connection. The
+        # current public deployment uses custom_cascade; interruption is the
+        # safe boundary available without restarting the native provider.
+        self._log("[PIPECAT MSE] native S2S dialog reset uses interruption boundary")
 
     async def close(self):
         if not self.closed.is_set():

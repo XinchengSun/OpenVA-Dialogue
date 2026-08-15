@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>数字人定制 · 管理员登录</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif; }
+    * { box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      color: #edf2ff;
+      background: radial-gradient(circle at top, #18223a 0, #090d16 52%, #06080e 100%);
+    }
+    main {
+      width: min(440px, 100%);
+      padding: 30px;
+      border: 1px solid #2a3448;
+      border-radius: 20px;
+      background: rgba(12, 17, 28, .94);
+      box-shadow: 0 24px 70px rgba(0, 0, 0, .38);
+    }
+    h1 { margin: 0 0 10px; font-size: 24px; }
+    p { margin: 0 0 22px; color: #aeb9cc; line-height: 1.65; }
+    label { display: block; margin-bottom: 8px; font-size: 14px; font-weight: 650; }
+    input, button {
+      width: 100%;
+      min-height: 46px;
+      border-radius: 12px;
+      font: inherit;
+    }
+    input {
+      padding: 0 14px;
+      border: 1px solid #3a4760;
+      color: #fff;
+      background: #0b111d;
+      outline: none;
+    }
+    input:focus { border-color: #7c8cff; box-shadow: 0 0 0 3px rgba(124, 140, 255, .16); }
+    button {
+      margin-top: 14px;
+      border: 0;
+      color: #fff;
+      font-weight: 720;
+      cursor: pointer;
+      background: linear-gradient(135deg, #6172ed, #8a63e8);
+    }
+    button:disabled { cursor: wait; opacity: .6; }
+    #status { min-height: 24px; margin: 14px 0 0; color: #ffb7b7; font-size: 13px; }
+    .note { margin: 18px 0 0; font-size: 12px; color: #7f8ba0; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>管理员登录</h1>
+    <p>上传头像和参考声音会替换当前在线数字人。只有获得独立管理员令牌的受信任人员可以继续。</p>
+    <form id="loginForm">
+      <label for="adminToken">管理员令牌</label>
+      <input id="adminToken" name="adminToken" type="password" autocomplete="current-password"
+             minlength="32" maxlength="512" required autofocus>
+      <button id="submitBtn" type="submit">进入定制后台</button>
+    </form>
+    <div id="status" role="status" aria-live="polite"></div>
+    <p class="note">令牌只通过当前 HTTPS 请求提交，不会写入网址、本地存储或页面脚本。</p>
+  </main>
+  <script>
+    const form = document.getElementById('loginForm');
+    const tokenInput = document.getElementById('adminToken');
+    const submitBtn = document.getElementById('submitBtn');
+    const statusEl = document.getElementById('status');
+
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      const token = tokenInput.value;
+      if (token.length < 32) return;
+      submitBtn.disabled = true;
+      statusEl.textContent = '正在验证…';
+      try {
+        const response = await fetch('/api/customization/session', {
+          method: 'POST',
+          credentials: 'same-origin',
+          cache: 'no-store',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-DyStream-Customize': '1'
+          },
+          body: JSON.stringify({token})
+        });
+        if (!response.ok) {
+          statusEl.textContent = response.status === 503
+            ? '公网定制尚未配置完成。'
+            : '管理员令牌无效，请重新输入。';
+          return;
+        }
+        window.location.replace('/customize');
+      } catch (_) {
+        statusEl.textContent = '连接失败，请稍后重试。';
+      } finally {
+        tokenInput.value = '';
+        submitBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

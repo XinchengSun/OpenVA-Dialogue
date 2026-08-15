@@ -160,6 +160,11 @@ class ParaformerStreamingSTTService(STTService):
     def pre_roll_secs(self) -> float:
         return self._pre_roll_secs
 
+    def reset_session(self) -> None:
+        """Discard any partial utterance before a different browser takes over."""
+
+        self._reset_utterance()
+
     def can_generate_metrics(self) -> bool:
         return True
 

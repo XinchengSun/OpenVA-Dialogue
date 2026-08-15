@@ -457,7 +457,7 @@
       <div class="progress" id="progress"><div class="progressBar" id="progressBar"></div></div>
     </section>
 
-    <p class="footnote">新人物启用时会自动替换旧模型，无需手动停进程；启用失败时，系统会尝试恢复当前数字人。</p>
+    <p class="footnote">这是全局切换：新人物启用时会自动替换旧模型，所有访客都会看到它。有人正在对话或处理其他定制任务时，本次操作会被拒绝并提示稍后重试；启用失败时，系统会尝试恢复当前数字人。</p>
   </main>
 
   <script>
@@ -1023,6 +1023,15 @@
     resetBtn.addEventListener('click', () => resetDraft());
     chatBtn.addEventListener('click', clearChatCountdown);
 
+    function busyMessage(payload, fallback) {
+      const message = payload && payload.message ? payload.message : fallback;
+      const retryAfter = Number(payload && payload.retry_after_seconds);
+      if (payload && payload.state === 'busy' && Number.isFinite(retryAfter) && retryAfter > 0) {
+        return `${message}（请约 ${Math.ceil(retryAfter)} 秒后重试）`;
+      }
+      return message;
+    }
+
     function uploadForm(form, revision) {
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
@@ -1048,6 +1057,10 @@
         xhr.onload = () => {
           let payload = {};
           try { payload = JSON.parse(xhr.responseText); } catch (_) {}
+          const retryAfter = Number(xhr.getResponseHeader('Retry-After'));
+          if (!payload.retry_after_seconds && Number.isFinite(retryAfter) && retryAfter > 0) {
+            payload.retry_after_seconds = retryAfter;
+          }
           if (xhr.status >= 200 && xhr.status < 300) resolve(payload);
           else reject(payload);
         };
@@ -1345,6 +1358,18 @@
         );
         let status = {};
         try { status = await response.json(); } catch (_) {}
+        const retryAfter = Number(response.headers.get('Retry-After'));
+        if (!status.retry_after_seconds && Number.isFinite(retryAfter) && retryAfter > 0) {
+          status.retry_after_seconds = retryAfter;
+        }
+        if (response.status === 409 && status.state === 'busy') {
+          clearActivationClock(jobId);
+          currentJobState = 'prepared';
+          setPhase('idle');
+          showState('failed', busyMessage(status, '当前有人正在对话或执行定制任务。'));
+          updateControls();
+          return;
+        }
         if (!response.ok && response.status !== 409) {
           if (response.status === 503) serviceAvailable = false;
           clearActivationClock(jobId);
@@ -1404,7 +1429,7 @@
       } catch (error) {
         if (revision !== draftRevision) return;
         setPhase('idle');
-        showState('failed', error.message || '素材处理失败，请检查照片和声音。');
+        showState('failed', busyMessage(error, '素材处理失败，请检查照片和声音。'));
         updateControls();
       }
     });

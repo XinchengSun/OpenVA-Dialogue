@@ -53,6 +53,9 @@ function makeHarness() {
   const context = {
     WebSocket: FakeWebSocket,
     wsUrl: value => value,
+    withClientId: value => `${value}?client_id=test-client-123456`,
+    realtimeStatusGeneration: 0,
+    scheduleRealtimeStatusPoll() {},
     setTimeout(callback, delay) {
       const id = ++timerId;
       timers.set(id, { callback, delay });
@@ -160,6 +163,7 @@ function makeHarness() {
 test('closed media socket reconnects and stale generation cannot reconnect', () => {
   const harness = makeHarness();
   const first = harness.api.connectMedia();
+  assert.match(first.url, /\/ws\/media\?client_id=test-client-123456$/);
   first.readyState = harness.sockets[0].constructor.CLOSED;
   first.onclose();
 

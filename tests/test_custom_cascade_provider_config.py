@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 from pipecat_dystream.custom_cascade import (
     CustomCascadeComponents,
@@ -132,6 +132,7 @@ class CustomCascadeWarmupTests(unittest.IsolatedAsyncioTestCase):
             tts=tts,
             user_aggregator=object(),
             assistant_aggregator=object(),
+            context=SimpleNamespace(set_messages=lambda _messages: None),
             llm_model="qwen3.7-flash",
             llm_warmup_models=("qwen3.7-flash", "qwen-flash"),
             llm_extra={"extra_body": {"enable_thinking": False}},
@@ -174,6 +175,7 @@ class CustomCascadeWarmupTests(unittest.IsolatedAsyncioTestCase):
             tts=tts,
             user_aggregator=object(),
             assistant_aggregator=object(),
+            context=SimpleNamespace(set_messages=lambda _messages: None),
             llm_model="qwen3.7-flash",
             llm_warmup_models=("qwen3.7-flash",),
             llm_extra={},
@@ -185,6 +187,29 @@ class CustomCascadeWarmupTests(unittest.IsolatedAsyncioTestCase):
 
         tts.warmup.assert_not_awaited()
         warm_llm.assert_awaited_once()
+
+    async def test_reset_dialog_discards_asr_and_llm_state(self):
+        stt = SimpleNamespace(pre_roll_secs=0.3, reset_session=Mock())
+        context = SimpleNamespace(set_messages=Mock())
+        components = CustomCascadeComponents(
+            stt=stt,
+            llm=object(),
+            tts=SimpleNamespace(ready=True),
+            user_aggregator=SimpleNamespace(reset=AsyncMock()),
+            assistant_aggregator=SimpleNamespace(reset=AsyncMock()),
+            context=context,
+            llm_model="qwen3.7-flash",
+            llm_warmup_models=("qwen3.7-flash",),
+            llm_extra={},
+            log=lambda _message: None,
+        )
+
+        await components.reset_dialog()
+
+        stt.reset_session.assert_called_once_with()
+        components.user_aggregator.reset.assert_awaited_once_with()
+        components.assistant_aggregator.reset.assert_awaited_once_with()
+        context.set_messages.assert_called_once_with([])
 
 
 if __name__ == "__main__":

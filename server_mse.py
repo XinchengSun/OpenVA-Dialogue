@@ -5,6 +5,7 @@ import json
 import math
 import os
 import queue
+import re
 import shutil
 import struct
 import subprocess
@@ -26,7 +27,13 @@ from dotenv import load_dotenv
 from scipy.signal import resample_poly
 import websockets
 
-from customization_runtime import register_customization_routes
+from customization_runtime import (
+    CUSTOMIZATION_FORWARDED_HEADERS,
+    MAX_REQUEST_BYTES,
+    customization_workload_active as runtime_customization_workload_active,
+    is_customization_path,
+    register_customization_routes,
+)
 from pipecat_dystream.public_access import (
     ACCESS_COOKIE_NAME,
     RedactedAccessLogger,
@@ -1783,12 +1790,6 @@ class RealtimeMSEEngine:
                 )
             except RuntimeError:
                 pass
-        for client in list(self.media_clients):
-            try:
-                client.put_text(json.dumps({"type": "log", "message": line}, ensure_ascii=False))
-            except Exception:
-                pass
-
     def _broadcast_media_control(self, payload: Dict[str, Any]):
         with self._assistant_lock:
             self._media_control_seq += 1
@@ -3144,6 +3145,207 @@ class RealtimeMSEEngine:
 # aiohttp server
 # -------------------------
 
+
+class ConversationLease:
+    """One anonymous microphone owner with bounded stale-connection recovery."""
+
+    def __init__(self, timeout_sec: float = 20.0):
+        self.timeout_sec = max(1.0, float(timeout_sec))
+        self._lock = asyncio.Lock()
+        self._owner = None
+        self._owner_client_id = ""
+        self._epoch = 0
+        self._last_seen = 0.0
+        self._releasing = False
+        self._aux_sockets: Set[Any] = set()
+
+    @property
+    def active(self) -> bool:
+        return self._owner is not None
+
+    def snapshot(self, client_id: str = "") -> Dict[str, Any]:
+        active = self.active
+        expires_in = (
+            max(0.0, self.timeout_sec - (time.monotonic() - self._last_seen))
+            if active
+            else 0.0
+        )
+        return {
+            "active": active,
+            "owner_self": bool(
+                active
+                and client_id
+                and client_id == self._owner_client_id
+            ),
+            "releasing": bool(active and self._releasing),
+            "expires_in_sec": expires_in,
+        }
+
+    async def try_acquire(self, owner, client_id: str) -> Optional[int]:
+        async with self._lock:
+            if self._owner is not None:
+                return None
+            self._epoch += 1
+            self._owner = owner
+            self._owner_client_id = client_id
+            self._last_seen = time.monotonic()
+            self._releasing = False
+            return self._epoch
+
+    async def touch(self, owner, epoch: int) -> bool:
+        async with self._lock:
+            if self._owner is not owner or self._epoch != epoch or self._releasing:
+                return False
+            self._last_seen = time.monotonic()
+            return True
+
+    async def is_owner(self, owner, epoch: int) -> bool:
+        async with self._lock:
+            return self._owner is owner and self._epoch == epoch and not self._releasing
+
+    async def is_client_owner(self, client_id: str) -> bool:
+        async with self._lock:
+            return bool(
+                client_id
+                and self._owner is not None
+                and not self._releasing
+                and client_id == self._owner_client_id
+            )
+
+    async def bind_aux(self, client_id: str, ws) -> bool:
+        async with self._lock:
+            if (
+                self._owner is None
+                or self._releasing
+                or client_id != self._owner_client_id
+            ):
+                return False
+            self._aux_sockets.add(ws)
+            return True
+
+    async def unbind_aux(self, ws) -> None:
+        async with self._lock:
+            self._aux_sockets.discard(ws)
+
+    async def begin_release(self, owner, epoch: int) -> Optional[list]:
+        async with self._lock:
+            if self._owner is not owner or self._epoch != epoch or self._releasing:
+                return None
+            self._releasing = True
+            sockets = list(self._aux_sockets)
+            self._aux_sockets.clear()
+            return sockets
+
+    async def finish_release(self, owner, epoch: int) -> bool:
+        async with self._lock:
+            if self._owner is not owner or self._epoch != epoch:
+                return False
+            self._owner = None
+            self._owner_client_id = ""
+            self._last_seen = 0.0
+            self._releasing = False
+            self._aux_sockets.clear()
+            return True
+
+
+async def _watch_mic_lease(
+    request: web.Request,
+    ws: web.WebSocketResponse,
+    epoch: int,
+) -> None:
+    lease: ConversationLease = request.app["conversation_lease"]
+    interval = min(5.0, max(0.25, lease.timeout_sec / 3.0))
+    while await lease.is_owner(ws, epoch):
+        await asyncio.sleep(interval)
+        snapshot = lease.snapshot()
+        if not snapshot["active"] or snapshot["releasing"]:
+            return
+        if snapshot["expires_in_sec"] > 0:
+            continue
+        try:
+            await asyncio.wait_for(
+                ws.close(code=4008, message=b"microphone lease expired"),
+                timeout=1.0,
+            )
+        except Exception:
+            transport = request.transport
+            if transport is not None:
+                transport.abort()
+        return
+
+
+def _dialog_public_load(dialog_health: Dict[str, Any]) -> Dict[str, Any]:
+    tts_active = bool(dialog_health.get("tts_active", False))
+    active_requests = 0
+    custom = dialog_health.get("custom_cascade")
+    if isinstance(custom, dict):
+        tts = custom.get("tts")
+        if isinstance(tts, dict):
+            try:
+                active_requests = max(0, int(tts.get("active_requests", 0)))
+            except (TypeError, ValueError):
+                active_requests = 0
+    return {
+        "tts_active": tts_active,
+        "active_requests": active_requests,
+    }
+
+
+_CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
+
+
+def _request_client_id(request: web.Request) -> str:
+    client_id = request.query.get("client_id", "").strip()
+    if not _CLIENT_ID_RE.fullmatch(client_id):
+        raise web.HTTPBadRequest(
+            text="A valid client_id is required.",
+            headers={"Cache-Control": "no-store"},
+        )
+    return client_id
+
+
+def _is_loopback_request(request: web.Request) -> bool:
+    if any(request.headers.get(name) for name in CUSTOMIZATION_FORWARDED_HEADERS):
+        return False
+    return bool(
+        is_loopback_host(request.host)
+        and is_loopback_host(request.remote or "")
+    )
+
+
+def _customization_workload_active(app: web.Application) -> bool:
+    prepare_lock = app.get("customization_prepare_lock")
+    if prepare_lock is not None and prepare_lock.locked():
+        return True
+    activation_lock = app.get("customization_activation_start_lock")
+    if activation_lock is not None and activation_lock.locked():
+        return True
+    activation_job = app.get("customization_activation_job")
+    if activation_job:
+        return True
+    activation_state = app.get("customization_activation_state")
+    if bool(
+        isinstance(activation_state, dict)
+        and activation_state.get("job_id")
+    ):
+        return True
+    # The controller persists activation state across MSE restarts. Checking
+    # it here closes the restart window where the in-memory locks are empty.
+    return runtime_customization_workload_active(app)
+
+
+async def _close_lease_sockets(sockets: list) -> None:
+    if not sockets:
+        return
+    await asyncio.gather(
+        *(
+            ws.close(code=4403, message=b"microphone lease released")
+            for ws in sockets
+            if not ws.closed
+        ),
+        return_exceptions=True,
+    )
+
 async def index(request: web.Request):
     path = Path(__file__).resolve().parent / "static" / "index.html"
     return web.FileResponse(path)
@@ -3195,6 +3397,16 @@ async def _close_failed_media_ws(
 
 async def media_ws(request: web.Request):
     engine: RealtimeMSEEngine = request.app["engine"]
+    diagnostic = _is_loopback_request(request) and not request.query.get("client_id")
+    client_id = "" if diagnostic else _request_client_id(request)
+    lease: Optional[ConversationLease] = request.app.get("conversation_lease")
+    if not diagnostic and (
+        lease is None or not await lease.is_client_owner(client_id)
+    ):
+        raise web.HTTPConflict(
+            text="An active microphone lease is required.",
+            headers={"Cache-Control": "no-store"},
+        )
     try:
         send_timeout = max(
             0.1,
@@ -3209,6 +3421,9 @@ async def media_ws(request: web.Request):
         compress=False,
     )
     await ws.prepare(request)
+    if not diagnostic and not await lease.bind_aux(client_id, ws):
+        await ws.close(code=4403, message=b"microphone lease required")
+        return ws
     open_websockets: set[web.WebSocketResponse] = request.app["open_websockets"]
     open_websockets.add(ws)
     client = None
@@ -3299,6 +3514,8 @@ async def media_ws(request: web.Request):
         if client is not None:
             await asyncio.to_thread(engine.unregister_media_client, client)
             client = None
+        if not diagnostic:
+            await lease.unbind_aux(ws)
         open_websockets.discard(ws)
         if pipeline_stopped and not ws.closed:
             await _close_failed_media_ws(request, ws)
@@ -3306,6 +3523,11 @@ async def media_ws(request: web.Request):
 
 
 async def logs_ws(request: web.Request):
+    if not _is_loopback_request(request):
+        raise web.HTTPForbidden(
+            text="Runtime logs are available through the local SSH tunnel only.",
+            headers={"Cache-Control": "no-store"},
+        )
     engine: RealtimeMSEEngine = request.app["engine"]
     ws = web.WebSocketResponse(max_msg_size=0, timeout=2.0)
     await ws.prepare(request)
@@ -3356,18 +3578,31 @@ async def logs_ws(request: web.Request):
 
 async def mic_ws(request: web.Request):
     engine: RealtimeMSEEngine = request.app["engine"]
+    client_id = (
+        f"localdiagnostic{uuid.uuid4().hex}"
+        if _is_loopback_request(request) and not request.query.get("client_id")
+        else _request_client_id(request)
+    )
     backend_name: str = request.app["dialog_backend_name"]
     proto: Optional[DoubaoRealtimeProtocol] = request.app.get("doubao")
     shared_live = request.app.get("dialog_session")
+    lease: ConversationLease = request.app["conversation_lease"]
+    admission_lock: asyncio.Lock = request.app["workload_admission_lock"]
     owner_lock: asyncio.Lock = request.app["mic_owner_lock"]
     input_lock: asyncio.Lock = request.app["mic_input_lock"]
-    ws = web.WebSocketResponse(max_msg_size=0, timeout=2.0)
+    ws = web.WebSocketResponse(
+        max_msg_size=0,
+        timeout=2.0,
+        heartbeat=min(10.0, max(1.0, lease.timeout_sec / 2.0)),
+    )
     await ws.prepare(request)
     open_websockets: set[web.WebSocketResponse] = request.app["open_websockets"]
     open_websockets.add(ws)
 
     instruction = "请用自然口语直接回答，默认一到三句；只有我明确要求时才详细展开。"
     live: Any = shared_live
+    lease_epoch: Optional[int] = None
+    watchdog_task: Optional[asyncio.Task] = None
 
     async def ensure_live_session():
         nonlocal live
@@ -3394,40 +3629,41 @@ async def mic_ws(request: web.Request):
         return live
 
     try:
-        async with owner_lock:
-            previous_ws = request.app.get("active_mic_ws")
-            request.app["active_mic_ws"] = ws
-        if previous_ws is not None and previous_ws is not ws and not previous_ws.closed:
-            close_tasks: set[asyncio.Task] = request.app["mic_close_tasks"]
-            close_task = asyncio.create_task(
-                previous_ws.close(
-                    code=4001,
-                    message=b"replaced by newer microphone session",
-                )
+        async with admission_lock:
+            customization_busy = _customization_workload_active(request.app)
+            lease_epoch = (
+                None
+                if customization_busy
+                else await lease.try_acquire(ws, client_id)
             )
-            close_tasks.add(close_task)
+        if lease_epoch is None:
+            await ws.send_str(json.dumps({
+                "type": "service_busy" if customization_busy else "lease_busy",
+                "reason": "customizing" if customization_busy else "conversation_busy",
+                "retry_after_ms": 1000,
+            }))
+            await ws.close(code=4409, message=b"conversation busy")
+            return ws
 
-            def finish_previous_close(task: asyncio.Task):
-                close_tasks.discard(task)
-                try:
-                    task.result()
-                except asyncio.CancelledError:
-                    pass
-                except Exception as exc:
-                    engine.log(f"[MIC WARN] previous socket close failed: {exc!r}")
+        async with owner_lock:
+            request.app["active_mic_ws"] = ws
 
-            close_task.add_done_callback(finish_previous_close)
-        if previous_ws is not None and backend_name == "pipecat" and live is not None:
+        if backend_name == "pipecat" and live is not None:
             async with input_lock:
-                if request.app.get("active_mic_ws") is ws:
-                    dropped = await live.interrupt()
-                    engine.log(
-                        "[MIC] newer socket replaced previous owner; "
-                        f"dropped assistant audio chunks={dropped}"
-                    )
+                await live.reset_dialog()
+
+        await ws.send_str(json.dumps({
+            "type": "lease_granted",
+            "heartbeat_ms": 5000,
+            "timeout_ms": round(lease.timeout_sec * 1000),
+        }))
+        watchdog_task = asyncio.create_task(
+            _watch_mic_lease(request, ws, lease_epoch),
+            name=f"mic-lease-watchdog-{lease_epoch}",
+        )
 
         async for msg in ws:
-            if request.app.get("active_mic_ws") is not ws:
+            if not await lease.touch(ws, lease_epoch):
                 break
             if msg.type == aiohttp.WSMsgType.TEXT:
                 try:
@@ -3444,7 +3680,7 @@ async def mic_ws(request: web.Request):
                     }, ensure_ascii=False))
                 elif typ == "interrupt":
                     async with input_lock:
-                        if request.app.get("active_mic_ws") is not ws:
+                        if not await lease.is_owner(ws, lease_epoch):
                             break
                         if live is not None:
                             dropped = await live.interrupt()
@@ -3453,11 +3689,11 @@ async def mic_ws(request: web.Request):
                         engine.log(
                             f"[MIC] interrupt; dropped assistant audio chunks={dropped}"
                         )
-                elif typ == "ping":
+                elif typ in {"ping", "lease_heartbeat"}:
                     await ws.send_str(json.dumps({"type": "pong"}))
             elif msg.type == aiohttp.WSMsgType.BINARY:
                 async with input_lock:
-                    if request.app.get("active_mic_ws") is not ws:
+                    if not await lease.is_owner(ws, lease_epoch):
                         break
                     engine.enqueue_user_audio(msg.data)
                     live = await ensure_live_session()
@@ -3469,29 +3705,75 @@ async def mic_ws(request: web.Request):
                         live = await ensure_live_session()
                         await live.send_audio(msg.data)
     finally:
-        if backend_name == "pipecat" and live is not None:
-            async with input_lock:
-                async with owner_lock:
-                    is_owner = request.app.get("active_mic_ws") is ws
-                    if is_owner:
-                        request.app["active_mic_ws"] = None
-                if is_owner:
-                    dropped = await live.interrupt()
-                    engine.log(
-                        "[MIC] active socket disconnected; "
-                        f"dropped assistant audio chunks={dropped}"
-                    )
-        else:
-            async with owner_lock:
-                if request.app.get("active_mic_ws") is ws:
-                    request.app["active_mic_ws"] = None
-        if live is not None and backend_name == "doubao":
-            await live.close()
-        open_websockets.discard(ws)
+        async def finish_microphone_cleanup() -> None:
+            # Begin release before any other cancellable cleanup. The request
+            # task itself can be cancelled as part of the WebSocket close.
+            release_sockets = (
+                await lease.begin_release(ws, lease_epoch)
+                if lease_epoch is not None
+                else None
+            )
+            if watchdog_task is not None:
+                watchdog_task.cancel()
+                await asyncio.gather(watchdog_task, return_exceptions=True)
+            try:
+                if release_sockets is not None:
+                    try:
+                        if backend_name == "pipecat" and live is not None:
+                            async with input_lock:
+                                dropped = await live.interrupt()
+                                await live.reset_dialog()
+                            engine.log(
+                                "[MIC] active socket disconnected; "
+                                f"dropped assistant audio chunks={dropped}"
+                            )
+                    finally:
+                        await _close_lease_sockets(release_sockets)
+                        await lease.finish_release(ws, lease_epoch)
+                        async with owner_lock:
+                            if request.app.get("active_mic_ws") is ws:
+                                request.app["active_mic_ws"] = None
+                if live is not None and backend_name == "doubao":
+                    await live.close()
+            finally:
+                open_websockets.discard(ws)
+
+        cleanup_task = asyncio.create_task(
+            finish_microphone_cleanup(),
+            name=f"mic-lease-cleanup-{lease_epoch or 'unclaimed'}",
+        )
+        cleanup_tasks: Set[asyncio.Task] = request.app["mic_cleanup_tasks"]
+        cleanup_tasks.add(cleanup_task)
+
+        def cleanup_finished(task: asyncio.Task) -> None:
+            cleanup_tasks.discard(task)
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                engine.log(f"[MIC WARN] lease cleanup failed: {exc!r}")
+
+        cleanup_task.add_done_callback(cleanup_finished)
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            # The shield keeps cleanup alive. Waiting once more makes normal
+            # socket closes deterministic; the app also tracks it for shutdown.
+            await asyncio.shield(cleanup_task)
+            raise
     return ws
 
 
 async def health(request: web.Request):
+    if not _is_loopback_request(request):
+        payload = _realtime_status_payload(request, require_client_id=False)
+        return web.json_response(
+            payload,
+            status=200 if payload["service_ready"] else 503,
+            headers={"Cache-Control": "no-store"},
+        )
+
     engine: RealtimeMSEEngine = request.app["engine"]
     snapshot = engine.health_snapshot()
     snapshot["dialog_backend"] = request.app["dialog_backend_name"]
@@ -3502,6 +3784,82 @@ async def health(request: web.Request):
             snapshot["status"] = "degraded"
     status = 200 if snapshot["status"] == "ok" else 503
     return web.json_response(snapshot, status=status)
+
+
+def _realtime_status_payload(
+    request: web.Request,
+    *,
+    require_client_id: bool = True,
+) -> Dict[str, Any]:
+    engine: RealtimeMSEEngine = request.app["engine"]
+    lease: ConversationLease = request.app["conversation_lease"]
+    client_id = (
+        _request_client_id(request)
+        if require_client_id
+        else request.query.get("client_id", "").strip()
+    )
+    if client_id and not _CLIENT_ID_RE.fullmatch(client_id):
+        client_id = ""
+    dialog_session = request.app.get("dialog_session")
+    try:
+        engine_health = engine.health_snapshot()
+        service_ready = engine_health.get("status") == "ok"
+    except Exception:
+        service_ready = False
+
+    dialog_health: Dict[str, Any] = {}
+    if dialog_session is not None:
+        try:
+            dialog_health = dialog_session.health_snapshot()
+            service_ready = service_ready and bool(dialog_health.get("ready"))
+        except Exception:
+            service_ready = False
+
+    lease_snapshot = lease.snapshot(client_id)
+    conversation_active = bool(lease_snapshot["active"])
+    customization_busy = _customization_workload_active(request.app)
+    conversation_state = (
+        "unavailable"
+        if not service_ready
+        else "unavailable" if customization_busy
+        else "yours" if lease_snapshot["owner_self"]
+        else "busy" if conversation_active
+        else "available"
+    )
+    return {
+        "service_ready": service_ready,
+        "phase": (
+            "unavailable"
+            if not service_ready
+            else "customizing" if customization_busy
+            else "ready"
+        ),
+        "conversation": {
+            "state": conversation_state,
+            "active": conversation_active,
+            "capacity": 1,
+            "available": service_ready and not customization_busy and (
+                not conversation_active or lease_snapshot["owner_self"]
+            ),
+        },
+        "media_clients": len(engine.media_clients),
+        "speech": _dialog_public_load(dialog_health),
+        "updated_at": time.time(),
+        "poll_after_ms": 2000,
+    }
+
+
+async def realtime_status(request: web.Request):
+    """Return only coarse public capacity; never expose provider internals."""
+
+    payload = _realtime_status_payload(
+        request,
+        require_client_id=not _is_loopback_request(request),
+    )
+    return web.json_response(
+        payload,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def parse_args():
@@ -3519,8 +3877,10 @@ def parse_args():
 
 @web.middleware
 async def public_access_gate(request: web.Request, handler: Any):
+    if is_customization_path(request.path):
+        return await handler(request)
     expected_token = os.getenv("PUBLIC_ACCESS_TOKEN", "").strip()
-    if not expected_token or is_loopback_host(request.host):
+    if not expected_token or _is_loopback_request(request):
         return await handler(request)
 
     query_token = request.query.get("access_token")
@@ -3555,10 +3915,11 @@ async def public_access_gate(request: web.Request, handler: Any):
 
 def build_app(args):
     app = web.Application(
-        client_max_size=1024**3,
+        client_max_size=MAX_REQUEST_BYTES,
         middlewares=[public_access_gate],
     )
     app["open_websockets"] = set()
+    app["workload_admission_lock"] = asyncio.Lock()
 
     async def on_startup(app_obj: web.Application):
         # Important: use the actual aiohttp running loop, not a stale loop.
@@ -3571,7 +3932,10 @@ def build_app(args):
         app_obj["dialog_backend_name"] = backend_name
         app_obj["mic_owner_lock"] = asyncio.Lock()
         app_obj["mic_input_lock"] = asyncio.Lock()
-        app_obj["mic_close_tasks"] = set()
+        app_obj["mic_cleanup_tasks"] = set()
+        app_obj["conversation_lease"] = ConversationLease(
+            float(os.getenv("MIC_LEASE_TIMEOUT_SEC", "20"))
+        )
         app_obj["active_mic_ws"] = None
         if backend_name == "pipecat":
             from pipecat_dystream.mse_session import PipecatMSESession
@@ -3588,11 +3952,9 @@ def build_app(args):
         )
 
     async def on_cleanup(app_obj: web.Application):
-        close_tasks = list(app_obj.get("mic_close_tasks", ()))
-        for task in close_tasks:
-            task.cancel()
-        if close_tasks:
-            await asyncio.gather(*close_tasks, return_exceptions=True)
+        cleanup_tasks = list(app_obj.get("mic_cleanup_tasks", ()))
+        if cleanup_tasks:
+            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
         dialog_session = app_obj.get("dialog_session")
         if dialog_session is not None:
             await dialog_session.close()
@@ -3606,6 +3968,7 @@ def build_app(args):
 
     app.router.add_get("/", index)
     app.router.add_get("/health", health)
+    app.router.add_get("/api/realtime/status", realtime_status)
     app.router.add_get("/ws/media", media_ws)
     app.router.add_get("/ws/logs", logs_ws)
     app.router.add_get("/ws/mic", mic_ws)

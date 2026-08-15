@@ -267,11 +267,21 @@ class CustomCascadeComponents:
     tts: LocalPCMTTSService
     user_aggregator: Any
     assistant_aggregator: Any
+    context: LLMContext
     llm_model: str
     llm_warmup_models: tuple[str, ...]
     llm_extra: dict[str, Any]
     log: Callable[[str], None]
     _llm_ready: bool = False
+
+    async def reset_dialog(self) -> None:
+        """Fence partial ASR and committed chat history between lease owners."""
+
+        self.stt.reset_session()
+        await self.user_aggregator.reset()
+        await self.assistant_aggregator.reset()
+        self.context.set_messages([])
+        self.log("[CUSTOM CASCADE] dialog state reset for microphone lease")
 
     async def wait_ready(self, timeout: float) -> None:
         """Block MSE readiness until both local TTS and remote LLM are warm."""
@@ -410,6 +420,7 @@ def create_custom_cascade_components(
         tts=tts,
         user_aggregator=aggregators.user(),
         assistant_aggregator=aggregators.assistant(),
+        context=context,
         llm_model=llm_model,
         llm_warmup_models=llm_warmup_models,
         llm_extra=llm_extra,

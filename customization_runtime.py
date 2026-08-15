@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import audioop
+import hashlib
+import hmac
 import ipaddress
+import inspect
 import json
 import math
 import os
 import re
+import secrets
 import shlex
 import shutil
 import struct
@@ -24,7 +28,7 @@ from urllib.request import urlopen
 from aiohttp import web
 from PIL import Image, ImageOps
 
-from pipecat_dystream.public_access import is_loopback_host
+from pipecat_dystream.public_access import is_loopback_host, token_matches
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -35,13 +39,36 @@ MEDIA_SUFFIXES = {
     ".mp4", ".mov", ".webm", ".mkv",
 }
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
-MAX_MEDIA_BYTES = 200 * 1024 * 1024
+MAX_MEDIA_BYTES = 50 * 1024 * 1024
 MAX_TRANSCRIPT_CHARS = 1000
 MAX_REFERENCE_SECONDS = 30.0
 REFERENCE_TARGET_DBFS = -29.0
 REFERENCE_MAX_PEAK_DBFS = -6.0
 MAX_REQUEST_BYTES = MAX_IMAGE_BYTES + MAX_MEDIA_BYTES + 1024 * 1024
+MAX_MULTIPART_PARTS = 6
+MAX_LOGIN_BODY_BYTES = 4096
 BACKEND_LIVE_CACHE_TTL_SEC = 5.0
+
+CUSTOMIZATION_ADMIN_COOKIE_NAME = "dystream_customization_admin"
+CUSTOMIZATION_BUSY_CHECK_APP_KEY = "customization_runtime_busy_check"
+CUSTOMIZATION_SESSION_VERSION = "v1"
+CUSTOMIZATION_SESSION_DEFAULT_TTL_SEC = 3600
+CUSTOMIZATION_SESSION_MIN_TTL_SEC = 300
+CUSTOMIZATION_SESSION_MAX_TTL_SEC = 24 * 60 * 60
+CUSTOMIZATION_ADMIN_TOKEN_MIN_CHARS = 32
+CUSTOMIZATION_ADMIN_TOKEN_MAX_CHARS = 512
+CUSTOMIZATION_ACTIVATION_STATES = frozenset({
+    "queued",
+    "activating",
+    "restarting",
+    "rolling_back",
+})
+CUSTOMIZATION_FORWARDED_HEADERS = (
+    "CF-Connecting-IP",
+    "Forwarded",
+    "X-Forwarded-For",
+    "X-Real-IP",
+)
 
 _BACKEND_LIVE_CACHE: dict[tuple[str, str], tuple[int, int, float, bool]] = {}
 _BACKEND_LIVE_CACHE_LOCK = threading.Lock()
@@ -118,6 +145,138 @@ MAX_TTS_OPTION_CHARS = 64
 
 class CustomizationInputError(ValueError):
     pass
+
+
+class _UploadBudget:
+    def __init__(self, limit: int = MAX_REQUEST_BYTES):
+        self.limit = max(1, int(limit))
+        self.consumed = 0
+
+    def consume(self, size: int) -> None:
+        self.consumed += max(0, int(size))
+        if self.consumed > self.limit:
+            raise web.HTTPRequestEntityTooLarge(
+                max_size=self.limit,
+                actual_size=self.consumed,
+            )
+
+
+def is_customization_path(path: str) -> bool:
+    """Return whether a request belongs to the separately-authenticated admin UI."""
+    return path in {"/customize", "/customize/login", "/api/customization"} or path.startswith(
+        "/api/customization/"
+    )
+
+
+def _remote_customization_enabled() -> bool:
+    return os.getenv("CUSTOMIZATION_REMOTE_ENABLED", "0").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _admin_token() -> str:
+    token = os.getenv("CUSTOMIZATION_ADMIN_TOKEN", "").strip()
+    if not CUSTOMIZATION_ADMIN_TOKEN_MIN_CHARS <= len(token) <= CUSTOMIZATION_ADMIN_TOKEN_MAX_CHARS:
+        return ""
+    return token
+
+
+def _admin_session_ttl_sec() -> int:
+    try:
+        requested = int(
+            os.getenv(
+                "CUSTOMIZATION_ADMIN_SESSION_TTL_SEC",
+                str(CUSTOMIZATION_SESSION_DEFAULT_TTL_SEC),
+            )
+        )
+    except ValueError:
+        requested = CUSTOMIZATION_SESSION_DEFAULT_TTL_SEC
+    return min(
+        CUSTOMIZATION_SESSION_MAX_TTL_SEC,
+        max(CUSTOMIZATION_SESSION_MIN_TTL_SEC, requested),
+    )
+
+
+def _configured_public_origin() -> str:
+    raw = os.getenv("CUSTOMIZATION_PUBLIC_ORIGIN", "").strip().rstrip("/")
+    parsed = urlparse(raw)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        return ""
+    return f"https://{parsed.netloc.lower()}"
+
+
+def _remote_customization_config_error() -> str:
+    if not _admin_token():
+        return "CUSTOMIZATION_ADMIN_TOKEN is missing or too short"
+    if not _configured_public_origin():
+        return "CUSTOMIZATION_PUBLIC_ORIGIN must be one HTTPS origin"
+    return ""
+
+
+def _issue_admin_session(
+    admin_token: str,
+    *,
+    now: float | None = None,
+    ttl_sec: int | None = None,
+    nonce: str | None = None,
+) -> str:
+    issued_at = int(time.time() if now is None else now)
+    ttl = _admin_session_ttl_sec() if ttl_sec is None else min(
+        CUSTOMIZATION_SESSION_MAX_TTL_SEC,
+        max(CUSTOMIZATION_SESSION_MIN_TTL_SEC, int(ttl_sec)),
+    )
+    expires_at = issued_at + ttl
+    session_nonce = nonce or secrets.token_hex(16)
+    if not re.fullmatch(r"[0-9a-f]{32}", session_nonce):
+        raise ValueError("invalid customization session nonce")
+    payload = f"{CUSTOMIZATION_SESSION_VERSION}.{expires_at}.{session_nonce}"
+    signature = hmac.new(
+        admin_token.encode("utf-8"),
+        payload.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{payload}.{signature}"
+
+
+def _admin_session_valid(
+    supplied: str | None,
+    admin_token: str,
+    *,
+    now: float | None = None,
+) -> bool:
+    if not supplied or not admin_token:
+        return False
+    fields = supplied.split(".")
+    if len(fields) != 4:
+        return False
+    version, expires_raw, nonce, supplied_signature = fields
+    if (
+        version != CUSTOMIZATION_SESSION_VERSION
+        or not expires_raw.isdigit()
+        or not re.fullmatch(r"[0-9a-f]{32}", nonce)
+        or not re.fullmatch(r"[0-9a-f]{64}", supplied_signature)
+    ):
+        return False
+    current = int(time.time() if now is None else now)
+    expires_at = int(expires_raw)
+    if expires_at <= current or expires_at > current + CUSTOMIZATION_SESSION_MAX_TTL_SEC + 60:
+        return False
+    payload = f"{version}.{expires_raw}.{nonce}"
+    expected_signature = hmac.new(
+        admin_token.encode("utf-8"),
+        payload.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(supplied_signature, expected_signature)
 
 
 def _canonical_tts_backend(value: Any) -> str:
@@ -898,7 +1057,12 @@ def _prepare_job(
     return manifest
 
 
-async def _save_part(part: Any, destination: Path, limit: int) -> int:
+async def _save_part(
+    part: Any,
+    destination: Path,
+    limit: int,
+    budget: _UploadBudget | None = None,
+) -> int:
     written = 0
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("wb") as output:
@@ -907,19 +1071,29 @@ async def _save_part(part: Any, destination: Path, limit: int) -> int:
             if not chunk:
                 break
             written += len(chunk)
+            if budget is not None:
+                budget.consume(len(chunk))
             if written > limit:
-                raise CustomizationInputError("上传文件超过大小限制")
+                raise web.HTTPRequestEntityTooLarge(
+                    max_size=limit,
+                    actual_size=written,
+                )
             output.write(chunk)
     os.chmod(destination, 0o600)
     return written
 
 
-async def _read_transcript_part(part: Any) -> str:
+async def _read_transcript_part(
+    part: Any,
+    budget: _UploadBudget | None = None,
+) -> str:
     data = bytearray()
     while True:
         chunk = await part.read_chunk(size=4096)
         if not chunk:
             break
+        if budget is not None:
+            budget.consume(len(chunk))
         data.extend(chunk)
         if len(data) > 8192:
             raise CustomizationInputError("参考文本不能超过 1000 个字符")
@@ -932,12 +1106,18 @@ async def _read_transcript_part(part: Any) -> str:
     return value
 
 
-async def _read_tts_option_part(part: Any, field: str) -> str:
+async def _read_tts_option_part(
+    part: Any,
+    field: str,
+    budget: _UploadBudget | None = None,
+) -> str:
     data = bytearray()
     while True:
         chunk = await part.read_chunk(size=1024)
         if not chunk:
             break
+        if budget is not None:
+            budget.consume(len(chunk))
         data.extend(chunk)
         if len(data) > MAX_TTS_OPTION_CHARS * 4:
             raise CustomizationInputError(f"invalid {field}")
@@ -945,6 +1125,21 @@ async def _read_tts_option_part(part: Any, field: str) -> str:
         return data.decode("utf-8").strip()
     except UnicodeDecodeError as exc:
         raise CustomizationInputError(f"{field} must use UTF-8") from exc
+
+
+async def _read_body_limited(request: web.Request, limit: int) -> bytes:
+    if request.content_length is not None and request.content_length > limit:
+        raise web.HTTPRequestEntityTooLarge(
+            max_size=limit,
+            actual_size=request.content_length,
+        )
+    body = bytearray()
+    while len(body) <= limit:
+        chunk = await request.content.read(min(4096, limit + 1 - len(body)))
+        if not chunk:
+            return bytes(body)
+        body.extend(chunk)
+    raise web.HTTPRequestEntityTooLarge(max_size=limit, actual_size=len(body))
 
 
 def _manifest_transcript(manifest: dict[str, Any]) -> str:
@@ -963,11 +1158,9 @@ def _manifest_transcript(manifest: dict[str, Any]) -> str:
 async def _activation_overrides(request: web.Request) -> dict[str, str]:
     if not request.can_read_body:
         return {}
-    body = await request.read()
+    body = await _read_body_limited(request, 16 * 1024)
     if not body.strip():
         return {}
-    if len(body) > 16 * 1024:
-        raise web.HTTPRequestEntityTooLarge(max_size=16 * 1024, actual_size=len(body))
     if request.content_type != "application/json":
         raise web.HTTPBadRequest(text="activation overrides must use application/json")
     try:
@@ -995,8 +1188,10 @@ async def _activation_overrides(request: web.Request) -> dict[str, str]:
 
 
 def _is_loopback_request(request: web.Request) -> bool:
-    if os.getenv("CUSTOMIZATION_ALLOW_REMOTE", "0").lower() in {"1", "true", "yes"}:
-        return True
+    # SSH forwarding reaches the origin directly. A reverse proxy also connects
+    # from loopback, so forwarded-client headers must disqualify the bypass.
+    if any(request.headers.get(name) for name in CUSTOMIZATION_FORWARDED_HEADERS):
+        return False
     # A same-host reverse tunnel connects from loopback, so the TCP peer alone
     # is not enough to distinguish it from the local SSH-forwarded UI.
     if not is_loopback_host(request.host):
@@ -1010,17 +1205,241 @@ def _is_loopback_request(request: web.Request) -> bool:
         return False
 
 
+def _csrf_request_valid(request: web.Request) -> bool:
+    expected_origin = _configured_public_origin()
+    supplied_origin = request.headers.get("Origin", "").strip().rstrip("/").lower()
+    return bool(
+        expected_origin
+        and supplied_origin
+        and hmac.compare_digest(supplied_origin, expected_origin)
+        and request.headers.get("X-DyStream-Customize") == "1"
+    )
+
+
+def _admin_cookie_valid(request: web.Request) -> bool:
+    return _admin_session_valid(
+        request.cookies.get(CUSTOMIZATION_ADMIN_COOKIE_NAME),
+        _admin_token(),
+    )
+
+
+def _no_store_headers() -> dict[str, str]:
+    return {
+        "Cache-Control": "no-store",
+        "Pragma": "no-cache",
+    }
+
+
 @web.middleware
-async def _local_customization_only(request: web.Request, handler: Any):
-    if request.path == "/customize" or request.path.startswith("/api/customization"):
-        if not _is_loopback_request(request):
-            raise web.HTTPForbidden(text="customization is available through the local SSH tunnel only")
+async def _customization_access_gate(request: web.Request, handler: Any):
+    if not is_customization_path(request.path):
+        return await handler(request)
+
+    if _is_loopback_request(request):
         if (
-            request.method == "POST"
+            request.method in {"POST", "PUT", "PATCH", "DELETE"}
             and request.headers.get("X-DyStream-Customize") != "1"
         ):
             raise web.HTTPForbidden(text="missing customization request header")
+        return await handler(request)
+
+    if not _remote_customization_enabled():
+        raise web.HTTPForbidden(
+            text="customization is available through the local SSH tunnel only"
+        )
+    config_error = _remote_customization_config_error()
+    if config_error:
+        return web.json_response(
+            {
+                "state": "unavailable",
+                "message": "remote customization authentication is unavailable",
+            },
+            status=503,
+            headers=_no_store_headers(),
+        )
+
+    login_page = request.path == "/customize/login" and request.method == "GET"
+    login_request = (
+        request.path == "/api/customization/session" and request.method == "POST"
+    )
+    if login_page:
+        return await handler(request)
+    if login_request:
+        if not _csrf_request_valid(request):
+            return web.json_response(
+                {"state": "forbidden", "message": "invalid customization origin"},
+                status=403,
+                headers=_no_store_headers(),
+            )
+        return await handler(request)
+
+    if not _admin_cookie_valid(request):
+        if request.path == "/customize" and request.method == "GET":
+            response = web.HTTPFound(location="/customize/login")
+            response.headers.update(_no_store_headers())
+            raise response
+        return web.json_response(
+            {"state": "unauthorized", "message": "administrator login is required"},
+            status=401,
+            headers=_no_store_headers(),
+        )
+    if (
+        request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        and not _csrf_request_valid(request)
+    ):
+        return web.json_response(
+            {"state": "forbidden", "message": "invalid customization origin"},
+            status=403,
+            headers=_no_store_headers(),
+        )
     return await handler(request)
+
+
+def _normalize_busy_result(value: Any, default_reason: str) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        busy = bool(value.get("busy", value.get("active", False)))
+        if not busy:
+            return None
+        try:
+            retry_after = max(1, min(300, int(value.get("retry_after_seconds", 5))))
+        except (TypeError, ValueError):
+            retry_after = 5
+        return {
+            "reason": str(value.get("reason") or default_reason),
+            "retry_after_seconds": retry_after,
+        }
+    if value:
+        return {"reason": default_reason, "retry_after_seconds": 5}
+    return None
+
+
+async def _customization_runtime_busy(
+    app: web.Application,
+    operation: str,
+) -> dict[str, Any] | None:
+    """Check the optional capacity hook before expensive or disruptive work.
+
+    Integrators may set app[CUSTOMIZATION_BUSY_CHECK_APP_KEY] to a callable
+    accepting "prepare" or "activate" and returning bool/dict/awaitable.
+    """
+    hook = app.get(CUSTOMIZATION_BUSY_CHECK_APP_KEY)
+    if hook is not None:
+        try:
+            result = hook(operation)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception:
+            return {"reason": "capacity_check_failed", "retry_after_seconds": 5}
+        normalized = _normalize_busy_result(result, "conversation_active")
+        if normalized is not None:
+            return normalized
+
+    lease = app.get("conversation_lease")
+    if lease is not None:
+        try:
+            snapshot = lease.snapshot() if hasattr(lease, "snapshot") else lease.active
+        except Exception:
+            return {"reason": "capacity_check_failed", "retry_after_seconds": 5}
+        normalized = _normalize_busy_result(snapshot, "conversation_active")
+        if normalized is not None:
+            return normalized
+
+    active_mic = app.get("active_mic_ws")
+    if active_mic is not None and not getattr(active_mic, "closed", False):
+        return {"reason": "conversation_active", "retry_after_seconds": 5}
+    engine = app.get("engine")
+    if engine is not None and len(getattr(engine, "media_clients", ())) > 0:
+        return {"reason": "conversation_active", "retry_after_seconds": 5}
+    return None
+
+
+def _busy_response(busy: dict[str, Any], message: str) -> web.Response:
+    retry_after = max(1, int(busy.get("retry_after_seconds", 5)))
+    return web.json_response(
+        {
+            "state": "busy",
+            "reason": str(busy.get("reason") or "conversation_active"),
+            "message": message,
+            "retry_after_seconds": retry_after,
+        },
+        status=409,
+        headers={"Retry-After": str(retry_after), **_no_store_headers()},
+    )
+
+
+def _activation_lock_is_held(runtime_root: Path) -> bool:
+    """Return whether the activation controller currently owns its OS lock."""
+    lock_path = runtime_root / "activation.lock"
+    if not lock_path.exists():
+        return False
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - production controller runs on Linux.
+        return False
+    try:
+        with lock_path.open("a+") as lock_file:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            return False
+    except OSError:
+        # Fail closed if the lock's state cannot be inspected safely.
+        return True
+
+
+def _persisted_activation_busy(runtime_root: Path) -> dict[str, Any] | None:
+    """Recover activation occupancy after the HTTP process has restarted."""
+    if _activation_lock_is_held(runtime_root):
+        return {"reason": "customization_activation_lock", "retry_after_seconds": 10}
+    try:
+        job_dirs = runtime_root.iterdir()
+    except OSError:
+        return {"reason": "customization_state_unavailable", "retry_after_seconds": 10}
+    try:
+        for job_dir in job_dirs:
+            if not job_dir.is_dir() or not JOB_ID_RE.fullmatch(job_dir.name):
+                continue
+            status_path = job_dir / "status.json"
+            if not status_path.is_file():
+                continue
+            try:
+                state = str(_read_json(status_path).get("state") or "")
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            if state in CUSTOMIZATION_ACTIVATION_STATES:
+                return {
+                    "reason": "customization_activation_persisted",
+                    "retry_after_seconds": 10,
+                }
+    except OSError:
+        return {"reason": "customization_state_unavailable", "retry_after_seconds": 10}
+    return None
+
+
+def _workload_admission_lock(app: web.Application) -> asyncio.Lock:
+    """Use the conversation subsystem's lock when available."""
+    return app.get("workload_admission_lock") or app["customization_admission_lock"]
+
+
+def customization_workload_active(app: web.Application) -> bool:
+    """Expose customization occupancy to microphone/conversation admission."""
+    prepare_lock = app.get("customization_prepare_lock")
+    if prepare_lock is not None and prepare_lock.locked():
+        return True
+    activation_lock = app.get("customization_activation_start_lock")
+    if activation_lock is not None and activation_lock.locked():
+        return True
+    activation_state = app.get("customization_activation_state")
+    if isinstance(activation_state, dict) and activation_state.get("job_id"):
+        return True
+    paths = app.get("customization_paths")
+    return bool(
+        isinstance(paths, dict)
+        and isinstance(paths.get("runtime_root"), Path)
+        and _persisted_activation_busy(paths["runtime_root"]) is not None
+    )
 
 
 def register_customization_routes(app: web.Application) -> None:
@@ -1033,10 +1452,91 @@ def register_customization_routes(app: web.Application) -> None:
         runtime_root_error = repr(exc)
     app["customization_paths"] = paths
     app["customization_runtime_root_error"] = runtime_root_error
-    app.middlewares.append(_local_customization_only)
+    app["customization_admission_lock"] = asyncio.Lock()
+    app["customization_prepare_lock"] = asyncio.Lock()
+    app["customization_activation_start_lock"] = asyncio.Lock()
+    app["customization_activation_state"] = {
+        "job_id": None,
+        "process": None,
+        "monitor": None,
+    }
+    app.middlewares.append(_customization_access_gate)
 
     async def customize_page(request: web.Request):
-        return web.FileResponse(REPO_ROOT / "static" / "customize.html")
+        return web.FileResponse(
+            REPO_ROOT / "static" / "customize.html",
+            headers=_no_store_headers(),
+        )
+
+    async def customize_login_page(request: web.Request):
+        return web.FileResponse(
+            REPO_ROOT / "static" / "customize_login.html",
+            headers={
+                **_no_store_headers(),
+                "Content-Security-Policy": (
+                    "default-src 'none'; style-src 'unsafe-inline'; "
+                    "script-src 'unsafe-inline'; connect-src 'self'; "
+                    "img-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
+                    "form-action 'self'"
+                ),
+                "X-Content-Type-Options": "nosniff",
+                "Referrer-Policy": "no-referrer",
+            },
+        )
+
+    async def create_admin_session(request: web.Request):
+        if not _remote_customization_enabled() or _remote_customization_config_error():
+            return web.json_response(
+                {
+                    "state": "unavailable",
+                    "message": "remote customization authentication is unavailable",
+                },
+                status=503,
+                headers=_no_store_headers(),
+            )
+        if request.content_type != "application/json":
+            raise web.HTTPBadRequest(text="administrator login must use application/json")
+        body = await _read_body_limited(request, MAX_LOGIN_BODY_BYTES)
+        try:
+            payload = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise web.HTTPBadRequest(text="invalid administrator login") from exc
+        supplied = payload.get("token") if isinstance(payload, dict) else None
+        if not isinstance(supplied, str) or not token_matches(supplied, _admin_token()):
+            return web.json_response(
+                {"state": "unauthorized", "message": "administrator login failed"},
+                status=401,
+                headers=_no_store_headers(),
+            )
+        ttl_sec = _admin_session_ttl_sec()
+        response = web.json_response(
+            {"state": "ready", "redirect": "/customize", "expires_in": ttl_sec},
+            headers=_no_store_headers(),
+        )
+        response.set_cookie(
+            CUSTOMIZATION_ADMIN_COOKIE_NAME,
+            _issue_admin_session(_admin_token(), ttl_sec=ttl_sec),
+            max_age=ttl_sec,
+            secure=True,
+            httponly=True,
+            samesite="Strict",
+            path="/",
+        )
+        return response
+
+    async def delete_admin_session(request: web.Request):
+        response = web.json_response(
+            {"state": "logged_out"},
+            headers=_no_store_headers(),
+        )
+        response.del_cookie(
+            CUSTOMIZATION_ADMIN_COOKIE_NAME,
+            secure=True,
+            httponly=True,
+            samesite="Strict",
+            path="/",
+        )
+        return response
 
     async def active_status(request: web.Request):
         active_path = paths["runtime_root"] / "active.json"
@@ -1062,7 +1562,7 @@ def register_customization_routes(app: web.Application) -> None:
             },
         })
 
-    async def prepare(request: web.Request):
+    async def _prepare_unlocked(request: web.Request):
         if runtime_root_error:
             raise web.HTTPServiceUnavailable(text="customization storage is unavailable")
         if not paths["validator"].is_file():
@@ -1095,28 +1595,39 @@ def register_customization_routes(app: web.Application) -> None:
             **_normalize_runtime_tts_selection({}, paths["tts_provider"]),
         }
         fields_seen: set[str] = set()
+        request_budget = _UploadBudget(MAX_REQUEST_BYTES)
+        part_count = 0
         try:
             reader = await request.multipart()
             async for part in reader:
+                part_count += 1
+                if part_count > MAX_MULTIPART_PARTS:
+                    raise CustomizationInputError("上传字段数量超过限制")
                 if part.name == "transcript":
+                    if part.filename:
+                        raise CustomizationInputError("参考文本必须是普通表单字段")
                     if "transcript" in fields_seen:
                         raise CustomizationInputError("参考文本只能提交一次")
                     fields_seen.add("transcript")
-                    transcript = await _read_transcript_part(part)
+                    transcript = await _read_transcript_part(part, request_budget)
                     text_fields["transcript"] = transcript
                     continue
                 if part.name in DEFAULT_TTS_SELECTION:
+                    if part.filename:
+                        raise CustomizationInputError(f"invalid {part.name}")
                     if part.name in fields_seen:
                         raise CustomizationInputError(
                             f"{part.name} may only be submitted once"
                         )
                     fields_seen.add(part.name)
                     text_fields[part.name] = await _read_tts_option_part(
-                        part, part.name
+                        part, part.name, request_budget
                     )
                     continue
-                if part.name not in {"image", "voice_media"} or not part.filename:
-                    continue
+                if part.name not in {"image", "voice_media"}:
+                    raise CustomizationInputError("上传包含未知字段")
+                if not part.filename:
+                    raise CustomizationInputError("图片和声音字段必须包含文件")
                 suffix = Path(part.filename).suffix.lower()
                 if part.name == "image":
                     if image_source is not None:
@@ -1124,14 +1635,18 @@ def register_customization_routes(app: web.Application) -> None:
                     if suffix not in IMAGE_SUFFIXES:
                         raise CustomizationInputError("照片仅支持 JPG、PNG 或 WebP")
                     image_source = uploads_dir / f"source_image{suffix}"
-                    await _save_part(part, image_source, MAX_IMAGE_BYTES)
+                    await _save_part(
+                        part, image_source, MAX_IMAGE_BYTES, request_budget
+                    )
                 else:
                     if media_source is not None:
                         raise CustomizationInputError("音频或视频只能上传一个")
                     if suffix not in MEDIA_SUFFIXES:
                         raise CustomizationInputError("不支持这个音频/视频格式")
                     media_source = uploads_dir / f"source_voice{suffix}"
-                    await _save_part(part, media_source, MAX_MEDIA_BYTES)
+                    await _save_part(
+                        part, media_source, MAX_MEDIA_BYTES, request_budget
+                    )
             if image_source is None or media_source is None:
                 raise CustomizationInputError("必须同时上传一张照片和一段音频或视频")
             selection = _normalize_tts_selection(text_fields)
@@ -1182,6 +1697,15 @@ def register_customization_routes(app: web.Application) -> None:
             }
             _write_json(job_dir / "status.json", status)
             return web.json_response(status, status=400)
+        except web.HTTPRequestEntityTooLarge:
+            shutil.rmtree(job_dir / "assets", ignore_errors=True)
+            _write_json(job_dir / "status.json", {
+                "job_id": job_id,
+                "state": "failed",
+                "message": "上传文件超过大小限制",
+                "updated_at": time.time(),
+            })
+            raise
         except asyncio.CancelledError:
             shutil.rmtree(job_dir / "assets", ignore_errors=True)
             _write_json(job_dir / "status.json", {
@@ -1206,6 +1730,37 @@ def register_customization_routes(app: web.Application) -> None:
             if uploads_dir.parent == job_dir and uploads_dir.exists():
                 await asyncio.to_thread(shutil.rmtree, uploads_dir, True)
 
+    async def prepare(request: web.Request):
+        admission_lock = _workload_admission_lock(request.app)
+        prepare_lock: asyncio.Lock = request.app["customization_prepare_lock"]
+        async with admission_lock:
+            if prepare_lock.locked():
+                return _busy_response(
+                    {"reason": "customization_prepare_active", "retry_after_seconds": 5},
+                    "另一个素材任务正在处理，请稍后重试",
+                )
+            activation_state = request.app["customization_activation_state"]
+            persisted_busy = _persisted_activation_busy(paths["runtime_root"])
+            if activation_state["job_id"] or persisted_busy is not None:
+                return _busy_response(
+                    persisted_busy or {
+                        "reason": "customization_active",
+                        "retry_after_seconds": 10,
+                    },
+                    "数字人正在切换，请稍后再上传素材",
+                )
+            busy = await _customization_runtime_busy(request.app, "prepare")
+            if busy is not None:
+                return _busy_response(busy, "当前有人正在对话，请结束后再定制")
+            # This acquire cannot queue: all claimants test and reserve while
+            # holding the shared workload-admission lock.
+            await prepare_lock.acquire()
+        try:
+            return await _prepare_unlocked(request)
+        finally:
+            async with admission_lock:
+                prepare_lock.release()
+
     async def job_status(request: web.Request):
         job_id = _safe_job_id(request.match_info["job_id"])
         status_path = paths["runtime_root"] / job_id / "status.json"
@@ -1220,7 +1775,7 @@ def register_customization_routes(app: web.Application) -> None:
             raise web.HTTPNotFound(text="customization preview is not ready")
         return web.FileResponse(image_path)
 
-    async def activate(request: web.Request):
+    async def _activate_unlocked(request: web.Request):
         missing = _runtime_missing(paths)
         if missing or runtime_root_error:
             return web.json_response({
@@ -1317,7 +1872,7 @@ def register_customization_routes(app: web.Application) -> None:
         ]
         try:
             with log_path.open("ab", buffering=0) as log_output:
-                subprocess.Popen(
+                process = subprocess.Popen(
                     command,
                     cwd=str(REPO_ROOT),
                     stdin=subprocess.DEVNULL,
@@ -1326,6 +1881,7 @@ def register_customization_routes(app: web.Application) -> None:
                     start_new_session=True,
                     close_fds=True,
                 )
+            request.app["customization_activation_state"]["process"] = process
         except Exception as exc:
             queued.update({
                 "state": "failed",
@@ -1337,7 +1893,79 @@ def register_customization_routes(app: web.Application) -> None:
             return web.json_response(queued, status=500)
         return web.json_response(queued, status=202)
 
+    async def _monitor_activation_process(
+        app_obj: web.Application,
+        job_id: str,
+        process: subprocess.Popen,
+    ) -> None:
+        try:
+            await asyncio.to_thread(process.wait)
+        finally:
+            async with _workload_admission_lock(app_obj):
+                state = app_obj["customization_activation_state"]
+                if state["job_id"] == job_id:
+                    state["job_id"] = None
+                    state["process"] = None
+                    state["monitor"] = None
+
+    async def activate(request: web.Request):
+        job_id = _safe_job_id(request.match_info["job_id"])
+        admission_lock = _workload_admission_lock(request.app)
+        start_lock: asyncio.Lock = request.app["customization_activation_start_lock"]
+        activation_state = request.app["customization_activation_state"]
+        async with admission_lock:
+            if request.app["customization_prepare_lock"].locked():
+                return _busy_response(
+                    {"reason": "customization_prepare_active", "retry_after_seconds": 5},
+                    "素材正在处理中，请完成后再激活",
+                )
+            persisted_busy = _persisted_activation_busy(paths["runtime_root"])
+            if start_lock.locked() or activation_state["job_id"] or persisted_busy:
+                return _busy_response(
+                    persisted_busy or {
+                        "reason": "customization_active",
+                        "retry_after_seconds": 10,
+                    },
+                    "另一个数字人正在切换，请稍后重试",
+                )
+            busy = await _customization_runtime_busy(request.app, "activate")
+            if busy is not None:
+                return _busy_response(busy, "当前有人正在对话，请结束后再切换数字人")
+            # Reserve before releasing the shared lock, so a microphone claim
+            # cannot observe both conversation and customization as idle.
+            await start_lock.acquire()
+            activation_state["job_id"] = job_id
+        try:
+            try:
+                response = await _activate_unlocked(request)
+            except BaseException:
+                async with admission_lock:
+                    activation_state["job_id"] = None
+                    activation_state["process"] = None
+                raise
+            if response.status != 202:
+                async with admission_lock:
+                    activation_state["job_id"] = None
+                    activation_state["process"] = None
+                return response
+            process = activation_state["process"]
+            if process is None:
+                async with admission_lock:
+                    activation_state["job_id"] = None
+                return response
+            monitor = asyncio.create_task(
+                _monitor_activation_process(request.app, job_id, process)
+            )
+            activation_state["monitor"] = monitor
+            return response
+        finally:
+            async with admission_lock:
+                start_lock.release()
+
     app.router.add_get("/customize", customize_page)
+    app.router.add_get("/customize/login", customize_login_page)
+    app.router.add_post("/api/customization/session", create_admin_session)
+    app.router.add_delete("/api/customization/session", delete_admin_session)
     app.router.add_get("/api/customization/active", active_status)
     app.router.add_post("/api/customization/prepare", prepare)
     app.router.add_get("/api/customization/{job_id}", job_status)

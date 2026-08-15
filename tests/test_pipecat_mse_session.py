@@ -2,10 +2,14 @@ import audioop
 import asyncio
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import numpy as np
+from pipecat.processors.frame_processor import FrameDirection
 
 from pipecat_dystream.mse_session import (
+    DialogResetFrame,
+    DialogResetProcessor,
     DyStreamEngineAudioAdapter,
     PipecatMSESession,
     _StatefulPCM16ToFloat16k,
@@ -323,6 +327,41 @@ class PipecatMSEHealthTests(unittest.TestCase):
 
         self.assertEqual(engine.interrupt_calls, 1)
         self.assertFalse(engine.assistant_output_pending())
+
+
+class PipecatMSELeaseResetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_custom_cascade_reset_is_forwarded_without_restarting_pipeline(self):
+        queued = []
+
+        async def queue_frame(frame):
+            queued.append(frame)
+            if isinstance(frame, DialogResetFrame):
+                frame.event.set()
+
+        session = object.__new__(PipecatMSESession)
+        session._mode = "custom_cascade"
+        session.connected = asyncio.Event()
+        session._custom = SimpleNamespace(reset_dialog=AsyncMock())
+        session.worker = SimpleNamespace(queue_frame=queue_frame)
+
+        await session.reset_dialog()
+
+        self.assertEqual(len(queued), 2)
+        self.assertEqual(type(queued[0]).__name__, "InterruptionFrame")
+        self.assertIsInstance(queued[1], DialogResetFrame)
+        self.assertTrue(queued[1].event.is_set())
+        session._custom.reset_dialog.assert_not_awaited()
+
+    async def test_tail_reset_processor_acknowledges_only_after_state_reset(self):
+        components = SimpleNamespace(reset_dialog=AsyncMock())
+        processor = DialogResetProcessor(components)
+        frame = DialogResetFrame()
+
+        await processor.process_frame(frame, FrameDirection.DOWNSTREAM)
+
+        components.reset_dialog.assert_awaited_once_with()
+        self.assertTrue(frame.event.is_set())
+        self.assertIsNone(frame.error)
 
 
 if __name__ == "__main__":
