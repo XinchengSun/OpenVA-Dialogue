@@ -1157,7 +1157,14 @@ function handleMediaVisibilityChange() {
 }
 
 function connectMedia() {
-  if (mediaWs && (mediaWs.readyState === WebSocket.OPEN || mediaWs.readyState === WebSocket.CONNECTING)) return mediaWs;
+  if (mediaWs && mediaWs.readyState === WebSocket.OPEN) {
+    startMediaWatchdog(mediaWs, mediaWsGeneration);
+    return mediaWs;
+  }
+  if (mediaWs && mediaWs.readyState === WebSocket.CONNECTING) {
+    startMediaConnectTimeout(mediaWs, mediaWsGeneration);
+    return mediaWs;
+  }
   const ws = new WebSocket(wsUrl('/ws/media'));
   const generation = ++mediaWsGeneration;
   mediaWs = ws;

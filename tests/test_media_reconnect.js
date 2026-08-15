@@ -109,6 +109,16 @@ function makeHarness() {
         cancelMediaWatchdog();
         mediaReconnectAttempt = 0;
       },
+      pauseConversationKeepMedia() {
+        appStarted = false;
+        cancelMediaReconnect();
+        cancelMediaConnectTimeout();
+        cancelMediaWatchdog();
+      },
+      resumeConversation() {
+        appStarted = true;
+        return connectMedia();
+      },
       checkCurrentWatchdog() {
         if (mediaWs) checkMediaWatchdog(mediaWs, mediaWsGeneration);
       },
@@ -259,6 +269,37 @@ test('media websocket cannot remain connecting forever', () => {
   assert.equal(harness.timers.size, 1);
   assert.equal(harness.runNextTimer(), 250);
   assert.equal(harness.sockets.length, 2);
+});
+
+test('resuming conversation rearms watchdog on an existing open socket', () => {
+  const harness = makeHarness();
+  const first = harness.api.connectMedia();
+  first.readyState = first.constructor.OPEN;
+  first.onopen();
+  assert.equal(harness.intervals.size, 1);
+
+  harness.api.pauseConversationKeepMedia();
+  assert.equal(harness.intervals.size, 0);
+  const resumed = harness.api.resumeConversation();
+
+  assert.equal(resumed, first);
+  assert.equal(harness.sockets.length, 1);
+  assert.equal(harness.intervals.size, 1);
+});
+
+test('resuming conversation rearms timeout on an existing connecting socket', () => {
+  const harness = makeHarness();
+  const first = harness.api.connectMedia();
+  assert.equal(harness.timers.size, 1);
+
+  harness.api.pauseConversationKeepMedia();
+  assert.equal(harness.timers.size, 0);
+  const resumed = harness.api.resumeConversation();
+
+  assert.equal(resumed, first);
+  assert.equal(harness.sockets.length, 1);
+  assert.equal(harness.timers.size, 1);
+  assert.equal(harness.runNextTimer(), 5000);
 });
 
 test('page release cancels reconnect before invalidating media generation', () => {
