@@ -219,6 +219,11 @@ const HANDOFF_TARGET_LATENCY_SEC = 0.08;
 const LOW_BUFFER_ENTER_SEC = 0.32;
 const LOW_BUFFER_EXIT_SEC = 0.48;
 const LOW_BUFFER_PLAYBACK_RATE = 0.96;
+// A real decoder starvation event gets one bounded refill. Normal playback
+// remains at the 0.48 s live target; only recovery waits for the startup-sized
+// reserve, then closes that temporary gap gently without seeking over speech.
+const REBUFFER_BUFFER_SEC = START_BUFFER_SEC;
+const REBUFFER_CATCHUP_RATE = 1.03;
 const SOFT_CATCHUP_SEC = 0.80;
 const FAST_CATCHUP_SEC = 1.30;
 const HARD_CATCHUP_SEC = 2.50;
@@ -537,6 +542,7 @@ function disposeSlot(slot) {
   if (!slot || slot.disposed) return;
   slot.disposed = true;
   slot.pendingSegments = [];
+  slot.rebufferResumePending = false;
   if (slot.activationTimer) {
     clearTimeout(slot.activationTimer);
     slot.activationTimer = null;
@@ -607,11 +613,68 @@ function armSlotActivation(slot) {
   }, 1500);
 }
 
+function enterPlaybackRebuffer(slot, reason) {
+  if (
+    !isCurrentSlot(slot)
+    || !slot.playbackStarted
+    || !slot.hasPlayed
+    || slot.rebuffering
+  ) return;
+  const ahead = bufferedAhead(slot);
+  if (
+    ahead >= LOW_BUFFER_ENTER_SEC
+    && slot.video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA
+  ) {
+    log(
+      `video ${reason} ignored generation=${slot.generation} ` +
+      `ahead=${ahead.toFixed(2)}s readyState=${slot.video.readyState}`
+    );
+    return;
+  }
+  slot.rebuffering = true;
+  slot.rebufferResumePending = false;
+  slot.rebufferCatchup = false;
+  slot.lowBufferRecovery = false;
+  slot.rebufferStartedAt = Date.now();
+  slot.rebufferCount += 1;
+  slot.video.playbackRate = 1.0;
+  slot.video.pause();
+  log(
+    `video rebuffer start generation=${slot.generation} ` +
+    `count=${slot.rebufferCount} reason=${reason} ahead=${ahead.toFixed(2)}s`
+  );
+}
+
 function maybePlay(slot) {
   if (!isCurrentSlot(slot)) return;
   const sourceBuffer = slot.sourceBuffer;
   if (!sourceBuffer || sourceBuffer.buffered.length === 0) return;
   const ahead = bufferedAhead(slot);
+  if (slot.rebuffering) {
+    if (ahead < REBUFFER_BUFFER_SEC || slot.rebufferResumePending) return;
+    const heldMs = Math.max(0, Date.now() - slot.rebufferStartedAt);
+    slot.rebufferResumePending = true;
+    slot.video.playbackRate = REBUFFER_CATCHUP_RATE;
+    slot.video.play().then(() => {
+      if (!isCurrentSlot(slot) || !slot.rebuffering) return;
+      slot.rebufferResumePending = false;
+      slot.rebuffering = false;
+      slot.rebufferCatchup = true;
+      slot.lowBufferRecovery = false;
+      log(
+        `video rebuffer end generation=${slot.generation} ` +
+        `held_ms=${heldMs} ahead=${ahead.toFixed(2)}s ` +
+        `rate=${REBUFFER_CATCHUP_RATE.toFixed(2)}`
+      );
+    }).catch(e => {
+      if (!isCurrentSlot(slot) || !slot.rebuffering) return;
+      slot.rebufferResumePending = false;
+      slot.rebufferCatchup = false;
+      slot.video.playbackRate = 1.0;
+      log('video rebuffer play blocked: ' + e);
+    });
+    return;
+  }
   const startBufferSec = slot.replacing ? HANDOFF_BUFFER_SEC : START_BUFFER_SEC;
   if (!slot.playbackStarted && ahead < startBufferSec) {
     const now = Date.now();
@@ -645,12 +708,16 @@ function liveTail(slot) {
   const latency = end - video.currentTime;
   const now = Date.now();
 
-  if (slot.playbackStarted) {
+  if (slot.playbackStarted && !slot.rebuffering) {
     let desiredRate = 1.0;
     if (latency < LOW_BUFFER_ENTER_SEC) slot.lowBufferRecovery = true;
     else if (latency >= LOW_BUFFER_EXIT_SEC) slot.lowBufferRecovery = false;
 
+    if (slot.rebufferCatchup && latency <= LOW_BUFFER_EXIT_SEC + 0.005) {
+      slot.rebufferCatchup = false;
+    }
     if (slot.lowBufferRecovery) desiredRate = LOW_BUFFER_PLAYBACK_RATE;
+    else if (slot.rebufferCatchup) desiredRate = REBUFFER_CATCHUP_RATE;
     if (latency > FAST_CATCHUP_SEC) {
       slot.lowBufferRecovery = false;
       desiredRate = 1.10;
@@ -663,6 +730,7 @@ function liveTail(slot) {
       video.currentTime = Math.max(0, end - TARGET_LATENCY_SEC);
       video.playbackRate = 1.0;
       slot.lowBufferRecovery = false;
+      slot.rebufferCatchup = false;
       slot.lastTailSeekAt = now;
       log(`live-tail hard catch-up latency=${latency.toFixed(2)}s target=${video.currentTime.toFixed(2)}`);
     } else if (Math.abs(video.playbackRate - desiredRate) > 0.001) {
@@ -738,10 +806,16 @@ function buildMSE(mime, replacing) {
     generation: mseGeneration,
     replacing: !!(replacing && oldActive),
     playbackStarted: false,
+    hasPlayed: false,
     lastPrebufferLogAt: 0,
     lastTailSeekAt: 0,
     lastBufferTrimAt: 0,
     lowBufferRecovery: false,
+    rebuffering: false,
+    rebufferResumePending: false,
+    rebufferCatchup: false,
+    rebufferStartedAt: 0,
+    rebufferCount: 0,
     mediaChunkCount: 0,
     activationArmed: false,
     activationTimer: null,
@@ -764,10 +838,23 @@ function buildMSE(mime, replacing) {
     if (isCurrentSlot(slot)) log('video loadedmetadata duration=' + targetVideo.duration);
   };
   targetVideo.onplaying = () => {
-    if (isCurrentSlot(slot)) log('video playing currentTime=' + targetVideo.currentTime.toFixed(2));
+    if (!isCurrentSlot(slot)) return;
+    if (slot.rebuffering && !slot.rebufferResumePending) {
+      targetVideo.pause();
+      return;
+    }
+    slot.hasPlayed = true;
+    log('video playing currentTime=' + targetVideo.currentTime.toFixed(2));
   };
   targetVideo.onwaiting = () => {
-    if (isCurrentSlot(slot)) log('video waiting currentTime=' + targetVideo.currentTime.toFixed(2));
+    if (!isCurrentSlot(slot)) return;
+    log('video waiting currentTime=' + targetVideo.currentTime.toFixed(2));
+    enterPlaybackRebuffer(slot, 'waiting');
+  };
+  targetVideo.onstalled = () => {
+    if (!isCurrentSlot(slot)) return;
+    log('video stalled currentTime=' + targetVideo.currentTime.toFixed(2));
+    enterPlaybackRebuffer(slot, 'stalled');
   };
   targetVideo.onerror = () => {
     if (!isCurrentSlot(slot)) return;
@@ -1148,6 +1235,8 @@ function startMediaConnectTimeout(ws, generation) {
 
 function handleMediaVisibilityChange() {
   if (document.visibilityState !== 'visible') return;
+  const slot = ingestSlot || activeSlot;
+  if (slot && slot.rebuffering) maybePlay(slot);
   if (mediaWs) {
     checkMediaWatchdog(mediaWs, mediaWsGeneration);
   } else if (mediaConnectionWanted()) {

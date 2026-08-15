@@ -92,12 +92,14 @@ function makeHarness() {
     let highestAssistantTurnId = -1;
     let lastBoundaryEventSeq = -1;
     let ingestSlot = null;
+    let activeSlot = null;
     let logWs = null;
     const MEDIA_RECONNECT_BASE_DELAY_MS = 250;
     const MEDIA_RECONNECT_MAX_DELAY_MS = 2000;
     const MEDIA_CONNECT_TIMEOUT_MS = 5000;
     const MEDIA_STALL_TIMEOUT_MS = 2000;
     const MEDIA_WATCHDOG_INTERVAL_MS = 500;
+    function maybePlay() {}
     ${mediaFunctions}
     ({
       connectMedia,
