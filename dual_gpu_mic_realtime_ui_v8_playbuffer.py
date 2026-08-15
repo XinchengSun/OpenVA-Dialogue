@@ -9,6 +9,29 @@ from pathlib import Path
 import numpy as np
 
 
+MOTION_AUDIO_HISTORY_HARD_CAP_SEC = 12
+MOTION_AUDIO_HISTORY_MIN_HEADROOM_SEC = 4
+
+
+def motion_history_hard_cap_samples(audio_sr, keep_samples):
+    return max(
+        MOTION_AUDIO_HISTORY_HARD_CAP_SEC * int(audio_sr),
+        int(keep_samples) + MOTION_AUDIO_HISTORY_MIN_HEADROOM_SEC * int(audio_sr),
+    )
+
+
+def motion_history_would_exceed_cap(
+    self_samples,
+    other_samples,
+    hop_samples,
+    hard_cap_samples,
+):
+    return (
+        max(int(self_samples), int(other_samples)) + int(hop_samples)
+        > int(hard_cap_samples)
+    )
+
+
 def put_drop_old(q, item):
     try:
         q.put_nowait(item)
@@ -83,6 +106,11 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
     history_keep_frames = max(
         window + int(args.feature_lag_frames) + 1,
         int(round(history_keep_sec * pose_fps)),
+    )
+    history_keep_samples = history_keep_frames * samples_per_frame
+    history_hard_cap_samples = motion_history_hard_cap_samples(
+        audio_sr,
+        history_keep_samples,
     )
 
     print(
@@ -281,7 +309,7 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
     def compact_stream_history():
         """Bound cumulative audio cost while preserving recurrent motion state."""
         nonlocal real_audio, real_audio_other, generated_idx
-        keep_samples = history_keep_frames * samples_per_frame
+        keep_samples = history_keep_samples
         old_samples = int(real_audio.shape[0])
         if old_samples <= keep_samples:
             return False
@@ -365,6 +393,14 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
 
                 hop_rms = float(np.sqrt(np.mean(hop.astype(np.float32) ** 2) + 1e-12))
                 hop_other_rms = float(np.sqrt(np.mean(hop_other.astype(np.float32) ** 2) + 1e-12))
+
+                if motion_history_would_exceed_cap(
+                    real_audio.shape[0],
+                    real_audio_other.shape[0],
+                    hop_samples,
+                    history_hard_cap_samples,
+                ):
+                    compact_stream_history()
 
                 # Accumulate real audio after prefix silence.
                 real_audio = np.concatenate([real_audio, hop.astype(np.float32)], axis=0)
