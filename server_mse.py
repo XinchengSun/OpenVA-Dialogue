@@ -1589,6 +1589,10 @@ class RealtimeMSEEngine:
             "ENGINE_LISTENER_AUDIO",
             "0",
         ).lower() not in ("0", "false", "no", "off")
+        self.listener_virtual_only = os.getenv(
+            "ENGINE_LISTENER_VIRTUAL_ONLY",
+            "0",
+        ).lower() not in ("", "0", "false", "no", "off")
         self._listener_virtual_audio = np.zeros(0, dtype=np.float32)
         self._listener_virtual_cursor = 0
         self._listener_virtual_path = ""
@@ -2424,7 +2428,11 @@ class RealtimeMSEEngine:
         ) = self._pop_user_hop(n)
         virtual_hop = self._next_virtual_listener_hop(n)
 
-        if user_speaking and user_available > 0:
+        if (
+            not self.listener_virtual_only
+            and user_speaking
+            and user_available > 0
+        ):
             desired = user_hop
             source = "mic"
             mode = "USER_SPEAKING"
@@ -2628,7 +2636,9 @@ class RealtimeMSEEngine:
             f"feed_idle={int(feed_idle)} idle_warmup_segments={idle_warmup_segments} "
             f"idle_continuous={int(idle_continuous)} idle_visible={int(idle_visible)} "
             f"idle_compact_segments={idle_compact_segments} "
-            f"listener_audio={int(listener_audio)} user_rms={self.user_speaking_rms:.4f} "
+            f"listener_audio={int(listener_audio)} "
+            f"listener_virtual_only={int(self.listener_virtual_only)} "
+            f"user_rms={self.user_speaking_rms:.4f} "
             f"max_audio_buf={self.max_audio_buf_samples} "
             f"audio_inflight_high_water={self.audio_inflight_high_water_samples} "
             f"idle_inflight_high_water={self.idle_audio_inflight_high_water_samples} "
@@ -3121,6 +3131,7 @@ class RealtimeMSEEngine:
             "tail_samples": tail_samples,
             "user_samples": self._user_samples,
             "listener_audio_enabled": self.listener_audio_enabled,
+            "listener_virtual_only": self.listener_virtual_only,
             "listener_virtual_samples": len(self._listener_virtual_audio),
             "listener_other_source": self._listener_other_source,
             "media_clients": len(self.media_clients),

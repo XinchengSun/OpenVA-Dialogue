@@ -58,6 +58,7 @@ def make_bare_engine():
     engine._user_samples = 0
     engine._last_user_voice_ts = 0.0
     engine._user_last_rms = 0.0
+    engine.listener_virtual_only = False
     engine._state = engine.ASSISTANT_ACTIVE
     engine._turn_id = 1
     engine._stream_generation = 0
@@ -602,6 +603,61 @@ class RealtimeCoreTests(unittest.TestCase):
         self.assertAlmostEqual(float(other[0]), 0.0, places=6)
         self.assertAlmostEqual(float(other[1279]), 0.5, places=6)
         self.assertTrue(np.all(other[1280:] == np.float32(0.5)))
+
+    def test_listener_virtual_only_ignores_loud_mic_and_drains_it(self):
+        engine = make_bare_engine()
+        engine.listener_virtual_only = True
+        engine.user_speaking_rms = 0.006
+        engine._listener_virtual_audio = np.full(
+            6400,
+            0.5,
+            dtype=np.float32,
+        )
+        engine._listener_virtual_cursor = 0
+        engine._listener_other_source = "virtual"
+        engine._listener_transition_samples = 1280
+        engine._user_chunks.append(
+            np.full(3200, 0.75, dtype=np.float32)
+        )
+        engine._user_samples = 3200
+
+        other, mode, other_rms = engine._pop_listener_other_hop(3200)
+
+        self.assertEqual(mode, "LISTENER_VIRTUAL")
+        self.assertEqual(engine._listener_other_source, "virtual")
+        self.assertEqual(engine._user_samples, 0)
+        np.testing.assert_array_equal(
+            other,
+            np.full(3200, 0.5, dtype=np.float32),
+        )
+        self.assertAlmostEqual(other_rms, 0.5, places=6)
+
+    def test_listener_default_still_uses_loud_mic(self):
+        engine = make_bare_engine()
+        engine.user_speaking_rms = 0.006
+        engine._listener_virtual_audio = np.full(
+            6400,
+            0.5,
+            dtype=np.float32,
+        )
+        engine._listener_virtual_cursor = 0
+        engine._listener_other_source = "mic"
+        engine._listener_transition_samples = 1280
+        engine._user_chunks.append(
+            np.full(3200, 0.75, dtype=np.float32)
+        )
+        engine._user_samples = 3200
+
+        other, mode, other_rms = engine._pop_listener_other_hop(3200)
+
+        self.assertEqual(mode, "USER_SPEAKING")
+        self.assertEqual(engine._listener_other_source, "mic")
+        self.assertEqual(engine._user_samples, 0)
+        np.testing.assert_array_equal(
+            other,
+            np.full(3200, 0.75, dtype=np.float32),
+        )
+        self.assertAlmostEqual(other_rms, 0.75, places=6)
 
     def test_interrupt_preserves_generation_and_enqueues_graceful_tail(self):
         engine = make_bare_engine()
