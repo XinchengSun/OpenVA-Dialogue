@@ -30,13 +30,15 @@ configure() {
 }
 
 share_url() {
+  local origin_value=""
   local token_value=""
   local encoded_value=""
+  origin_value="$(public_origin)"
   token_value="$(configure show-token)"
   encoded_value="$(printf '%s' "$token_value" | "$PYTHON_BIN" -c \
     'import sys, urllib.parse; sys.stdout.write(urllib.parse.quote(sys.stdin.read(), safe=""))')"
   token_value=""
-  printf '%s/customize/login#token=%s\n' "$(public_origin)" "$encoded_value"
+  printf '%s/customize/login#token=%s\n' "$origin_value" "$encoded_value"
 }
 
 case "$ACTION" in

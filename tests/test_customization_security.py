@@ -513,6 +513,7 @@ class ConfigureCustomizationAccessTests(unittest.TestCase):
         self.assertIn("share-url", script)
         self.assertIn("#token=%s", script)
         self.assertIn("urllib.parse.quote", script)
+        self.assertIn('origin_value="$(public_origin)"', script)
         self.assertIn("show-token", script)
         self.assertNotIn("admin_token=", script)
         self.assertNotIn("access_token=", script)
