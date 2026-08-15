@@ -212,13 +212,13 @@ const slotByVideo = new Map();
 // immediately starve playback.
 const START_BUFFER_SEC = 0.60;
 const HANDOFF_BUFFER_SEC = 0.16;
-// Public-media probes have observed gaps up to ~0.48 s. Keep another half GOP
-// of scheduling headroom without turning the listener stream into a deep buffer.
-const TARGET_LATENCY_SEC = 0.60;
+// Keep two complete GOPs behind the live edge. Startup already waits for
+// 0.60 s, so this retains the reserve instead of seeking most of it away.
+const TARGET_LATENCY_SEC = 0.48;
 const HANDOFF_TARGET_LATENCY_SEC = 0.08;
-const LOW_BUFFER_ENTER_SEC = 0.48;
-const LOW_BUFFER_EXIT_SEC = 0.60;
-const LOW_BUFFER_PLAYBACK_RATE = 0.94;
+const LOW_BUFFER_ENTER_SEC = 0.32;
+const LOW_BUFFER_EXIT_SEC = 0.48;
+const LOW_BUFFER_PLAYBACK_RATE = 0.96;
 const SOFT_CATCHUP_SEC = 0.80;
 const FAST_CATCHUP_SEC = 1.30;
 const HARD_CATCHUP_SEC = 2.50;
