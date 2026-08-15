@@ -214,6 +214,8 @@ class ConversationLeaseUnitTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConversationLeaseHTTPTests(unittest.IsolatedAsyncioTestCase):
+    PUBLIC_HEADERS = {"Host": "public.example", "Origin": "https://public.example"}
+
     async def asyncSetUp(self):
         self.engine = FakeEngine()
         self.dialog = FakeDialog()
@@ -310,7 +312,7 @@ class ConversationLeaseHTTPTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(aiohttp.WSServerHandshakeError) as media_error:
             await self.client.ws_connect(
                 f"/ws/media?client_id={CLIENT_A}",
-                headers={"Host": "public.example"},
+                headers=self.PUBLIC_HEADERS,
             )
         self.assertEqual(media_error.exception.status, 409)
 
@@ -324,20 +326,20 @@ class ConversationLeaseHTTPTests(unittest.IsolatedAsyncioTestCase):
     async def test_public_media_binds_only_after_matching_lease_grant(self):
         microphone = await self.client.ws_connect(
             f"/ws/mic?client_id={CLIENT_A}",
-            headers={"Host": "public.example"},
+            headers=self.PUBLIC_HEADERS,
         )
         self.assertEqual((await microphone.receive_json())["type"], "lease_granted")
 
         with self.assertRaises(aiohttp.WSServerHandshakeError) as other_error:
             await self.client.ws_connect(
                 f"/ws/media?client_id={CLIENT_B}",
-                headers={"Host": "public.example"},
+                headers=self.PUBLIC_HEADERS,
             )
         self.assertEqual(other_error.exception.status, 409)
 
         media = await self.client.ws_connect(
             f"/ws/media?client_id={CLIENT_A}",
-            headers={"Host": "public.example"},
+            headers=self.PUBLIC_HEADERS,
         )
         self.assertEqual((await media.receive_json())["type"], "mime")
         self.assertEqual((await media.receive_json())["type"], "log")
@@ -412,9 +414,25 @@ class ConversationLeaseHTTPTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(aiohttp.WSServerHandshakeError) as mic_error:
             await self.client.ws_connect(
                 "/ws/mic",
-                headers={"Host": "public.example"},
+                headers=self.PUBLIC_HEADERS,
             )
         self.assertEqual(mic_error.exception.status, 400)
+
+    async def test_public_websockets_reject_cross_origin_cookie_reuse(self):
+        for path in (
+            f"/ws/mic?client_id={CLIENT_A}",
+            f"/ws/media?client_id={CLIENT_A}",
+        ):
+            with self.assertRaises(aiohttp.WSServerHandshakeError) as error:
+                await self.client.ws_connect(
+                    path,
+                    headers={
+                        "Host": "public.example",
+                        "Origin": "https://attacker.trycloudflare.com",
+                    },
+                )
+            self.assertEqual(error.exception.status, 403)
+        self.assertFalse(self.lease.active)
 
     async def test_loopback_diagnostics_can_omit_client_id(self):
         status = await self.client.get("/api/realtime/status")

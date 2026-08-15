@@ -58,7 +58,13 @@ async def probe(base_url: str, token: str, timeout_sec: float) -> None:
     deadline = time.monotonic() + timeout_sec
     client_id = uuid.uuid4().hex
     cookie = f"{COOKIE_NAME}={token}"
-    headers = {"Cookie": cookie, "User-Agent": "dystream-public-media-probe/1"}
+    parsed_base = urlsplit(base_url)
+    public_origin = urlunsplit((parsed_base.scheme, parsed_base.netloc, "", "", ""))
+    headers = {
+        "Cookie": cookie,
+        "Origin": public_origin,
+        "User-Agent": "dystream-public-media-probe/1",
+    }
     timeout = aiohttp.ClientTimeout(total=timeout_sec + 10)
     mime = ""
     media = bytearray()

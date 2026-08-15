@@ -294,6 +294,21 @@ class RemoteCustomizationAccessTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(authorized.status, 200)
+        self.assertEqual(authorized.headers["Cache-Control"], "no-store")
+        self.assertIn("frame-ancestors 'none'", authorized.headers["Content-Security-Policy"])
+        self.assertEqual(authorized.headers["X-Frame-Options"], "DENY")
+
+        active = await self.client.get(
+            "/api/customization/active",
+            headers={
+                "Host": "avatar.example",
+                "Cookie": (
+                    f"{customization.CUSTOMIZATION_ADMIN_COOKIE_NAME}={cookie_value}"
+                ),
+            },
+        )
+        self.assertEqual(active.status, 200)
+        self.assertEqual(active.headers["Cache-Control"], "no-store")
 
     async def test_wrong_or_public_only_token_cannot_access_admin_api(self):
         wrong = await self.client.post(

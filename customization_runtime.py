@@ -1231,6 +1231,21 @@ def _no_store_headers() -> dict[str, str]:
 
 
 @web.middleware
+async def _customization_no_store(request: web.Request, handler: Any):
+    """Keep uploaded identities and job state out of browser/proxy caches."""
+
+    if not is_customization_path(request.path):
+        return await handler(request)
+    try:
+        response = await handler(request)
+    except web.HTTPException as exc:
+        exc.headers.update(_no_store_headers())
+        raise
+    response.headers.update(_no_store_headers())
+    return response
+
+
+@web.middleware
 async def _customization_access_gate(request: web.Request, handler: Any):
     if not is_customization_path(request.path):
         return await handler(request)
@@ -1460,12 +1475,21 @@ def register_customization_routes(app: web.Application) -> None:
         "process": None,
         "monitor": None,
     }
+    # The outer cache middleware also covers redirects, denials and exceptions
+    # returned by the access gate.
+    app.middlewares.append(_customization_no_store)
     app.middlewares.append(_customization_access_gate)
 
     async def customize_page(request: web.Request):
         return web.FileResponse(
             REPO_ROOT / "static" / "customize.html",
-            headers=_no_store_headers(),
+            headers={
+                **_no_store_headers(),
+                "Content-Security-Policy": "frame-ancestors 'none'; base-uri 'none'",
+                "X-Frame-Options": "DENY",
+                "X-Content-Type-Options": "nosniff",
+                "Referrer-Policy": "no-referrer",
+            },
         )
 
     async def customize_login_page(request: web.Request):

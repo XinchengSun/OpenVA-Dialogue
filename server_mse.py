@@ -1,6 +1,7 @@
 import argparse
 import audioop
 import asyncio
+import hmac
 import json
 import math
 import os
@@ -3313,6 +3314,21 @@ def _is_loopback_request(request: web.Request) -> bool:
     )
 
 
+def _require_public_websocket_origin(request: web.Request) -> None:
+    """Reject cross-origin browser sockets that could reuse the access cookie."""
+
+    if _is_loopback_request(request):
+        return
+    origin = request.headers.get("Origin", "").strip().rstrip("/").lower()
+    configured = os.getenv("CUSTOMIZATION_PUBLIC_ORIGIN", "").strip().rstrip("/").lower()
+    expected = configured or f"https://{request.host}".lower()
+    if not origin or not hmac.compare_digest(origin, expected):
+        raise web.HTTPForbidden(
+            text="WebSocket origin is not allowed.",
+            headers={"Cache-Control": "no-store"},
+        )
+
+
 def _customization_workload_active(app: web.Application) -> bool:
     prepare_lock = app.get("customization_prepare_lock")
     if prepare_lock is not None and prepare_lock.locked():
@@ -3396,6 +3412,7 @@ async def _close_failed_media_ws(
 
 
 async def media_ws(request: web.Request):
+    _require_public_websocket_origin(request)
     engine: RealtimeMSEEngine = request.app["engine"]
     diagnostic = _is_loopback_request(request) and not request.query.get("client_id")
     client_id = "" if diagnostic else _request_client_id(request)
@@ -3577,6 +3594,7 @@ async def logs_ws(request: web.Request):
 
 
 async def mic_ws(request: web.Request):
+    _require_public_websocket_origin(request)
     engine: RealtimeMSEEngine = request.app["engine"]
     client_id = (
         f"localdiagnostic{uuid.uuid4().hex}"

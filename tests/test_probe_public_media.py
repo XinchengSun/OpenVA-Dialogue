@@ -15,7 +15,7 @@ import probe_public_media
 
 class PublicMediaProbeTests(unittest.IsolatedAsyncioTestCase):
     async def test_probe_claims_one_id_before_opening_media(self):
-        observed = {"status": [], "mic": [], "media": []}
+        observed = {"status": [], "mic": [], "media": [], "origins": []}
 
         async def status(request):
             observed["status"].append(request.query.get("client_id"))
@@ -27,6 +27,7 @@ class PublicMediaProbeTests(unittest.IsolatedAsyncioTestCase):
 
         async def microphone(request):
             observed["mic"].append(request.query.get("client_id"))
+            observed["origins"].append(request.headers.get("Origin"))
             websocket = web.WebSocketResponse()
             await websocket.prepare(request)
             await websocket.send_json({"type": "lease_granted"})
@@ -36,6 +37,7 @@ class PublicMediaProbeTests(unittest.IsolatedAsyncioTestCase):
 
         async def media(request):
             observed["media"].append(request.query.get("client_id"))
+            observed["origins"].append(request.headers.get("Origin"))
             websocket = web.WebSocketResponse()
             await websocket.prepare(request)
             await websocket.send_json({
@@ -53,9 +55,10 @@ class PublicMediaProbeTests(unittest.IsolatedAsyncioTestCase):
         app.router.add_get("/ws/media", media)
         server = TestServer(app)
         await server.start_server()
+        base_url = str(server.make_url("/")).rstrip("/")
         try:
             await probe_public_media.probe(
-                str(server.make_url("/")).rstrip("/"),
+                base_url,
                 "not-a-real-token",
                 2.0,
             )
@@ -65,6 +68,7 @@ class PublicMediaProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(observed["status"]), 1)
         self.assertEqual(observed["status"], observed["mic"])
         self.assertEqual(observed["mic"], observed["media"])
+        self.assertEqual(observed["origins"], [base_url, base_url])
         client_id = observed["status"][0]
         self.assertRegex(client_id, r"^[A-Za-z0-9_-]{16,64}$")
 
