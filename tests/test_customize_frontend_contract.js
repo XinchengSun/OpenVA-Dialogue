@@ -9,6 +9,11 @@ const html = fs.readFileSync(
   'utf8'
 );
 const scriptMatch = html.match(/<script>([\s\S]*)<\/script>/);
+const loginHtml = fs.readFileSync(
+  path.join(__dirname, '..', 'static', 'customize_login.html'),
+  'utf8'
+);
+const loginScriptMatch = loginHtml.match(/<script>([\s\S]*)<\/script>/);
 
 function section(start, end) {
   const startIndex = html.indexOf(start);
@@ -21,6 +26,120 @@ function section(start, end) {
 test('customization page script parses', () => {
   assert.ok(scriptMatch, 'inline script must exist');
   new vm.Script(scriptMatch[1]);
+});
+
+test('one-link login strips the fragment before submitting the credential', () => {
+  assert.ok(loginScriptMatch, 'login inline script must exist');
+  new vm.Script(loginScriptMatch[1]);
+  const stripIndex = loginHtml.indexOf('history.replaceState');
+  const submitIndex = loginHtml.indexOf('void submitToken(sharedToken)');
+  assert.notEqual(stripIndex, -1);
+  assert.notEqual(submitIndex, -1);
+  assert.ok(stripIndex < submitIndex, 'fragment must be removed before login starts');
+  assert.match(loginHtml, /const rawFragment = window\.location\.hash;/);
+  assert.match(loginHtml, /new URLSearchParams\(rawFragment\.slice\(1\)\)/);
+  assert.match(loginHtml, /fragmentParams\.get\('token'\)/);
+  assert.match(loginHtml, /fetch\('\/api\/customization\/session'/);
+  assert.doesNotMatch(loginHtml, /localStorage|sessionStorage/);
+});
+
+test('one-link login exchanges the fragment through POST after removing it', async () => {
+  const token = 'a'.repeat(64);
+  const events = [];
+  const elements = {
+    loginForm: {addEventListener() {}},
+    adminToken: {value: ''},
+    submitBtn: {disabled: false},
+    status: {textContent: ''}
+  };
+  const context = {
+    document: {getElementById: id => elements[id]},
+    URLSearchParams,
+    history: {
+      replaceState(_state, _title, url) {
+        events.push(['strip', url]);
+      }
+    },
+    window: {
+      location: {
+        hash: `#token=${token}`,
+        pathname: '/customize/login',
+        search: '',
+        replace(url) {
+          events.push(['redirect', url]);
+        }
+      }
+    },
+    async fetch(url, options) {
+      events.push(['fetch', url, options]);
+      return {ok: true, status: 200};
+    }
+  };
+
+  vm.runInNewContext(loginScriptMatch[1], context);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(events[0][0], 'strip');
+  assert.equal(events[0][1], '/customize/login');
+  assert.equal(events[1][0], 'fetch');
+  assert.equal(events[1][1], '/api/customization/session');
+  assert.equal(events[1][2].method, 'POST');
+  assert.equal(JSON.parse(events[1][2].body).token, token);
+  assert.equal(events[2][0], 'redirect');
+  assert.equal(events[2][1], '/customize');
+  assert.equal(elements.adminToken.value, '');
+});
+
+test('failed one-link login stays stripped and a reload does not resubmit', async () => {
+  const token = 'b'.repeat(64);
+  let fetchCount = 0;
+  let strippedUrl = null;
+  const makeContext = hash => {
+    const elements = {
+      loginForm: {addEventListener() {}},
+      adminToken: {value: ''},
+      submitBtn: {disabled: false},
+      status: {textContent: ''}
+    };
+    const location = {
+      hash,
+      pathname: '/customize/login',
+      search: '',
+      replace() {
+        throw new Error('failed login must not redirect');
+      }
+    };
+    return {
+      elements,
+      context: {
+        document: {getElementById: id => elements[id]},
+        URLSearchParams,
+        history: {
+          replaceState(_state, _title, url) {
+            strippedUrl = url;
+            location.hash = '';
+          }
+        },
+        window: {location},
+        async fetch() {
+          fetchCount += 1;
+          return {ok: false, status: 401};
+        }
+      }
+    };
+  };
+
+  const first = makeContext(`#token=${token}`);
+  vm.runInNewContext(loginScriptMatch[1], first.context);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(strippedUrl, '/customize/login');
+  assert.equal(fetchCount, 1);
+  assert.equal(first.elements.adminToken.value, '');
+
+  const reload = makeContext('');
+  vm.runInNewContext(loginScriptMatch[1], reload.context);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fetchCount, 1, 'a stripped reload must not submit again');
 });
 
 test('customization page exposes provider and language selectors', () => {

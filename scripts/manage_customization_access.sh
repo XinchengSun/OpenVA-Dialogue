@@ -29,6 +29,16 @@ configure() {
   "$PYTHON_BIN" "$CONFIGURE" "$@" --env-file "$ENV_FILE"
 }
 
+share_url() {
+  local token_value=""
+  local encoded_value=""
+  token_value="$(configure show-token)"
+  encoded_value="$(printf '%s' "$token_value" | "$PYTHON_BIN" -c \
+    'import sys, urllib.parse; sys.stdout.write(urllib.parse.quote(sys.stdin.read(), safe=""))')"
+  token_value=""
+  printf '%s/customize/login#token=%s\n' "$(public_origin)" "$encoded_value"
+}
+
 case "$ACTION" in
   enable)
     configure enable --public-origin "$(public_origin)"
@@ -48,11 +58,15 @@ case "$ACTION" in
   login-url)
     printf '%s/customize/login\n' "$(public_origin)"
     ;;
+  share-url)
+    # The fragment is not sent in HTTP requests; the login page removes it before POSTing.
+    share_url
+    ;;
   show-token)
-    # This explicit action is the only command that prints the administrator secret.
+    # Explicit credential-revealing action for manual login.
     configure show-token
     ;;
   *)
-    die "usage: $0 {enable|disable|rotate-token|status|login-url|show-token}"
+    die "usage: $0 {enable|disable|rotate-token|status|login-url|share-url|show-token}"
     ;;
 esac

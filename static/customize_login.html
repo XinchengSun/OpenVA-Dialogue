@@ -65,18 +65,20 @@
       <button id="submitBtn" type="submit">进入定制后台</button>
     </form>
     <div id="status" role="status" aria-live="polite"></div>
-    <p class="note">令牌只通过当前 HTTPS 请求提交，不会写入网址、本地存储或页面脚本。</p>
+    <p class="note">分享链接中的凭证只存在于 # 片段；页面会立即清除地址栏，再通过 HTTPS 请求验证。</p>
   </main>
   <script>
     const form = document.getElementById('loginForm');
     const tokenInput = document.getElementById('adminToken');
     const submitBtn = document.getElementById('submitBtn');
     const statusEl = document.getElementById('status');
+    let loginPending = false;
 
-    form.addEventListener('submit', async event => {
-      event.preventDefault();
-      const token = tokenInput.value;
-      if (token.length < 32) return;
+    async function submitToken(token) {
+      if (loginPending || typeof token !== 'string' || token.length < 32 || token.length > 512) {
+        return;
+      }
+      loginPending = true;
       submitBtn.disabled = true;
       statusEl.textContent = '正在验证…';
       try {
@@ -102,8 +104,25 @@
       } finally {
         tokenInput.value = '';
         submitBtn.disabled = false;
+        loginPending = false;
       }
+    }
+
+    form.addEventListener('submit', event => {
+      event.preventDefault();
+      void submitToken(tokenInput.value);
     });
+
+    const rawFragment = window.location.hash;
+    if (rawFragment) {
+      history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
+    const fragmentParams = new URLSearchParams(rawFragment.slice(1));
+    const sharedToken = fragmentParams.get('token');
+    if (sharedToken) {
+      statusEl.textContent = '正在打开定制后台…';
+      void submitToken(sharedToken);
+    }
   </script>
 </body>
 </html>
