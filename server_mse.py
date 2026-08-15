@@ -3320,8 +3320,10 @@ def _require_public_websocket_origin(request: web.Request) -> None:
     if _is_loopback_request(request):
         return
     origin = request.headers.get("Origin", "").strip().rstrip("/").lower()
-    configured = os.getenv("CUSTOMIZATION_PUBLIC_ORIGIN", "").strip().rstrip("/").lower()
-    expected = configured or f"https://{request.host}".lower()
+    # Bind chat sockets to the page's current public host. This deliberately
+    # does not reuse the customization-admin origin: Quick Tunnel hostnames can
+    # rotate, and a stale admin setting must not lock ordinary chat out.
+    expected = f"https://{request.host}".lower()
     if not origin or not hmac.compare_digest(origin, expected):
         raise web.HTTPForbidden(
             text="WebSocket origin is not allowed.",

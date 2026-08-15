@@ -324,10 +324,16 @@ class ConversationLeaseHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(log_error.exception.status, 403)
 
     async def test_public_media_binds_only_after_matching_lease_grant(self):
-        microphone = await self.client.ws_connect(
-            f"/ws/mic?client_id={CLIENT_A}",
-            headers=self.PUBLIC_HEADERS,
-        )
+        # A rotated chat tunnel must use the request host, not a stale admin
+        # origin left in the environment.
+        with mock.patch.dict(
+            os.environ,
+            {"CUSTOMIZATION_PUBLIC_ORIGIN": "https://stale.example"},
+        ):
+            microphone = await self.client.ws_connect(
+                f"/ws/mic?client_id={CLIENT_A}",
+                headers=self.PUBLIC_HEADERS,
+            )
         self.assertEqual((await microphone.receive_json())["type"], "lease_granted")
 
         with self.assertRaises(aiohttp.WSServerHandshakeError) as other_error:
