@@ -468,6 +468,19 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
+async def _wait_for_process_exit(
+    process: subprocess.Popen,
+    *,
+    poll_interval: float = 0.25,
+) -> int:
+    """Wait without occupying the event loop's default thread executor."""
+    while True:
+        returncode = process.poll()
+        if returncode is not None:
+            return int(returncode)
+        await asyncio.sleep(poll_interval)
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -1923,7 +1936,7 @@ def register_customization_routes(app: web.Application) -> None:
         process: subprocess.Popen,
     ) -> None:
         try:
-            await asyncio.to_thread(process.wait)
+            await _wait_for_process_exit(process)
         finally:
             async with _workload_admission_lock(app_obj):
                 state = app_obj["customization_activation_state"]

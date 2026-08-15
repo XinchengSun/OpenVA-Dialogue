@@ -1,4 +1,6 @@
+import asyncio
 import importlib.util
+import inspect
 import io
 import json
 import math
@@ -1137,6 +1139,46 @@ class CustomizationRuntimeTests(unittest.TestCase):
                 wav.writeframes(b"\x20\x03" * int(16000 * 30.2))
             with self.assertRaisesRegex(CustomizationInputError, "30 秒"):
                 _normalize_voice(source, Path(directory) / "out.wav")
+
+
+class ActivationProcessMonitorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_wait_polls_without_calling_blocking_wait(self):
+        process = mock.Mock()
+        process.poll.side_effect = [None, 0]
+        process.wait.side_effect = AssertionError("blocking wait must not be used")
+
+        returncode = await customization._wait_for_process_exit(
+            process, poll_interval=0
+        )
+
+        self.assertEqual(returncode, 0)
+        process.wait.assert_not_called()
+
+    def test_activation_monitor_uses_cancellable_wait(self):
+        source = inspect.getsource(customization.register_customization_routes)
+        self.assertIn("await _wait_for_process_exit(process)", source)
+        self.assertNotIn("asyncio.to_thread(process.wait)", source)
+
+    async def test_wait_is_cancellable_while_child_process_remains_alive(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+        try:
+            monitor = asyncio.create_task(
+                customization._wait_for_process_exit(process, poll_interval=0.01)
+            )
+            await asyncio.sleep(0.03)
+            monitor.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(monitor, timeout=0.5)
+            self.assertIsNone(process.poll())
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
 
 
 class CustomizationApiTests(unittest.IsolatedAsyncioTestCase):
