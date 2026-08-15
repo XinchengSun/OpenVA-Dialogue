@@ -184,6 +184,11 @@ let micResampleWeightedSum = 0;
 let micResampleWeight = 0;
 let mseGeneration = 0;
 let mediaWsGeneration = 0;
+let mediaReconnectTimer = null;
+let mediaConnectTimer = null;
+let mediaReconnectAttempt = 0;
+let mediaWatchdogTimer = null;
+let lastMediaBytesAt = 0;
 let logWsGeneration = 0;
 let micLifecycleGeneration = 0;
 let activeSlot = null;
@@ -226,6 +231,11 @@ const BUFFER_TRIM_INTERVAL_MS = 5000;
 const MIC_SEND_SAMPLES = 640;
 const LOG_MAX_LINES = 800;
 const LOG_TRIM_TO_LINES = 400;
+const MEDIA_RECONNECT_BASE_DELAY_MS = 250;
+const MEDIA_RECONNECT_MAX_DELAY_MS = 2000;
+const MEDIA_CONNECT_TIMEOUT_MS = 5000;
+const MEDIA_STALL_TIMEOUT_MS = 2000;
+const MEDIA_WATCHDOG_INTERVAL_MS = 500;
 let logLineCount = 0;
 
 function log(line) {
@@ -1045,28 +1055,138 @@ function connectLogs() {
   return ws;
 }
 
+function cancelMediaReconnect() {
+  if (mediaReconnectTimer === null) return;
+  clearTimeout(mediaReconnectTimer);
+  mediaReconnectTimer = null;
+}
+
+function cancelMediaConnectTimeout() {
+  if (mediaConnectTimer === null) return;
+  clearTimeout(mediaConnectTimer);
+  mediaConnectTimer = null;
+}
+
+function mediaConnectionWanted() {
+  return appStarted || startInProgress;
+}
+
+function cancelMediaWatchdog() {
+  if (mediaWatchdogTimer === null) return;
+  clearInterval(mediaWatchdogTimer);
+  mediaWatchdogTimer = null;
+}
+
+function scheduleMediaReconnect(generation) {
+  cancelMediaReconnect();
+  if (!mediaConnectionWanted()) return;
+  const delay = Math.min(
+    MEDIA_RECONNECT_BASE_DELAY_MS * (2 ** mediaReconnectAttempt),
+    MEDIA_RECONNECT_MAX_DELAY_MS,
+  );
+  mediaReconnectAttempt += 1;
+  mediaReconnectTimer = setTimeout(() => {
+    mediaReconnectTimer = null;
+    if (
+      !mediaConnectionWanted()
+      || generation !== mediaWsGeneration
+      || mediaWs !== null
+    ) return;
+    log('media ws reconnecting');
+    connectMedia();
+  }, delay);
+}
+
+function checkMediaWatchdog(ws, generation) {
+  if (
+    !mediaConnectionWanted()
+    || mediaWs !== ws
+    || generation !== mediaWsGeneration
+    || document.visibilityState === 'hidden'
+    || performance.now() - lastMediaBytesAt < MEDIA_STALL_TIMEOUT_MS
+  ) return;
+  cancelMediaWatchdog();
+  mediaWs = null;
+  mediaWsGeneration += 1;
+  const reconnectGeneration = mediaWsGeneration;
+  log('media bytes stalled; rebuilding websocket and MSE');
+  setStatus('media reconnecting');
+  teardownMSE();
+  ensureIdlePlaying();
+  try { ws.close(4000, 'media stalled'); } catch (_) {}
+  scheduleMediaReconnect(reconnectGeneration);
+}
+
+function startMediaWatchdog(ws, generation) {
+  cancelMediaWatchdog();
+  lastMediaBytesAt = performance.now();
+  mediaWatchdogTimer = setInterval(
+    () => checkMediaWatchdog(ws, generation),
+    MEDIA_WATCHDOG_INTERVAL_MS,
+  );
+}
+
+function startMediaConnectTimeout(ws, generation) {
+  cancelMediaConnectTimeout();
+  mediaConnectTimer = setTimeout(() => {
+    mediaConnectTimer = null;
+    if (
+      !mediaConnectionWanted()
+      || mediaWs !== ws
+      || generation !== mediaWsGeneration
+      || ws.readyState !== WebSocket.CONNECTING
+    ) return;
+    mediaWs = null;
+    mediaWsGeneration += 1;
+    const reconnectGeneration = mediaWsGeneration;
+    log('media ws connect timed out; retrying');
+    setStatus('media reconnecting');
+    try { ws.close(4001, 'media connect timeout'); } catch (_) {}
+    scheduleMediaReconnect(reconnectGeneration);
+  }, MEDIA_CONNECT_TIMEOUT_MS);
+}
+
+function handleMediaVisibilityChange() {
+  if (document.visibilityState !== 'visible') return;
+  if (mediaWs) {
+    checkMediaWatchdog(mediaWs, mediaWsGeneration);
+  } else if (mediaConnectionWanted()) {
+    cancelMediaReconnect();
+    connectMedia();
+  }
+}
+
 function connectMedia() {
   if (mediaWs && (mediaWs.readyState === WebSocket.OPEN || mediaWs.readyState === WebSocket.CONNECTING)) return mediaWs;
   const ws = new WebSocket(wsUrl('/ws/media'));
   const generation = ++mediaWsGeneration;
   mediaWs = ws;
   ws.binaryType = 'arraybuffer';
+  startMediaConnectTimeout(ws, generation);
   ws.onopen = () => {
     if (mediaWs !== ws || generation !== mediaWsGeneration) return;
+    cancelMediaConnectTimeout();
+    cancelMediaReconnect();
     currentStreamEpoch = 0;
+    expectedStreamGeneration = -1;
     highestAssistantTurnId = -1;
     lastBoundaryEventSeq = -1;
     resetAssistantAudioGate('new media websocket');
     log('media ws connected');
     setStatus('media connected');
     ensureIdlePlaying();
+    startMediaWatchdog(ws, generation);
   };
   ws.onclose = () => {
     if (mediaWs !== ws || generation !== mediaWsGeneration) return;
+    cancelMediaConnectTimeout();
+    cancelMediaWatchdog();
     mediaWs = null;
-    log('media ws closed');
-    setStatus('media closed');
+    log('media ws closed; rebuilding live stream');
+    setStatus(mediaConnectionWanted() ? 'media reconnecting' : 'media closed');
     teardownMSE();
+    ensureIdlePlaying();
+    scheduleMediaReconnect(generation);
   };
   ws.onerror = () => {
     if (mediaWs !== ws || generation !== mediaWsGeneration) return;
@@ -1081,6 +1201,7 @@ function connectMedia() {
         log('MSE mime: ' + obj.mime);
         setupMSE(obj.mime);
       } else if (obj && obj.type === 'stream_reset') {
+        lastMediaBytesAt = performance.now();
         currentStreamEpoch = Number(obj.epoch ?? (currentStreamEpoch + 1));
         resetAssistantAudioGate('stream reset');
         log(`stream reset epoch=${obj.epoch ?? 'unknown'}: preparing hidden live slot`);
@@ -1097,6 +1218,8 @@ function connectMedia() {
       }
       return;
     }
+    lastMediaBytesAt = performance.now();
+    mediaReconnectAttempt = 0;
     const slot = ingestSlot;
     if (!slot || !isCurrentSlot(slot)) {
       log(`media segment dropped without current slot bytes=${ev.data.byteLength}`);
@@ -1322,6 +1445,10 @@ function stopMic() {
   micWs = null;
   if (oldMicWs && oldMicWs.readyState < WebSocket.CLOSING) oldMicWs.close();
   appStarted = false;
+  cancelMediaReconnect();
+  cancelMediaConnectTimeout();
+  cancelMediaWatchdog();
+  mediaReconnectAttempt = 0;
   holdLiveAudio('mic stopped');
   startBtn.disabled = false;
   startBtn.textContent = '开始对话';
@@ -1337,6 +1464,9 @@ function closePageSocket(ws) {
 
 function releaseRealtimePage() {
   stopMic();
+  cancelMediaReconnect();
+  cancelMediaConnectTimeout();
+  cancelMediaWatchdog();
   const oldMediaWs = mediaWs;
   mediaWs = null;
   mediaWsGeneration += 1;
@@ -1350,6 +1480,7 @@ function releaseRealtimePage() {
 
 customizeLink.addEventListener('click', releaseRealtimePage);
 window.addEventListener('pagehide', releaseRealtimePage);
+document.addEventListener('visibilitychange', handleMediaVisibilityChange);
 
 startBtn.onclick = async () => {
   if (startInProgress) return;
