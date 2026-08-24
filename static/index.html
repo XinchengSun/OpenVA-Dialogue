@@ -365,6 +365,14 @@ function renderRealtimeStatus(snapshot) {
     capacityStatusEl.dataset.state = 'available';
     capacityStatusEl.textContent = `服务器空闲，可以开始 · 视频流连接 ${viewers} · ${activity}`;
   }
+  const gpu = snapshot.gpu || {};
+  if (gpu.available) {
+    const cards = Array.isArray(gpu.cards) ? gpu.cards : [];
+    const peak = cards.reduce((m, c) => Math.max(m, Number(c.utilization_pct) || 0), 0);
+    const gpuText = `GPU ${gpu.cards_used || 0}/${gpu.cards_limit || 4} 张 · 最高 ${peak.toFixed(0)}% · ${gpu.message || ''}`;
+    capacityStatusEl.textContent += ` · ${gpuText}`;
+    capacityStatusEl.dataset.state = gpu.pressure === 'overloaded' ? 'busy' : capacityStatusEl.dataset.state;
+  }
   syncStartButtonWithCapacity();
 }
 

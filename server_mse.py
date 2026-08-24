@@ -3806,6 +3806,49 @@ async def health(request: web.Request):
     return web.json_response(snapshot, status=status)
 
 
+_GPU_STATUS_CACHE: Dict[str, Any] = {"at": 0.0, "value": {"available": False, "cards_limit": 4}}
+
+
+def _gpu_public_snapshot() -> Dict[str, Any]:
+    """Short-lived, sanitized GPU telemetry for the capacity badge."""
+    now = time.time()
+    if now - float(_GPU_STATUS_CACHE.get("at", 0.0)) < 2.0:
+        return dict(_GPU_STATUS_CACHE["value"])
+    try:
+        raw = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used,memory.total,pstate",
+             "--format=csv,noheader,nounits"], text=True, stderr=subprocess.DEVNULL, timeout=1.5)
+        visible_ids = {
+            int(value.strip())
+            for value in os.getenv("CUDA_VISIBLE_DEVICES", "").split(",")
+            if value.strip().isdigit()
+        }
+        cards = []
+        for line in raw.splitlines():
+            p = [x.strip() for x in line.split(",")]
+            if len(p) != 5:
+                continue
+            index = int(p[0])
+            if visible_ids and index not in visible_ids:
+                continue
+            cards.append({"index": index, "utilization_pct": round(float(p[1]), 1),
+                          "memory_used_mib": round(float(p[2])), "memory_total_mib": round(float(p[3])),
+                          "pstate": p[4]})
+        pressure = "normal"
+        if any(c["utilization_pct"] >= 90 or c["memory_used_mib"] / max(c["memory_total_mib"], 1) >= .9 for c in cards):
+            pressure = "overloaded"
+        elif any(c["utilization_pct"] >= 70 or c["memory_used_mib"] / max(c["memory_total_mib"], 1) >= .8 for c in cards):
+            pressure = "elevated"
+        value = {"available": True, "cards_limit": 4, "cards_used": len(cards),
+                 "cards": cards, "pressure": pressure,
+                 "message": "高峰期，回复可能较慢" if pressure != "normal" else "GPU负载正常"}
+    except Exception:
+        value = {"available": False, "cards_limit": 4, "cards_used": 0,
+                 "pressure": "unknown", "message": "GPU负载暂时无法读取"}
+    _GPU_STATUS_CACHE.update({"at": now, "value": value})
+    return dict(value)
+
+
 def _realtime_status_payload(
     request: web.Request,
     *,
@@ -3846,6 +3889,7 @@ def _realtime_status_payload(
         else "busy" if conversation_active
         else "available"
     )
+    gpu = _gpu_public_snapshot()
     return {
         "service_ready": service_ready,
         "phase": (
@@ -3864,6 +3908,7 @@ def _realtime_status_payload(
         },
         "media_clients": len(engine.media_clients),
         "speech": _dialog_public_load(dialog_health),
+        "gpu": gpu,
         "updated_at": time.time(),
         "poll_after_ms": 2000,
     }

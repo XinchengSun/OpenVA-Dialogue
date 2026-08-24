@@ -22,6 +22,20 @@ timeline.
 
 > **Current primary stack:** Paraformer + streaming LLM + Fish Speech S2 Pro / SGLang-Omni + DyStream + LIA.
 
+## Repository scope
+
+- **FlashAV2AV is the deployable realtime system**: dialogue, TTS selection,
+  Listener/Speaker routing, browser streaming, customization, and service
+  lifecycle live in this repository.
+- [`XinchengSun/DyStream`](https://github.com/XinchengSun/DyStream) is a compact
+  research/overfit package, not a complete copy of the original DyStream
+  runtime and not a separate Listener-checkpoint release.
+- Listener motion uses the `other` audio condition of the same dual-audio
+  DyStream checkpoint. `training_mode: speaker_only` controls training-data
+  selection, while `cfg_audio_other: 0` disables the other-audio contribution
+  at inference. Changing either field alone cannot add Listener behavior that
+  is absent from the loaded checkpoint.
+
 ## What it delivers
 
 - **Portrait customization** from a single front-facing image.

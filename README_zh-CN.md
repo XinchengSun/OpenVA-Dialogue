@@ -18,6 +18,16 @@ FlashAV2AV 使用一张人物正脸图和一段短参考声音，生成可在浏
 
 > **当前主链路：** Paraformer + 流式 LLM + Fish Speech S2 Pro / SGLang-Omni + DyStream + LIA。
 
+## 仓库边界
+
+- **FlashAV2AV 才是可部署的实时系统仓库**：对话、TTS 选择、Listener/Speaker
+  路由、浏览器流、数字人定制和服务生命周期都在本仓库。
+- [`XinchengSun/DyStream`](https://github.com/XinchengSun/DyStream) 是精简的研究与
+  overfit 实验包，不是原始 DyStream 的完整运行仓库，也没有单独发布 Listener 权重。
+- Listener 使用同一个双音频 DyStream checkpoint 的 `other` 条件分支。
+  `training_mode: speaker_only` 控制训练数据筛选；`cfg_audio_other: 0` 会在推理时关闭
+  other 音频贡献。只改这两个字段，不能凭空获得 checkpoint 中不存在的倾听能力。
+
 ## 核心能力
 
 - **形象定制**：使用一张正脸图生成当前数字人形象。

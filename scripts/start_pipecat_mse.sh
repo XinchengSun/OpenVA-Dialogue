@@ -34,6 +34,16 @@ if [[ -z "${PIPECAT_S2S_API_KEY:-${DASHSCOPE_API_KEY:-${PIPECAT_LLM_API_KEY:-${O
 fi
 
 VISIBLE_GPUS="${CUDA_VISIBLE_DEVICES:-0,1}"
+if [[ "${AUTO_GPU_SCHEDULER:-1}" == "1" ]]; then
+  gpu_pick="$($PYTHON_BIN "$ROOT_DIR/gpu_scheduler.py")" \
+    || { echo "automatic GPU selection failed" >&2; exit 1; }
+  VISIBLE_GPUS="$(GPU_PICK_JSON="$gpu_pick" "$PYTHON_BIN" -c 'import json,os; print(",".join(map(str,json.loads(os.environ["GPU_PICK_JSON"])["selected"])))')"
+fi
+IFS=',' read -r -a selected_gpu_ids <<< "$VISIBLE_GPUS"
+if [[ ${#selected_gpu_ids[@]} -gt 4 ]]; then
+  echo "GPU scheduler refused more than four visible GPUs: $VISIBLE_GPUS" >&2
+  exit 1
+fi
 MOTION_LOGICAL_GPU="${MOTION_GPU:-0}"
 RENDER_LOGICAL_GPU="${RENDER_GPU:-1}"
 ALLOW_SHARED_DYSTREAM_GPU="${ALLOW_SHARED_DYSTREAM_GPU:-0}"
