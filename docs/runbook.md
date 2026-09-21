@@ -6,7 +6,7 @@ numbers, and troubleshooting guide are in the repository root `README.md`.
 Server:
 
 ```bash
-cd "${FLASHAV2AV_ROOT:-$HOME/FlashAV2AV}"
+cd "${FLASHAV2AV_ROOT:-$HOME/OpenVA-Dialogue}"
 bash scripts/run_demo.sh
 ```
 

@@ -46,16 +46,24 @@ class S2SLauncherContractTests(unittest.TestCase):
         self.assertIn("manage_fish_s2pro.sh", run_demo)
         self.assertIn("native_s2s", connect_demo)
 
-    def test_production_preflight_keeps_dual_gpu_guard(self):
-        run_demo = (ROOT / "scripts" / "run_demo.sh").read_text(encoding="utf-8")
-        start_demo = (ROOT / "scripts" / "start_pipecat_mse.sh").read_text(
-            encoding="utf-8"
+    @unittest.skipIf(os.name == "nt", "GPU preflight behavior is validated by Bash on Linux")
+    @unittest.skipUnless(shutil.which("bash"), "bash is required")
+    def test_production_preflight_enforces_single_and_dual_gpu_budget(self):
+        subprocess.run(
+            ["bash", str(ROOT / "tests" / "test_single_gpu_launchers.sh")],
+            check=True,
+            capture_output=True,
+            text=True,
         )
 
-        self.assertIn("at least two NVIDIA GPUs are required", run_demo)
-        self.assertIn(
-            "CUDA_VISIBLE_DEVICES must expose exactly two different GPUs",
-            start_demo,
+    @unittest.skipIf(os.name == "nt", "Read-only setup behavior is validated by Bash on Linux")
+    @unittest.skipUnless(shutil.which("bash"), "bash is required")
+    def test_single_gpu_setup_checks_official_prerequisites_without_fish(self):
+        subprocess.run(
+            ["bash", str(ROOT / "tests" / "test_single_gpu_setup.sh")],
+            check=True,
+            capture_output=True,
+            text=True,
         )
 
     def test_workers_preserve_launcher_cuda_mapping(self):

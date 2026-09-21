@@ -1,12 +1,12 @@
 <div align="center">
 
-<img src="docs/assets/flashav2av-banner.svg" alt="FlashAV2AV" width="100%">
+<img src="docs/assets/flashav2av-banner.svg" alt="OpenVA-Dialogue" width="100%">
 
-# FlashAV2AV
+# OpenVA-Dialogue
 
-**Customizable real-time conversational avatars with zero-shot voice cloning.**
+**An open-source agent system for full-duplex real-time audio-visual dialogue.**
 
-[![CI](https://github.com/XinchengSun/FlashAV2AV/actions/workflows/ci.yml/badge.svg)](https://github.com/XinchengSun/FlashAV2AV/actions/workflows/ci.yml)
+[![CI](https://github.com/XinchengSun/OpenVA-Dialogue/actions/workflows/ci.yml/badge.svg)](https://github.com/XinchengSun/OpenVA-Dialogue/actions/workflows/ci.yml)
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Linux](https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux&logoColor=111)](#tested-setup)
 
@@ -14,11 +14,17 @@
 
 </div>
 
-FlashAV2AV turns one portrait and one short reference recording into a
+OpenVA-Dialogue turns one portrait and one short reference recording into a
 browser-based conversational avatar. Its primary pipeline streams microphone
 audio through Paraformer, an OpenAI-compatible LLM, Fish Speech S2 Pro, and a
 continuous DyStream/LIA renderer while preserving one interruptible audio/video
 timeline.
+
+**Keywords:** Full-Duplex Dialogue, Audio-Visual Dialogue, Real-Time Interaction,
+Streaming Generation.
+
+Previously named FlashAV2AV. Existing `scripts/flashav2av` commands,
+`FLASHAV2AV_*` environment variables, and engine identifiers remain compatible.
 
 > **Current primary stack:** Paraformer + streaming LLM + Fish Speech S2 Pro / SGLang-Omni + DyStream + LIA.
 
@@ -44,7 +50,7 @@ the native 512 x 512 avatar output; a reproducible microphone-to-avatar demo
 capture is still being prepared.
 
 <div align="center">
-  <img src="docs/assets/flashav2av-avatar-preview.gif" alt="FlashAV2AV generated avatar preview" width="384">
+  <img src="docs/assets/flashav2av-avatar-preview.gif" alt="OpenVA-Dialogue generated avatar preview" width="384">
 </div>
 
 ## Quick Start
@@ -55,8 +61,8 @@ or SGLang-Omni from a blank host. Complete the short Fish runtime prerequisite
 in the [deployment guide](docs/deployment.md#prepare-the-fish-runtime) first.
 
 ```bash
-git clone https://github.com/XinchengSun/FlashAV2AV.git
-cd FlashAV2AV
+git clone https://github.com/XinchengSun/OpenVA-Dialogue.git
+cd OpenVA-Dialogue
 
 export FLASHAV2AV_DATA_ROOT=/data/flashav2av
 bash scripts/flashav2av setup
@@ -112,6 +118,12 @@ audio/video boundaries, and fragmented-MP4 browser stream. The detailed state
 contract and GPU placement are in [architecture.md](docs/architecture.md).
 
 ## Tested setup
+
+An opt-in **single RTX 4090 / 24GB profile** is available with local VoxCPM2
+TTS, CPU ASR, and an API-based LLM. See [single-card setup and validation](docs/single_gpu_4090.md).
+Measured on a 4090: about 13.0 GiB sampled GPU memory and 12.4 delivered FPS
+at 512×512; see [measurements and limits](docs/single_gpu_validation_20260921.md).
+The Fish configuration below remains the existing multi-GPU profile.
 
 | Component | Tested configuration |
 | --- | --- |
@@ -174,7 +186,7 @@ or restart fails. See [README_CUSTOMIZATION.md](README_CUSTOMIZATION.md).
 
 ## Acknowledgements
 
-FlashAV2AV builds on [DyStream](https://github.com/XinchengSun/DyStream),
+OpenVA-Dialogue builds on [DyStream](https://github.com/XinchengSun/DyStream),
 [Pipecat](https://github.com/pipecat-ai/pipecat),
 [Fish Speech S2 Pro](https://huggingface.co/fishaudio/s2-pro),
 [SGLang-Omni](https://github.com/sgl-project/sglang-omni),

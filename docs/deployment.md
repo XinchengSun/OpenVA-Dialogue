@@ -1,4 +1,4 @@
-# FlashAV2AV deployment guide
+# OpenVA-Dialogue deployment guide
 
 This guide contains the host-specific setup details that do not belong in the
 project landing page. The supported public entry point is always
@@ -88,7 +88,7 @@ The generated private files are written with mode `0600` under
 | --- | --- |
 | `127.0.0.1:8001` | Fish S2 Pro HTTP service |
 | `127.0.0.1:8771` | local streaming PCM bridge |
-| `127.0.0.1:7860` | FlashAV2AV browser service |
+| `127.0.0.1:7860` | OpenVA-Dialogue browser service |
 | local `127.0.0.1:6008` | suggested SSH-forwarded browser port |
 
 Remote browser access:

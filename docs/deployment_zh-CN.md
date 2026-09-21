@@ -1,4 +1,4 @@
-# FlashAV2AV 部署说明
+# OpenVA-Dialogue 部署说明
 
 本文放置不适合塞进项目首页的服务器部署细节。公开支持的入口始终是
 `scripts/flashav2av`；其他旧启动脚本属于内部实现。
@@ -73,7 +73,7 @@ bash scripts/flashav2av start
 | --- | --- |
 | `127.0.0.1:8001` | Fish S2 Pro HTTP 服务 |
 | `127.0.0.1:8771` | 本地流式 PCM bridge |
-| `127.0.0.1:7860` | FlashAV2AV 浏览器服务 |
+| `127.0.0.1:7860` | OpenVA-Dialogue 浏览器服务 |
 | 本机 `127.0.0.1:6008` | 建议使用的 SSH 转发端口 |
 
 ```bash

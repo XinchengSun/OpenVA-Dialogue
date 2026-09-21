@@ -1,6 +1,6 @@
 # Model weights
 
-FlashAV2AV does not store model weights or private reference media in Git. The
+OpenVA-Dialogue does not store model weights or private reference media in Git. The
 machine-readable source of truth is [`weights-manifest.json`](../weights-manifest.json).
 Every download goes directly to the model author's official Hugging Face or
 ModelScope repository; this project does not operate a weight mirror.
@@ -27,7 +27,7 @@ checks presence and recorded byte sizes; `--deep` additionally checks SHA-256
 when the manifest contains one. A `null` hash means no trusted hash was
 available during publication and is deliberately not guessed.
 
-The FlashAV2AV installer includes `huggingface_hub` in the Pipecat environment.
+The OpenVA-Dialogue installer includes `huggingface_hub` in the Pipecat environment.
 For a standalone downloader environment, install:
 
 ```bash

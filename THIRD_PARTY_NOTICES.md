@@ -1,7 +1,7 @@
 # Third-party model notices
 
 This file is an inventory, not legal advice and not a replacement for the
-upstream license text. FlashAV2AV's repository does not include the model weights
+upstream license text. OpenVA-Dialogue's repository does not include the model weights
 listed below. Users download them directly from the named upstream repositories
 and must review the license version attached to the downloaded revision.
 
@@ -12,7 +12,7 @@ and must review the license version attached to the downloaded revision.
 - Files used: `checkpoints/last.ckpt` and
   `tools/pretrained_model/epoch=0-step=312000.ckpt`
 - License status: no upstream model card or license file was found during the
-  audit. Absence of a license is not permission to redistribute. FlashAV2AV
+  audit. Absence of a license is not permission to redistribute. OpenVA-Dialogue
   therefore downloads only from the author's official repository and does not
   mirror these files.
 

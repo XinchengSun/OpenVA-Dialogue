@@ -1,4 +1,4 @@
-# FlashAV2AV architecture
+# OpenVA-Dialogue architecture
 
 ## Runtime data flow
 
@@ -53,6 +53,10 @@ audio at the corresponding safe media time, keeping mouth motion and audio on
 one fMP4 timeline.
 
 ## GPU placement
+
+The following describes the original multi-GPU deployment. In the
+[single-GPU profile](single_gpu_4090.md), motion, rendering, and VoxCPM2 share
+logical `cuda:0`.
 
 - DyStream motion and LIA rendering use two distinct logical devices selected by
   `CUDA_VISIBLE_DEVICES`, normally logical `0` and `1`.

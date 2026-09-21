@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="340" viewBox="0 0 1200 340" role="img" aria-labelledby="title description">
-  <title id="title">FlashAV2AV</title>
-  <desc id="description">Customizable real-time conversational avatars with zero-shot voice cloning</desc>
+  <title id="title">OpenVA-Dialogue</title>
+  <desc id="description">An open-source agent system for full-duplex real-time audio-visual dialogue</desc>
   <defs>
     <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#090d1a"/>
@@ -30,7 +30,7 @@
     <path d="M208 121c13 8 25 8 38 0"/>
   </g>
 
-  <text x="420" y="142" fill="#f7f8ff" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="70" font-weight="750" letter-spacing="-2">FlashAV2AV</text>
+  <text x="420" y="142" fill="#f7f8ff" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="64" font-weight="750" letter-spacing="-2">OpenVA-Dialogue</text>
   <rect x="422" y="164" width="584" height="4" rx="2" fill="url(#accent)"/>
   <text x="422" y="216" fill="#cbd4ff" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="25" font-weight="450">Custom portrait · Zero-shot voice cloning · Real-time AV</text>
 

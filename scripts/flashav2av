@@ -25,8 +25,11 @@ Usage: bash scripts/flashav2av <command>
 
 Commands:
   setup [--check-only]  Prepare dependencies and check external model assets.
+  setup-single-gpu --check-only
+                        Inspect a prepared official VoxCPM2 single-GPU runtime;
+                        read-only, no Fish assets required or downloaded.
   setup-voxcpm2         Install the optional VoxCPM2 compatibility runtime.
-  configure ARGS        Create private custom-cascade/Fish runtime envs.
+  configure ARGS        Create private custom-cascade/TTS runtime envs.
   start                 Start FlashAV2AV and run health/media checks.
   status                Validate the managed service and media readiness.
   restart               Restart only the managed FlashAV2AV services.
@@ -39,6 +42,13 @@ Environment:
   FLASHAV2AV_PYTHON        Python 3.11 bootstrap executable.
   PIPECAT_VENV             Override the Pipecat virtual environment.
   FISH_ROOT                Checked SGLang-Omni/Fish runtime root.
+
+Single-GPU prerequisites:
+  Prepare DyStream/Pipecat, official VoxCPM source/dependencies and VoxCPM2
+  weights in a separate FLASHAV2AV_DATA_ROOT; configure --single-gpu ID with
+  --voxcpm-python and --voxcpm-official-source. The official runtime is not
+  installed by setup-voxcpm2 (that installer prepares Nano). Single-GPU setup
+  currently validates prepared components only; it is not a fresh-host installer.
 EOF
 }
 
@@ -56,18 +66,23 @@ require_command() {
 }
 
 show_asset_status() {
+  local profile="${1:-multi_gpu}"
   local missing=0
   local asset=""
   local -a assets=(
     "$ROOT_DIR/checkpoints/last.ckpt"
     "$ROOT_DIR/tools/pretrained_model/epoch=0-step=312000.ckpt"
     "$ROOT_DIR/tools/hf_models/wav2vec2-base-960h/pytorch_model.bin"
-    "$DATA_ROOT/runtime/fish-s2-pro/models/fishaudio-s2-pro/codec.pth"
-    "$DATA_ROOT/runtime/fish-s2-pro/models/fishaudio-s2-pro/config.json"
-    "$DATA_ROOT/runtime/fish-s2-pro/models/fishaudio-s2-pro/model.safetensors.index.json"
-    "$DATA_ROOT/runtime/fish-s2-pro/models/fishaudio-s2-pro/model-00001-of-00002.safetensors"
-    "$DATA_ROOT/runtime/fish-s2-pro/models/fishaudio-s2-pro/model-00002-of-00002.safetensors"
   )
+  if [[ "$profile" == "multi_gpu" ]]; then
+    assets+=(
+      "$DATA_ROOT/runtime/fish-s2-pro/models/fishaudio-s2-pro/codec.pth"
+      "$DATA_ROOT/runtime/fish-s2-pro/models/fishaudio-s2-pro/config.json"
+      "$DATA_ROOT/runtime/fish-s2-pro/models/fishaudio-s2-pro/model.safetensors.index.json"
+      "$DATA_ROOT/runtime/fish-s2-pro/models/fishaudio-s2-pro/model-00001-of-00002.safetensors"
+      "$DATA_ROOT/runtime/fish-s2-pro/models/fishaudio-s2-pro/model-00002-of-00002.safetensors"
+    )
+  fi
 
   for asset in "${assets[@]}"; do
     if [[ -f "$asset" ]]; then
@@ -91,6 +106,7 @@ show_private_config_status() {
 
 setup_project() {
   local mode="${1:-}"
+  local profile="${2:-multi_gpu}"
   local check_failed=0
   [[ -z "$mode" || "$mode" == "--check-only" ]] \
     || die "usage: bash scripts/flashav2av setup [--check-only]"
@@ -108,6 +124,10 @@ setup_project() {
   done
 
   if [[ "$mode" == "--check-only" ]]; then
+    if [[ -n "${DYSTREAM_SINGLE_GPU:-}" ]]; then
+      profile="single_gpu"
+    fi
+    echo "SETUP_PROFILE=$profile"
     if [[ -f "$ENV_FILE" ]]; then
       echo "ENV_OK $ENV_FILE"
     else
@@ -120,7 +140,17 @@ setup_project() {
       echo "PIPECAT_ENV_MISSING $PIPECAT_VENV" >&2
       check_failed=1
     fi
-    show_asset_status || check_failed=1
+    show_asset_status "$profile" || check_failed=1
+    if [[ "$profile" == "single_gpu" ]]; then
+      if [[ -z "${DYSTREAM_SINGLE_GPU:-}" ]]; then
+        echo 'SINGLE_GPU_CONFIG_MISSING: run configure --single-gpu PHYSICAL_ID with the prepared official VoxCPM2 paths' >&2
+        check_failed=1
+      fi
+      FLASHAV2AV_DATA_ROOT="$DATA_ROOT" \
+        bash "$ROOT_DIR/scripts/setup_single_gpu.sh" --check-only || check_failed=1
+      ENV_FILE="$ENV_FILE" PIPECAT_PYTHON="$PIPECAT_VENV/bin/python" \
+        bash "$ROOT_DIR/scripts/start_pipecat_mse.sh" --check-gpu-config || check_failed=1
+    fi
     show_private_config_status || check_failed=1
     return "$check_failed"
   fi
@@ -229,6 +259,11 @@ case "$COMMAND" in
   setup)
     (($# <= 1)) || die "usage: bash scripts/flashav2av setup [--check-only]"
     setup_project "${1:-}"
+    ;;
+  setup-single-gpu)
+    [[ $# -eq 1 && "$1" == "--check-only" ]] \
+      || die "setup-single-gpu currently requires --check-only; prepare official VoxCPM2 dependencies/source and weights, then configure --single-gpu (see help)"
+    setup_project --check-only single_gpu
     ;;
   configure)
     configure_project "$@"

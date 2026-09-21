@@ -26,6 +26,14 @@ jobs:
         run: python -m unittest tests.test_weights_manifest -v
       - name: Validate primary Fish configuration
         run: python -m unittest tests.test_configure_custom_runtime tests.test_s2s_launcher_contract -v
+      - name: Validate single-GPU algebra, preprocessing, and measurements
+        run: python -m unittest tests.test_cfg_pruning tests.test_single_gpu_face_detector tests.test_benchmark_single_gpu -v
+      - name: Validate single-GPU launch and bridge ownership
+        timeout-minutes: 5
+        run: |
+          bash tests/test_single_gpu_launchers.sh
+          bash tests/test_single_gpu_bridge_reuse.sh
+          bash tests/test_single_gpu_setup.sh
       - name: Install customization test dependencies
         run: python -m pip install 'aiohttp==3.13.2' 'Pillow==12.0.0'
       - name: Validate Fish portrait and voice customization

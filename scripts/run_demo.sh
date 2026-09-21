@@ -398,6 +398,7 @@ preflight() {
   local required_command=""
   local visible_gpus=""
   local gpu_count=""
+  local required_gpu_count=2
   local ref_image=""
   local encoder_list=""
 
@@ -431,20 +432,24 @@ preflight() {
     fi
   fi
 
+  # Use the same mapping/TTS-budget checks as direct startup, before any
+  # bridge or GPU worker is launched. The check performs no lifecycle action.
+  ENV_FILE="$ENV_FILE" PIPECAT_PYTHON="$PYTHON_BIN" \
+    bash "$START_SCRIPT" --check-gpu-config \
+    || die "invalid DyStream/TTS GPU configuration"
   visible_gpus="${CUDA_VISIBLE_DEVICES:-0,1}"
   IFS=',' read -r -a gpu_ids <<< "$visible_gpus"
-  [[ ${#gpu_ids[@]} -eq 2 ]] \
-    || die "CUDA_VISIBLE_DEVICES must expose exactly two GPUs, got: $visible_gpus"
-  gpu_ids[0]="${gpu_ids[0]//[[:space:]]/}"
-  gpu_ids[1]="${gpu_ids[1]//[[:space:]]/}"
-  [[ -n "${gpu_ids[0]}" && -n "${gpu_ids[1]}" && "${gpu_ids[0]}" != "${gpu_ids[1]}" ]] \
-    || die "CUDA_VISIBLE_DEVICES must contain two different GPU ids"
+  if [[ -n "${DYSTREAM_SINGLE_GPU:-}" ]]; then
+    required_gpu_count=1
+  fi
   gpu_count="$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)"
-  [[ "$gpu_count" -ge 2 ]] || die "at least two NVIDIA GPUs are required"
+  [[ "$gpu_count" -ge "$required_gpu_count" ]] \
+    || die "at least $required_gpu_count NVIDIA GPU(s) are required"
   for selected_gpu in "${gpu_ids[@]}"; do
+    selected_gpu="${selected_gpu//[[:space:]]/}"
     [[ "$selected_gpu" =~ ^[0-9]+$ ]] \
       || die "CUDA_VISIBLE_DEVICES must use numeric GPU ids, got: $selected_gpu"
-    (( selected_gpu < gpu_count )) \
+    (( 10#$selected_gpu < gpu_count )) \
       || die "selected GPU id $selected_gpu does not exist; detected count=$gpu_count"
   done
 

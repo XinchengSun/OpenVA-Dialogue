@@ -45,8 +45,9 @@ def _upsert(lines: list[str], replacements: dict[str, str]) -> list[str]:
         stripped = line.strip()
         if stripped and not stripped.startswith("#") and "=" in stripped:
             key = stripped.split("=", 1)[0]
-            if key in pending:
-                output.append(f"{key}={pending.pop(key)}")
+            if key in replacements:
+                if key in pending:
+                    output.append(f"{key}={pending.pop(key)}")
                 continue
         output.append(line)
     if pending:
@@ -95,14 +96,21 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--prompt-text-file", type=Path)
     parser.add_argument("--dystream-gpus")
     parser.add_argument(
+        "--single-gpu",
+        metavar="PHYSICAL_ID",
+        help="Share one physical GPU between DyStream and official VoxCPM2; ASR stays on CPU and LLM uses its API.",
+    )
+    parser.add_argument(
         "--tts-backend",
         choices=("fish_s2pro", "voxcpm2"),
-        default="fish_s2pro",
+        help="Default: fish_s2pro; with --single-gpu: voxcpm2.",
     )
-    parser.add_argument("--fish-gpus", default="2,3")
+    parser.add_argument("--fish-gpus")
     parser.add_argument("--fish-profile", choices=("balanced", "low_ttfa_gapless"), default="low_ttfa_gapless")
     parser.add_argument("--fish-http-port", type=int, default=8001)
-    parser.add_argument("--tts-gpu", default="2", help="Physical GPU used only by the VoxCPM2 fallback.")
+    parser.add_argument("--tts-gpu", help="VoxCPM2 physical GPU (default: 2, or the --single-gpu id).")
+    parser.add_argument("--voxcpm-python", type=Path)
+    parser.add_argument("--voxcpm-official-source", type=Path, help="Optional official VoxCPM src directory for --single-gpu.")
     parser.add_argument("--llm-model", default="qwen3.7-flash")
     parser.add_argument(
         "--realtime-search-mode",
@@ -153,12 +161,33 @@ def main() -> None:
 
     custom_env = runtime_root / "config" / "custom_cascade.env"
     asr_cache = runtime_root / "cache" / "pipecat" / "modelscope"
-    dystream_gpus = args.dystream_gpus or _plain(values.get("CUDA_VISIBLE_DEVICES", "0,1"))
-    gpu_items = [item.strip() for item in dystream_gpus.split(",") if item.strip()]
-    if len(gpu_items) != 2 or gpu_items[0] == gpu_items[1]:
-        raise SystemExit("DyStream requires exactly two distinct CUDA_VISIBLE_DEVICES")
-    if not all(item.isdigit() for item in gpu_items):
-        raise SystemExit("--dystream-gpus must contain two physical numeric GPU ids")
+    single_gpu = args.single_gpu is not None
+    args.tts_backend = args.tts_backend or ("voxcpm2" if single_gpu else "fish_s2pro")
+    if single_gpu:
+        if not args.single_gpu.isascii() or not args.single_gpu.isdecimal():
+            raise SystemExit("--single-gpu must be one physical numeric GPU id")
+        args.single_gpu = str(int(args.single_gpu))
+        if args.tts_backend != "voxcpm2":
+            raise SystemExit("--single-gpu requires voxcpm2; fish_s2pro requires its own two GPUs")
+        if args.fish_gpus is not None:
+            raise SystemExit("--fish-gpus conflicts with --single-gpu")
+        if args.dystream_gpus is not None and args.dystream_gpus != args.single_gpu:
+            raise SystemExit("--dystream-gpus conflicts with --single-gpu")
+        if args.tts_gpu is not None and args.tts_gpu != args.single_gpu:
+            raise SystemExit("--tts-gpu conflicts with --single-gpu")
+        gpu_items = [args.single_gpu]
+        args.tts_gpu = args.single_gpu
+    else:
+        dystream_gpus = args.dystream_gpus or _plain(values.get("CUDA_VISIBLE_DEVICES", "0,1"))
+        gpu_items = [item.strip() for item in dystream_gpus.split(",") if item.strip()]
+        if len(gpu_items) != 2 or gpu_items[0] == gpu_items[1]:
+            raise SystemExit("DyStream requires exactly two distinct CUDA_VISIBLE_DEVICES (or use --single-gpu)")
+        if not all(item.isdigit() for item in gpu_items):
+            raise SystemExit("--dystream-gpus must contain two physical numeric GPU ids")
+        args.tts_gpu = args.tts_gpu or "2"
+        if args.voxcpm_official_source is not None:
+            raise SystemExit("--voxcpm-official-source requires --single-gpu")
+    args.fish_gpus = args.fish_gpus or "2,3"
 
     if args.tts_backend == "fish_s2pro":
         fish_gpu_items = [
@@ -187,7 +216,7 @@ def main() -> None:
         prompt_text = ""
         if not args.tts_gpu.isdigit():
             raise SystemExit("--tts-gpu must be one physical numeric GPU id")
-        if args.tts_gpu in gpu_items:
+        if not single_gpu and args.tts_gpu in gpu_items:
             raise SystemExit("VoxCPM2 physical GPU must not overlap the two DyStream GPUs")
         bridge_uri = args.bridge_uri or "ws://127.0.0.1:8770"
         bridge_env = runtime_root / "config" / "voxcpm2.env"
@@ -211,7 +240,7 @@ def main() -> None:
         raise SystemExit("Fish HTTP port and PCM bridge port must be different")
 
     pipecat_python = (
-        args.pipecat_python.resolve()
+        args.pipecat_python.expanduser().absolute()
         if args.pipecat_python
         else runtime_root / "venvs" / "pipecat" / "bin" / "python"
     )
@@ -253,10 +282,23 @@ def main() -> None:
         "VOXCPM2_CONNECT_TIMEOUT_SEC": "45",
         "VOXCPM2_ENV_FILE": shlex.quote(str(bridge_env)) if args.tts_backend == "voxcpm2" else "",
         "CUDA_VISIBLE_DEVICES": ",".join(gpu_items),
+        "DYSTREAM_SINGLE_GPU": args.single_gpu if single_gpu else "",
         "MOTION_GPU": "0",
-        "RENDER_GPU": "1",
-        "ALLOW_SHARED_DYSTREAM_GPU": "0",
+        "RENDER_GPU": "0" if single_gpu else "1",
+        "ALLOW_SHARED_DYSTREAM_GPU": "1" if single_gpu else "0",
     }
+    if single_gpu:
+        replacements["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        replacements["PIPECAT_TTS_LIFECYCLE"] = "managed"
+        # Do not reuse a production snapshot's version gate for this checkout.
+        # The launcher supplies its own matching default when this is empty.
+        replacements["EXPECTED_ENGINE_VERSION"] = ""
+        replacements["DYSTREAM_FOLD_EMA"] = "1"
+        replacements["DYSTREAM_PRUNE_CFG"] = "1"
+        # Bound Wav2Vec's cumulative attention even during long spoken replies.
+        # Compaction retains the existing recurrent motion state and 4s audio.
+        replacements["DYSTREAM_AUDIO_HISTORY_KEEP_SEC"] = "4.0"
+        replacements["DYSTREAM_AUDIO_HISTORY_MAX_SEC"] = "8.0"
     custom_lines = _upsert(source_lines, replacements)
     _write_private(custom_env, "\n".join(custom_lines))
 
@@ -303,7 +345,11 @@ def main() -> None:
         _write_private(upstream_env, upstream_text)
     else:
         model_path = runtime_root / "models" / "VoxCPM2"
-        voxcpm_python = runtime_root / "venvs" / "voxcpm2-nano-2.0.3" / "bin" / "python"
+        voxcpm_python = (
+            args.voxcpm_python.expanduser().absolute()
+            if args.voxcpm_python
+            else runtime_root / "venvs" / "voxcpm2-nano-2.0.3" / "bin" / "python"
+        )
         bridge_values = {
             "CUDA_VISIBLE_DEVICES": args.tts_gpu,
             "VOXCPM2_DEVICES": "0",
@@ -324,6 +370,24 @@ def main() -> None:
         }
         if prompt_text_file is not None:
             bridge_values["VOXCPM2_PROMPT_TEXT_FILE"] = str(prompt_text_file)
+        if single_gpu:
+            # Official inference uses its model lock for one active generation
+            # and does not reserve nano's GPU-memory pool. Nano-only settings
+            # are omitted rather than implying they cap official inference.
+            for key in (
+                "VOXCPM2_GPU_MEMORY_UTILIZATION",
+                "VOXCPM2_MAX_BATCHED_TOKENS",
+                "VOXCPM2_MAX_NUM_SEQS",
+            ):
+                del bridge_values[key]
+            bridge_values.update(
+                CUDA_DEVICE_ORDER="PCI_BUS_ID",
+                VOXCPM2_BACKEND="official_prompt_cache",
+                VOXCPM2_OFFICIAL_DEVICE="cuda:0",
+                VOXCPM2_OFFICIAL_OPTIMIZE="0",
+            )
+            if args.voxcpm_official_source is not None:
+                bridge_values["VOXCPM2_OFFICIAL_SOURCE"] = str(args.voxcpm_official_source.resolve())
     bridge_text = "\n".join(
         f"{key}={shlex.quote(value)}" for key, value in bridge_values.items()
     )

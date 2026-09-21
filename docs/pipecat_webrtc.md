@@ -24,7 +24,7 @@ frames. This prevents a second, unsynchronized playback clock.
 ## Install without starting GPUs
 
 ```bash
-cd "${FLASHAV2AV_ROOT:-$HOME/FlashAV2AV}"
+cd "${FLASHAV2AV_ROOT:-$HOME/OpenVA-Dialogue}"
 bash scripts/install_pipecat_env.sh
 $HOME/.venvs/flashav2av/bin/python -m unittest tests.test_pipecat_bridge
 ```
@@ -95,7 +95,7 @@ TTS service. No secret is committed.
 ## Start and stop after the GPUs are restored
 
 ```bash
-cd "${FLASHAV2AV_ROOT:-$HOME/FlashAV2AV}"
+cd "${FLASHAV2AV_ROOT:-$HOME/OpenVA-Dialogue}"
 CUDA_VISIBLE_DEVICES=0,1 bash scripts/start_pipecat_webrtc.sh
 bash scripts/health_pipecat_webrtc.sh
 bash scripts/stop_pipecat_webrtc.sh

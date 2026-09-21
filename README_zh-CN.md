@@ -1,12 +1,12 @@
 <div align="center">
 
-<img src="docs/assets/flashav2av-banner.svg" alt="FlashAV2AV" width="100%">
+<img src="docs/assets/flashav2av-banner.svg" alt="OpenVA-Dialogue" width="100%">
 
-# FlashAV2AV
+# OpenVA-Dialogue
 
-**支持形象定制与零样本音色克隆的实时音视频对话数字人。**
+**面向全双工实时音视频对话的开源智能体系统。**
 
-[![CI](https://github.com/XinchengSun/FlashAV2AV/actions/workflows/ci.yml/badge.svg)](https://github.com/XinchengSun/FlashAV2AV/actions/workflows/ci.yml)
+[![CI](https://github.com/XinchengSun/OpenVA-Dialogue/actions/workflows/ci.yml/badge.svg)](https://github.com/XinchengSun/OpenVA-Dialogue/actions/workflows/ci.yml)
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Linux](https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux&logoColor=111)](#已测试环境)
 
@@ -14,7 +14,11 @@
 
 </div>
 
-FlashAV2AV 使用一张人物正脸图和一段短参考声音，生成可在浏览器中实时对话的数字人。当前主链路依次使用 Paraformer、兼容 OpenAI API 的 LLM、Fish Speech S2 Pro，以及连续运行的 DyStream/LIA 渲染器，并把对话、声音和人脸放在同一条可打断音视频时间轴上。
+OpenVA-Dialogue 是面向全双工实时音视频对话的开源智能体系统。使用一张人物正脸图和一段短参考声音，即可生成在浏览器中实时对话的数字人。当前主链路依次使用 Paraformer、兼容 OpenAI API 的 LLM、Fish Speech S2 Pro，以及连续运行的 DyStream/LIA 渲染器，并把对话、声音和人脸放在同一条可打断音视频时间轴上。
+
+**关键词：** 全双工对话、音视频对话、实时交互、流式生成。
+
+项目原名 FlashAV2AV。现有 `scripts/flashav2av` 命令、`FLASHAV2AV_*` 环境变量和引擎版本标识保持兼容。
 
 > **当前主链路：** Paraformer + 流式 LLM + Fish Speech S2 Pro / SGLang-Omni + DyStream + LIA。
 
@@ -32,7 +36,7 @@ FlashAV2AV 使用一张人物正脸图和一段短参考声音，生成可在浏
 公开仓库目前包含软件和一段 DyStream 生成预览，不把它冒充完整端到端对话录像。该预览展示模型原生 512 x 512 输出；可复现的“麦克风输入到数字人回复”演示录像仍在准备中。
 
 <div align="center">
-  <img src="docs/assets/flashav2av-avatar-preview.gif" alt="FlashAV2AV 数字人生成预览" width="384">
+  <img src="docs/assets/flashav2av-avatar-preview.gif" alt="OpenVA-Dialogue 数字人生成预览" width="384">
 </div>
 
 ## 快速开始
@@ -40,8 +44,8 @@ FlashAV2AV 使用一张人物正脸图和一段短参考声音，生成可在浏
 公开安装器面向**已测试 Linux 服务器环境**。它会下载模型并准备受管服务，但不会在空白主机上自动安装 CUDA 或构建 SGLang-Omni。请先按[部署文档](docs/deployment_zh-CN.md#准备-fish-运行时)完成 Fish 运行时前置条件。
 
 ```bash
-git clone https://github.com/XinchengSun/FlashAV2AV.git
-cd FlashAV2AV
+git clone https://github.com/XinchengSun/OpenVA-Dialogue.git
+cd OpenVA-Dialogue
 
 export FLASHAV2AV_DATA_ROOT=/data/flashav2av
 bash scripts/flashav2av setup
@@ -92,6 +96,13 @@ Pipecat 负责对话编排、回合事件和取消；`server_mse.py` 负责连�
 
 ## 已测试环境
 
+新增可选的 **单张 RTX 4090 / 24GB 配置**：DyStream、LIA 和 VoxCPM2
+共用一张卡，ASR 在 CPU 上运行，LLM 继续使用 API。
+配置方法、验证命令与测量边界见[单卡部署说明](docs/single_gpu_4090.md)。
+4090 实测约 13.0 GiB 显存、512×512 视频交付 12.4 帧/秒，详见
+[实测记录与限制](docs/single_gpu_validation_20260921.md)。
+下表仍描述原有 Fish 多卡方案。
+
 | 组件 | 已测试配置 |
 | --- | --- |
 | 主机 | Linux、Python 3.11、NVIDIA GPU、`ffmpeg`/`ffprobe` |
@@ -139,4 +150,4 @@ Pipecat 负责对话编排、回合事件和取消；`server_mse.py` 负责连�
 
 ## 致谢
 
-FlashAV2AV 基于 [DyStream](https://github.com/XinchengSun/DyStream)、[Pipecat](https://github.com/pipecat-ai/pipecat)、[Fish Speech S2 Pro](https://huggingface.co/fishaudio/s2-pro)、[SGLang-Omni](https://github.com/sgl-project/sglang-omni)、[FunASR/Paraformer](https://github.com/modelscope/FunASR) 和 [Wav2Vec2](https://huggingface.co/facebook/wav2vec2-base-960h) 构建；VoxCPM2 作为兼容后端保留。
+OpenVA-Dialogue 基于 [DyStream](https://github.com/XinchengSun/DyStream)、[Pipecat](https://github.com/pipecat-ai/pipecat)、[Fish Speech S2 Pro](https://huggingface.co/fishaudio/s2-pro)、[SGLang-Omni](https://github.com/sgl-project/sglang-omni)、[FunASR/Paraformer](https://github.com/modelscope/FunASR) 和 [Wav2Vec2](https://huggingface.co/facebook/wav2vec2-base-960h) 构建；VoxCPM2 作为兼容后端保留。

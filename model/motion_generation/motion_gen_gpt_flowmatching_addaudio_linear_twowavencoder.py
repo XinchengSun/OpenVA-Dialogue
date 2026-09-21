@@ -20,6 +20,48 @@ WAV2VEC_DIR = os.getenv(
 )
 
 
+def _cfg_branch_plan(cfg_audio, cfg_audio_other, cfg_anchor, cfg_all, prune=False):
+    """Keep the canonical uncond/anchor/self/other/all order without zero terms."""
+    weights = (cfg_audio, cfg_audio_other, cfg_anchor, cfg_all)
+    coefficients = (1.0 - sum(weights), cfg_anchor, cfg_audio, cfg_audio_other, cfg_all)
+    # Preserve the original arithmetic for non-finite settings as well as the
+    # default path. A small but nonzero coefficient must never be discarded.
+    if not prune or not all(math.isfinite(value) for value in coefficients):
+        return (0, 1, 2, 3, 4)
+    return tuple(index for index, value in enumerate(coefficients) if value != 0.0)
+
+
+def _combine_cfg_predictions(predictions, branch_indices, cfg_audio,
+                             cfg_audio_other, cfg_anchor, cfg_all):
+    by_branch = dict(zip(branch_indices, predictions))
+    if branch_indices == (0, 1, 2, 3, 4):
+        uncond, anchor, audio, other, combined = predictions
+        return (uncond + cfg_audio * (audio - uncond)
+                + cfg_audio_other * (other - uncond)
+                + cfg_anchor * (anchor - uncond)
+                + cfg_all * (combined - uncond))
+
+    weighted_branches = ((2, cfg_audio), (3, cfg_audio_other),
+                         (1, cfg_anchor), (4, cfg_all))
+    if 0 in by_branch:
+        # Retain the baseline accumulation order when the uncond term is used.
+        uncond = by_branch[0]
+        result = uncond
+        for index, weight in weighted_branches:
+            if weight != 0.0:
+                result = result + weight * (by_branch[index] - uncond)
+        return result
+
+    # The unconditional prediction is unnecessary only when its FINAL
+    # coefficient 1 - sum(weights) is exactly zero.
+    result = None
+    for index, weight in weighted_branches:
+        if weight != 0.0:
+            term = weight * by_branch[index]
+            result = term if result is None else result + term
+    return result
+
+
 
 # ================= CUDA Graph minimal runners =================
 
@@ -102,12 +144,13 @@ class CUDAGraphDiffusionHeadSingleStep:
     It only captures diffusion_head(noisy, gpt, temb).
     Scheduler step is intentionally kept outside the graph.
     """
-    def __init__(self, diffusion_head, batch_size=5, face_dim=512, hidden_size=768, device="cuda"):
+    def __init__(self, diffusion_head, batch_size=5, face_dim=512, hidden_size=768, device="cuda", time_embedding_batch_size=1):
         self.diffusion_head = diffusion_head
         self.batch_size = batch_size
         self.face_dim = face_dim
         self.hidden_size = hidden_size
         self.device = device
+        self.time_embedding_batch_size = time_embedding_batch_size
 
         self.graph = None
         self.static_noisy = None
@@ -118,7 +161,7 @@ class CUDAGraphDiffusionHeadSingleStep:
     def warmup_and_capture(self):
         self.static_noisy = torch.empty(self.batch_size, 1, self.face_dim, device=self.device)
         self.static_gpt = torch.empty(self.batch_size, 1, self.face_dim, device=self.device)
-        self.static_temb = torch.empty(1, 1, self.hidden_size, device=self.device)
+        self.static_temb = torch.empty(self.time_embedding_batch_size, 1, self.hidden_size, device=self.device)
 
         self.static_noisy.normal_()
         self.static_gpt.normal_()
@@ -745,36 +788,52 @@ class Audio2FaceGPT(nn.Module):
         return output
 
 
-    def setup_cuda_graphs(self, num_inference_steps=5):
+    def setup_cuda_graphs(self, num_inference_steps=5, batch_size=1):
         """
         Minimal CUDA Graph setup. This does not add trainable parameters.
         """
-        if getattr(self, "cuda_graph_enabled", False):
+        prune = os.getenv("DYSTREAM_PRUNE_CFG", "0") == "1"
+        weights = (self.cfg_audio, self.cfg_audio_other, self.cfg_anchor, self.cfg_all)
+        branch_indices = _cfg_branch_plan(*weights, prune=prune)
+        parameter = next(self.parameters())
+        device = parameter.device
+        signature = (weights, prune, batch_size, str(device), str(parameter.dtype))
+        if (getattr(self, "cuda_graph_enabled", False)
+                and getattr(self, "_cuda_graph_signature", None) == signature):
             return
 
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is not available; cannot setup CUDA Graphs.")
 
-        print("[CUDA Graph] Setting up minimal CUDA Graph runners...")
+        # Changing CFG weights can change the captured batch layout. Release
+        # the previous runners before recapturing rather than replay stale shapes.
+        self.cuda_graph_enabled = False
+        self.cuda_graph_gpt = None
+        self.cuda_graph_diffusion = None
+        graph_batch_size = batch_size * len(branch_indices)
+        print(f"[CUDA Graph] Setting up runners; CFG branches={branch_indices}, batch={graph_batch_size}")
 
         self.cuda_graph_gpt = CUDAGraphGPTRunner(
             blocks=self.blocks,
             output_norm=self.output_norm,
             output_proj=self.output_proj,
             hidden_size=self.hidden_size,
-            batch_size=5,
-            device="cuda",
+            batch_size=graph_batch_size,
+            device=device,
         )
 
         self.cuda_graph_diffusion = CUDAGraphDiffusionHeadSingleStep(
             diffusion_head=self.diffusion_head,
-            batch_size=5,
+            batch_size=graph_batch_size,
             face_dim=self.face_dim,
             hidden_size=self.hidden_size,
-            device="cuda",
+            device=device,
+            time_embedding_batch_size=1 if batch_size == 1 else graph_batch_size,
         )
         self.cuda_graph_diffusion.warmup_and_capture()
 
+        self._cuda_graph_branch_indices = branch_indices
+        self._cuda_graph_signature = signature
         self.cuda_graph_enabled = True
         print("[CUDA Graph] Minimal setup completed.")
 
@@ -819,6 +878,9 @@ class Audio2FaceGPT(nn.Module):
         audio_other_hidden = self.audio_other_proj(audio_other_features)
 
         # Keep exactly the same four-condition fusion as the stable path.
+        self.setup_cuda_graphs(num_inference_steps=num_inference_steps, batch_size=bs)
+        branch_indices = self._cuda_graph_branch_indices
+        branch_count = len(branch_indices)
         audio_hidden_0 = self.audio_audioother_fusion(torch.cat([audio_hidden * 0, audio_other_hidden * 0], dim=-1))
         audio_hidden_1 = self.audio_audioother_fusion(torch.cat([audio_hidden * 1, audio_other_hidden * 0], dim=-1))
         audio_hidden_2 = self.audio_audioother_fusion(torch.cat([audio_hidden * 0, audio_other_hidden * 1], dim=-1))
@@ -837,27 +899,18 @@ class Audio2FaceGPT(nn.Module):
 
         for t in range(self.inpainting_length, seq_len):
             x = face_hidden[:, :t]
-            x = torch.cat([x] * 5, dim=0)
+            x = torch.cat([x] * branch_count, dim=0)
 
+            audio_branches = (audio_hidden_0, audio_hidden_0, audio_hidden_1,
+                              audio_hidden_2, audio_hidden_3)
             audio_hidden_input = torch.cat(
-                [
-                    audio_hidden_0[:, :t],
-                    audio_hidden_0[:, :t],
-                    audio_hidden_1[:, :t],
-                    audio_hidden_2[:, :t],
-                    audio_hidden_3[:, :t],
-                ],
+                [audio_branches[index][:, :t] for index in branch_indices],
                 dim=0,
             )
 
+            anchor_scales = (0, 1, 0, 0, 1)
             anchor_hidden_input = torch.cat(
-                [
-                    anchor_hidden * 0,
-                    anchor_hidden * 1,
-                    anchor_hidden * 0,
-                    anchor_hidden * 0,
-                    anchor_hidden * 1,
-                ],
+                [anchor_hidden * anchor_scales[index] for index in branch_indices],
                 dim=0,
             )
 
@@ -881,20 +934,20 @@ class Audio2FaceGPT(nn.Module):
                     t_batch = torch.full((bs,), timestep, device=device, dtype=torch.long)
                     time_embedding = self.time_embed(t_batch).unsqueeze(1)
 
+                    if bs == 1:
+                        latent_batch = latent_t.expand(branch_count, -1, -1)
+                    else:
+                        latent_batch = latent_t.repeat(branch_count, 1, 1)
+                        time_embedding = time_embedding.repeat(branch_count, 1, 1)
                     output_batch = self.cuda_graph_diffusion.forward(
-                        latent_t.expand(5, -1, -1),
+                        latent_batch,
                         gpt_output_t,
                         temb=time_embedding,
                     )
 
-                    noise_pred_uncond, noise_pred_cond_anchor, noise_pred_cond_audio, noise_pred_cond_audio_other, noise_pred_cond_all = output_batch.chunk(5, dim=0)
-
-                    noise_pred = (
-                        noise_pred_uncond
-                        + self.cfg_audio * (noise_pred_cond_audio - noise_pred_uncond)
-                        + self.cfg_audio_other * (noise_pred_cond_audio_other - noise_pred_uncond)
-                        + self.cfg_anchor * (noise_pred_cond_anchor - noise_pred_uncond)
-                        + self.cfg_all * (noise_pred_cond_all - noise_pred_uncond)
+                    noise_pred = _combine_cfg_predictions(
+                        output_batch.chunk(branch_count, dim=0), branch_indices,
+                        self.cfg_audio, self.cfg_audio_other, self.cfg_anchor, self.cfg_all,
                     )
 
                     sigma_idx = noise_scheduler.step_index

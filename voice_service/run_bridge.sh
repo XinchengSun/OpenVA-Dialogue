@@ -127,6 +127,27 @@ process_is_ours() {
   return 2
 }
 
+single_gpu_process_matches() {
+  [[ -n "${DYSTREAM_SINGLE_GPU:-}" ]] || return 0
+  local pid="$1" entry
+  local visible="" order="" backend="" device=""
+  [[ -r "/proc/${pid}/environ" ]] || return 1
+  # Check the live process, not just the edited env file. Never print its
+  # environment: unrelated entries may contain credentials.
+  while IFS= read -r -d '' entry; do
+    case "$entry" in
+      CUDA_VISIBLE_DEVICES=*) visible="${entry#*=}" ;;
+      CUDA_DEVICE_ORDER=*) order="${entry#*=}" ;;
+      VOXCPM2_BACKEND=*) backend="${entry#*=}" ;;
+      VOXCPM2_OFFICIAL_DEVICE=*) device="${entry#*=}" ;;
+    esac
+  done < "/proc/${pid}/environ" || return 1
+  [[ "$visible" == "$DYSTREAM_SINGLE_GPU" \
+     && "$order" == "PCI_BUS_ID" \
+     && "$backend" == "official_prompt_cache" \
+     && "$device" == "cuda:0" ]]
+}
+
 health_check() {
   "${VOXCPM2_PYTHON}" - "${VOXCPM2_BRIDGE_HOST}" "${VOXCPM2_BRIDGE_PORT}" <<'PY' \
     >/dev/null 2>&1
@@ -225,6 +246,8 @@ start_bridge() {
       identity_status=$?
     fi
     if (( identity_status == 0 )); then
+      single_gpu_process_matches "${pid}" \
+        || fail "single-GPU live bridge configuration cannot be verified or does not match; use restart to replace this repo's bridge"
       if health_check; then
         info "bridge is already ready (PID ${pid})"
         return 0
@@ -257,6 +280,14 @@ start_bridge() {
       fail "bridge exited during startup; inspect ${LOG_FILE}"
     fi
     if health_check; then
+      if [[ -n "${DYSTREAM_SINGLE_GPU:-}" ]]; then
+        process_is_ours "${pid}" \
+          || fail "single-GPU new bridge identity cannot be verified; inspect the managed PID before restart"
+        if ! single_gpu_process_matches "${pid}"; then
+          stop_owned_pid "${pid}"
+          fail "single-GPU new bridge configuration does not match; stopped the new process; correct the runtime and use restart"
+        fi
+      fi
       info "bridge ready (PID ${pid}; health=ok)"
       return 0
     fi
@@ -309,6 +340,8 @@ status_bridge() {
   if (( identity_status != 0 )); then
     fail "status=foreign-pid (PID ${pid}); no signal was sent"
   fi
+  single_gpu_process_matches "${pid}" \
+    || fail "single-GPU live bridge configuration cannot be verified or does not match; use restart to replace this repo's bridge"
   if health_check; then
     info "status=ready health=ok PID=${pid}"
     return 0
