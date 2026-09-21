@@ -5,7 +5,7 @@
 - Expression, emotion, nod, blink, and landmark controls are not exposed as
   stable production controls; earlier hand-written controls produced artifacts.
 - Listener naturalness depends on the source checkpoint and conditioning audio.
-  FlashAV2AV preserves the official dual-audio-branch model path rather than
+  OpenVA-Dialogue preserves the official dual-audio-branch model path rather than
   loading a separate Listener checkpoint.
 - Real-time search depends on the configured provider and network. It improves
   freshness, not deterministic latency.

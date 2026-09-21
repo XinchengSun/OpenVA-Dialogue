@@ -1,7 +1,8 @@
 # README style study
 
 This note records the 2026-08-12 README review used to redesign the
-FlashAV2AV landing page. It is not a ranking of the projects.
+OpenVA-Dialogue (formerly FlashAV2AV) landing page. The historical observations
+below refer to the FlashAV2AV README at that time. It is not a ranking of the projects.
 
 ## Projects reviewed
 

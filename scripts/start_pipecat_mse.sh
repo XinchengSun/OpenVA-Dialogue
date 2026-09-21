@@ -14,6 +14,11 @@ PID_FILE="logs/pipecat_mse.pid"
 LOG_FILE="logs/pipecat_mse.log"
 PORT_VALUE="${PORT:-7860}"
 
+if [[ $# -gt 1 || ( $# -eq 1 && "$1" != "--check-gpu-config" ) ]]; then
+  echo "usage: bash scripts/start_pipecat_mse.sh [--check-gpu-config]" >&2
+  exit 1
+fi
+
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "missing Pipecat Python: $PYTHON_BIN" >&2
   exit 1
@@ -37,18 +42,73 @@ VISIBLE_GPUS="${CUDA_VISIBLE_DEVICES:-0,1}"
 MOTION_LOGICAL_GPU="${MOTION_GPU:-0}"
 RENDER_LOGICAL_GPU="${RENDER_GPU:-1}"
 ALLOW_SHARED_DYSTREAM_GPU="${ALLOW_SHARED_DYSTREAM_GPU:-0}"
+SINGLE_GPU="${DYSTREAM_SINGLE_GPU:-}"
 IFS=',' read -r -a gpu_ids <<< "$VISIBLE_GPUS"
-if [[ ${#gpu_ids[@]} -ne 2 || "${gpu_ids[0]}" == "${gpu_ids[1]}" ]]; then
-  echo "CUDA_VISIBLE_DEVICES must expose exactly two different GPUs, got: $VISIBLE_GPUS" >&2
-  exit 1
-fi
 if [[ "$ALLOW_SHARED_DYSTREAM_GPU" != "0" && "$ALLOW_SHARED_DYSTREAM_GPU" != "1" ]]; then
   echo "ALLOW_SHARED_DYSTREAM_GPU must be 0 or 1" >&2
   exit 1
 fi
-if [[ "$MOTION_LOGICAL_GPU,$RENDER_LOGICAL_GPU" != "0,1" && "$MOTION_LOGICAL_GPU,$RENDER_LOGICAL_GPU" != "1,0" && ! ( "$ALLOW_SHARED_DYSTREAM_GPU" == "1" && "$MOTION_LOGICAL_GPU" == "$RENDER_LOGICAL_GPU" && ( "$MOTION_LOGICAL_GPU" == "0" || "$MOTION_LOGICAL_GPU" == "1" ) ) ]]; then
-  echo "MOTION_GPU and RENDER_GPU must use logical 0/1; sharing requires ALLOW_SHARED_DYSTREAM_GPU=1" >&2
-  exit 1
+if [[ -n "$SINGLE_GPU" ]]; then
+  if [[ ! "$SINGLE_GPU" =~ ^(0|[1-9][0-9]*)$ || "$VISIBLE_GPUS" != "$SINGLE_GPU" ]]; then
+    echo "DYSTREAM_SINGLE_GPU requires exactly its one physical numeric GPU in CUDA_VISIBLE_DEVICES" >&2
+    exit 1
+  fi
+  if [[ "$MOTION_LOGICAL_GPU,$RENDER_LOGICAL_GPU,$ALLOW_SHARED_DYSTREAM_GPU" != "0,0,1" ]]; then
+    echo "single-GPU mode requires MOTION_GPU=0 RENDER_GPU=0 ALLOW_SHARED_DYSTREAM_GPU=1" >&2
+    exit 1
+  fi
+  if [[ "${CUDA_DEVICE_ORDER:-PCI_BUS_ID}" != "PCI_BUS_ID" ]]; then
+    echo "single-GPU mode requires CUDA_DEVICE_ORDER=PCI_BUS_ID for physical GPU mapping" >&2
+    exit 1
+  fi
+  if [[ "${PIPECAT_MSE_DIALOG_MODE:-}" != "custom_cascade" \
+        || "${PIPECAT_TTS_PROVIDER:-}" != "voxcpm2" \
+        || "${PIPECAT_TTS_LIFECYCLE:-managed}" != "managed" \
+        || "${PIPECAT_ASR_DEVICE:-}" != "cpu" ]]; then
+    echo "single-GPU mode requires custom_cascade, managed voxcpm2, and CPU ASR (LLM remains an API)" >&2
+    exit 1
+  fi
+  bridge_env="${PIPECAT_TTS_BRIDGE_ENV_FILE:-${VOXCPM2_ENV_FILE:-}}"
+  if [[ ! -f "$bridge_env" ]]; then
+    echo "single-GPU mode requires a TTS bridge env file to verify its GPU budget" >&2
+    exit 1
+  fi
+  # A subshell prevents TTS env values from changing the DyStream launch.
+  if ! (
+    set +u
+    set +x
+    . "$bridge_env" >/dev/null || exit 1
+    set -u
+    [[ "${CUDA_VISIBLE_DEVICES:-}" == "$SINGLE_GPU" \
+       && "${CUDA_DEVICE_ORDER:-PCI_BUS_ID}" == "PCI_BUS_ID" \
+       && "${VOXCPM2_DEVICES:-0}" == "0" \
+       && "${VOXCPM2_BACKEND:-nano}" == "official_prompt_cache" \
+       && "${VOXCPM2_OFFICIAL_DEVICE:-cuda}" == "cuda:0" ]]
+  ); then
+    echo "single-GPU TTS must use official_prompt_cache on cuda:0 with the same physical CUDA_VISIBLE_DEVICES" >&2
+    exit 1
+  fi
+else
+  for index in "${!gpu_ids[@]}"; do
+    gpu_ids[index]="${gpu_ids[index]//[[:space:]]/}"
+    if [[ ! "${gpu_ids[index]}" =~ ^[0-9]+$ ]]; then
+      echo "CUDA_VISIBLE_DEVICES must use physical numeric GPU ids" >&2
+      exit 1
+    fi
+  done
+  if [[ ${#gpu_ids[@]} -ne 2 || "${gpu_ids[0]}" == "${gpu_ids[1]}" ]]; then
+    echo "CUDA_VISIBLE_DEVICES must expose exactly two different GPUs, got: $VISIBLE_GPUS (or configure --single-gpu)" >&2
+    exit 1
+  fi
+  if [[ "$MOTION_LOGICAL_GPU,$RENDER_LOGICAL_GPU" != "0,1" && "$MOTION_LOGICAL_GPU,$RENDER_LOGICAL_GPU" != "1,0" && ! ( "$ALLOW_SHARED_DYSTREAM_GPU" == "1" && "$MOTION_LOGICAL_GPU" == "$RENDER_LOGICAL_GPU" && ( "$MOTION_LOGICAL_GPU" == "0" || "$MOTION_LOGICAL_GPU" == "1" ) ) ]]; then
+    echo "MOTION_GPU and RENDER_GPU must use logical 0/1; sharing requires ALLOW_SHARED_DYSTREAM_GPU=1" >&2
+    exit 1
+  fi
+fi
+
+if [[ "${1:-}" == "--check-gpu-config" ]]; then
+  echo "GPU_CONFIG_OK gpus=$VISIBLE_GPUS motion_gpu=$MOTION_LOGICAL_GPU render_gpu=$RENDER_LOGICAL_GPU"
+  exit 0
 fi
 
 mkdir -p logs "$PIPECAT_CACHE_ROOT"/{huggingface,modelscope,piper,xdg} \

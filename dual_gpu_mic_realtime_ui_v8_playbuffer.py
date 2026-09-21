@@ -84,6 +84,26 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
         window + int(args.feature_lag_frames) + 1,
         int(round(history_keep_sec * pose_fps)),
     )
+    history_max_sec = float(os.getenv("DYSTREAM_AUDIO_HISTORY_MAX_SEC", "0"))
+    if not np.isfinite(history_max_sec) or history_max_sec < 0:
+        raise ValueError("DYSTREAM_AUDIO_HISTORY_MAX_SEC must be finite and nonnegative")
+    history_max_samples = int(history_max_sec * audio_sr)
+    if history_max_sec > 0:
+        # Allow the retained context, one new hop, and a partial pose frame.
+        minimum_max_samples = (
+            history_keep_frames * samples_per_frame + hop_samples + samples_per_frame - 1
+        )
+        if history_max_samples < minimum_max_samples:
+            raise ValueError(
+                "DYSTREAM_AUDIO_HISTORY_MAX_SEC must allow the retained history and one hop "
+                f"(at least {minimum_max_samples / audio_sr:.3f}s for this configuration)"
+            )
+        print(
+            f"[MOTION_HISTORY] max_sec={history_max_samples / audio_sr:.3f} "
+            f"keep_sec={history_keep_frames / pose_fps:.3f} "
+            "excludes_prefix=1 noncausal_context_changes=1",
+            flush=True,
+        )
 
     print(
         f"[MOTION_GPU{args.motion_gpu}] audio_sr={audio_sr}, pose_fps={pose_fps}, "
@@ -278,11 +298,15 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
         current_turn_id = 0
         listening_controller.reset()
 
-    def compact_stream_history():
+    def compact_stream_history(trigger="requested"):
         """Bound cumulative audio cost while preserving recurrent motion state."""
         nonlocal real_audio, real_audio_other, generated_idx
         keep_samples = history_keep_frames * samples_per_frame
         old_samples = int(real_audio.shape[0])
+        if history_max_samples:
+            # Only remove complete pose frames. Fractional-hop remainders must
+            # survive compaction or subsequent windows shift and frames are lost.
+            keep_samples += old_samples % samples_per_frame
         if old_samples <= keep_samples:
             return False
 
@@ -294,7 +318,7 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
             total_len - window + 1 - int(args.feature_lag_frames),
         )
         print(
-            f"[MOTION_LIVE] compact history "
+            f"[MOTION_LIVE] compact history trigger={trigger} "
             f"samples={old_samples}->{real_audio.shape[0]} "
             f"generated_idx={generated_idx} "
             f"past_motion_preserved=1",
@@ -358,6 +382,12 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
 
             # Consume full 200ms hops from pending audio.
             while pending.shape[0] >= hop_samples and pending_other.shape[0] >= hop_samples:
+                # Compact only already-consumed history, before appending this
+                # hop. Compacting afterwards would mark its outputs generated.
+                # Opt-in: wav2vec is noncausal, so bounded context is not
+                # numerically equivalent to encoding all preceding audio.
+                if history_max_samples and real_audio.shape[0] + hop_samples > history_max_samples:
+                    compact_stream_history(trigger="audio_cap")
                 hop = pending[:hop_samples]
                 hop_other = pending_other[:hop_samples]
                 pending = pending[hop_samples:]
@@ -415,7 +445,7 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
                     torch.cuda.synchronize()
                 t0 = time.perf_counter()
 
-                # Compute features over cumulative audio, not a 4s rolling crop.
+                # Encode retained history (all audio unless compaction is enabled).
                 audio_feat = model.get_audio2face_fea(audio_tensor, None, total_len)
                 audio_other_feat = model.get_audio2face_fea_other(audio_other_tensor, None, total_len)
 
@@ -497,6 +527,7 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
                         f"[MOTION_LIVE] step={step:05d} ORIG mode={current_mode} "
                         f"rms={hop_rms:.6f}/{hop_other_rms:.6f} "
                         f"total={t1 - t0:.4f}s produced={out.shape[1]} "
+                        f"history_sec={real_audio.shape[0] / audio_sr:.3f} "
                         f"idx={produced_start}->{generated_idx} pending={pending.shape[0]}",
                         flush=True,
                     )

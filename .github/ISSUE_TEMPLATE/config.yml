@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Private security report / 私密安全反馈
+    url: https://github.com/XinchengSun/OpenVA-Dialogue/security/advisories/new
+    about: Do not report security vulnerabilities or credentials in public issues.

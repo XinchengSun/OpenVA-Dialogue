@@ -1,12 +1,12 @@
 <div align="center">
 
-<img src="docs/assets/flashav2av-banner.svg" alt="FlashAV2AV" width="100%">
+<img src="docs/assets/flashav2av-banner.svg" alt="OpenVA-Dialogue" width="100%">
 
-# FlashAV2AV
+# OpenVA-Dialogue
 
-**支持形象定制与零样本音色克隆的实时音视频对话数字人。**
+**面向全双工实时音视频对话的智能体系统。**
 
-[![CI](https://github.com/XinchengSun/FlashAV2AV/actions/workflows/ci.yml/badge.svg)](https://github.com/XinchengSun/FlashAV2AV/actions/workflows/ci.yml)
+[![CI](https://github.com/XinchengSun/OpenVA-Dialogue/actions/workflows/ci.yml/badge.svg)](https://github.com/XinchengSun/OpenVA-Dialogue/actions/workflows/ci.yml)
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Linux](https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux&logoColor=111)](#已测试环境)
 
@@ -14,9 +14,17 @@
 
 </div>
 
-FlashAV2AV 使用一张人物正脸图和一段短参考声音，生成可在浏览器中实时对话的数字人。当前主链路依次使用 Paraformer、兼容 OpenAI API 的 LLM、Fish Speech S2 Pro，以及连续运行的 DyStream/LIA 渲染器，并把对话、声音和人脸放在同一条可打断音视频时间轴上。
+OpenVA-Dialogue 是面向全双工实时音视频对话的智能体系统。使用一张人物正脸图和一段短参考声音，即可生成在浏览器中实时对话的数字人。原有多卡链路依次使用 Paraformer、兼容 OpenAI API 的 LLM、Fish Speech S2 Pro，以及连续运行的 DyStream/LIA 渲染器，并把对话、声音和人脸放在同一条可打断音视频时间轴上。
 
-> **当前主链路：** Paraformer + 流式 LLM + Fish Speech S2 Pro / SGLang-Omni + DyStream + LIA。
+**关键词：** 全双工对话、音视频对话、实时交互、流式生成。
+
+项目原名 FlashAV2AV。现有 `scripts/flashav2av` 命令、`FLASHAV2AV_*` 环境变量和引擎版本标识保持兼容。
+
+> **授权状态：** 代码已公开，但尚未指定项目级许可证。公开可见不代表所有组件
+> 均已获准自由使用或再分发，详见[许可证状态](LICENSE_STATUS.md)。
+
+目前提供原有 Fish 多卡配置和可选 VoxCPM2 单张 4090 配置，两者均使用 DyStream/LIA。
+已测试的对话输入为麦克风音频；本次发布不宣称支持摄像头视觉理解。
 
 ## 核心能力
 
@@ -32,16 +40,25 @@ FlashAV2AV 使用一张人物正脸图和一段短参考声音，生成可在浏
 公开仓库目前包含软件和一段 DyStream 生成预览，不把它冒充完整端到端对话录像。该预览展示模型原生 512 x 512 输出；可复现的“麦克风输入到数字人回复”演示录像仍在准备中。
 
 <div align="center">
-  <img src="docs/assets/flashav2av-avatar-preview.gif" alt="FlashAV2AV 数字人生成预览" width="384">
+  <img src="docs/assets/flashav2av-avatar-preview.gif" alt="OpenVA-Dialogue 数字人生成预览" width="384">
 </div>
 
 ## 快速开始
 
+请先选择部署方案：
+
+| 方案 | 本地 GPU 分配 | 文档 |
+| --- | --- | --- |
+| 单张 RTX 4090 / 24GB | DyStream + LIA + VoxCPM2 共用一张卡；ASR 在 CPU；LLM 用 API | [单卡部署](docs/single_gpu_4090.md) |
+| 原有 Fish / SGLang-Omni | 两张 DyStream 卡 + 两张独立 Fish 卡 | [多卡部署](docs/deployment_zh-CN.md) |
+
+以下命令是 **Fish 多卡方案**，不是单卡配置。两种方案都不是全离线本地 LLM 系统。
+
 公开安装器面向**已测试 Linux 服务器环境**。它会下载模型并准备受管服务，但不会在空白主机上自动安装 CUDA 或构建 SGLang-Omni。请先按[部署文档](docs/deployment_zh-CN.md#准备-fish-运行时)完成 Fish 运行时前置条件。
 
 ```bash
-git clone https://github.com/XinchengSun/FlashAV2AV.git
-cd FlashAV2AV
+git clone https://github.com/XinchengSun/OpenVA-Dialogue.git
+cd OpenVA-Dialogue
 
 export FLASHAV2AV_DATA_ROOT=/data/flashav2av
 bash scripts/flashav2av setup
@@ -79,9 +96,10 @@ flowchart LR
     VAD --> ASR["Paraformer 流式 ASR"]
     ASR --> LLM["流式 LLM"]
     LLM -. 可选实时搜索 .-> SEARCH["联网搜索"]
-    LLM --> TTS["Fish S2 Pro / SGLang-Omni"]
+    LLM --> TTS["Fish S2 Pro 或 VoxCPM2"]
     TTS --> MOTION["DyStream motion"]
-    MIC --> LISTENER["Listener 条件音频"]
+    MIC -. 有声输入 .-> LISTENER["Listener 条件音频"]
+    REF["获授权的循环参考音频"] -. 麦克风静音时 .-> LISTENER
     LISTENER --> MOTION
     MOTION --> RENDER["LIA renderer"]
     RENDER --> MEDIA["H.264 + AAC fMP4"]
@@ -91,6 +109,13 @@ flowchart LR
 Pipecat 负责对话编排、回合事件和取消；`server_mse.py` 负责连续人物状态、motion/render worker、音画边界和浏览器 fMP4 流。详细状态契约与 GPU 拓扑见 [architecture.md](docs/architecture.md)。
 
 ## 已测试环境
+
+新增可选的 **单张 RTX 4090 / 24GB 配置**：DyStream、LIA 和 VoxCPM2
+共用一张卡，ASR 在 CPU 上运行，LLM 继续使用 API。
+配置方法、验证命令与测量边界见[单卡部署说明](docs/single_gpu_4090.md)。
+4090 实测约 13.0 GiB 显存、512×512 视频交付 12.4 帧/秒，详见
+[实测记录与限制](docs/single_gpu_validation_20260921.md)。
+下表仍描述原有 Fish 多卡方案。
 
 | 组件 | 已测试配置 |
 | --- | --- |
@@ -104,7 +129,25 @@ Pipecat 负责对话编排、回合事件和取消；`server_mse.py` 负责连�
 
 ## 实测性能
 
-目前发布的可复核数据只有**预热、单请求 TTS bridge 延迟**，不是“说完最后一个字到人脸开口”的端到端时延。测试于 2026-08-11、commit `29d1bc376fa2`、8 x RTX 4090 主机完成；Fish 使用物理 GPU 5/6，配置为 `low_ttfa_gapless`（首块/后续 stride 均为 10），先丢弃 3 个 warm-up 样本，再统计 60 个请求。
+### 单张 4090 系统测量
+
+[2026-09-21 实测记录](docs/single_gpu_validation_20260921.md)包含 90、180、100 秒
+三次运行中的六轮完整对话，测试主机为 Linux、RTX 4090、Xeon Gold 6530 CPU。
+
+| 指标 | 单卡 DyStream + LIA + VoxCPM2 |
+| --- | ---: |
+| 显存采样峰值 | **13,320 MiB（13.008 GiB）** |
+| 实际视频交付 | **12.43–12.47 FPS，512×512** |
+| 语音结束 → 服务端回复媒体边界，六轮 | **1.68–2.26 秒，平均 1.94 秒** |
+
+ASR 在 CPU 上运行，LLM 使用远程 API。延迟在服务端回环客户端测量，不含公网隧道、
+浏览器缓冲和声卡播放。这是小样本测量，不是延迟保证、数小时稳定性结论或感知自然度/
+唇音同步评测。公开内容为测量工具与结果摘要；原始报告及带人物身份的测试媒体未纳入
+仓库，复现方法与边界见上述记录。
+
+### Fish TTS bridge 微基准
+
+这是独立的**预热、单请求 TTS bridge 延迟**测试，不是“说完最后一个字到人脸开口”的端到端时延。测试于 2026-08-11、commit `29d1bc376fa2`、8 x RTX 4090 主机完成；Fish 使用物理 GPU 5/6，配置为 `low_ttfa_gapless`（首块/后续 stride 均为 10），先丢弃 3 个 warm-up 样本，再统计 60 个请求。
 
 | 指标 | Fish S2 Pro 双卡 |
 | --- | ---: |
@@ -113,7 +156,7 @@ Pipecat 负责对话编排、回合事件和取消；`server_mse.py` 负责连�
 | RTF P50 / P95 | **0.564 / 0.584** |
 | 播放断流 | **0 / 60** |
 
-完整单双卡对比见 [`fishspeech_2gpu_benchmark_20260811.json`](docs/fishspeech_2gpu_benchmark_20260811.json)。该测试不包含 ASR、判停、LLM、DyStream、编码、网络和浏览器缓冲；目前不发布端到端数字。
+完整单双卡对比见 [`fishspeech_2gpu_benchmark_20260811.json`](docs/fishspeech_2gpu_benchmark_20260811.json)。该测试不包含 ASR、判停、LLM、DyStream、编码、网络和浏览器缓冲；目前尚无浏览器侧端到端测量结果。
 
 ## 定制形象与音色
 
@@ -124,19 +167,34 @@ Pipecat 负责对话编排、回合事件和取消；`server_mse.py` 负责连�
 | 文档 | 内容 |
 | --- | --- |
 | [部署](docs/deployment_zh-CN.md) | 已测试主机、Fish 运行时、端口、生命周期、替代后端 |
+| [单卡部署](docs/single_gpu_4090.md) | 4090 配置、优化开关、验证命令 |
+| [单卡实测](docs/single_gpu_validation_20260921.md) | 延迟/显存/帧率、测量方法、未验证范围 |
 | [架构](docs/architecture.md) | Listener/Speaker 状态、打断、媒体边界、GPU 拓扑 |
 | [定制](README_CUSTOMIZATION.md) | 形象定制与零样本音色克隆流程 |
 | [模型权重](docs/weights.md) | 固定上游资产与运行路径 |
 | [已知问题](docs/known_issues.md) | 当前画质、表情与 CI 边界 |
-| [README 调研](docs/readme_style_study.md) | 10 个项目的对照与本次重写标准 |
+| [贡献说明](CONTRIBUTING.md) | 开发、测试、PR 和基准报告要求 |
+| [安全](SECURITY.md) | 私密漏洞反馈与部署注意事项 |
+| [许可证状态](LICENSE_STATUS.md) | 项目授权待定项及上游署名 |
 
 ## 项目状态
 
-- Fish S2 Pro 是当前受管主 TTS；VoxCPM2 和原生语音到语音保留为兼容路径。
+- Fish S2 Pro 用于原有多卡方案；官方 VoxCPM2 用于单卡方案。原生语音到语音保留为替代路线。
 - 正式入口是 `bash scripts/flashav2av <command>`。
 - 模型原生输出为 512 x 512；页面放大不会生成更多细节。
-- 目前尚未发布空白主机 CUDA/SGLang 全自动安装器和可复现端到端延迟基准。
+- 服务端测量工具已经提供；空白主机 CUDA/运行时全自动安装器、浏览器侧端到端延迟
+  基准和标准化交互自然度基准尚未发布。
+
+## 许可证与引用
+
+项目级许可证尚待确定，不能默认按 MIT、Apache-2.0、可商用或可再分发权重处理。
+请阅读 [LICENSE_STATUS.md](LICENSE_STATUS.md) 与
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)；本仓库不能替代各上游项目的
+授权条款和署名要求。
+
+引用当前实现时，请注明仓库 URL 和准确提交 SHA。项目论文的正式引用/DOI 会在可用后
+补充；不要把上游 DyStream 论文当成 OpenVA-Dialogue 系统改动的论文。
 
 ## 致谢
 
-FlashAV2AV 基于 [DyStream](https://github.com/XinchengSun/DyStream)、[Pipecat](https://github.com/pipecat-ai/pipecat)、[Fish Speech S2 Pro](https://huggingface.co/fishaudio/s2-pro)、[SGLang-Omni](https://github.com/sgl-project/sglang-omni)、[FunASR/Paraformer](https://github.com/modelscope/FunASR) 和 [Wav2Vec2](https://huggingface.co/facebook/wav2vec2-base-960h) 构建；VoxCPM2 作为兼容后端保留。
+OpenVA-Dialogue 基于 [DyStream](https://github.com/XinchengSun/DyStream)、[Pipecat](https://github.com/pipecat-ai/pipecat)、[Fish Speech S2 Pro](https://huggingface.co/fishaudio/s2-pro)、[SGLang-Omni](https://github.com/sgl-project/sglang-omni)、[FunASR/Paraformer](https://github.com/modelscope/FunASR)、[Wav2Vec2](https://huggingface.co/facebook/wav2vec2-base-960h) 和 [VoxCPM](https://github.com/OpenBMB/VoxCPM) 构建。请同时署名实际配置所使用的上游方法、模型与依赖库。

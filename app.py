@@ -127,6 +127,14 @@ def load_dystream_model():
         if "ema_state" in checkpoint:
             _dystream_ema.load_state_dict(checkpoint["ema_state"])
             print("[DyStream] EMA state loaded.")
+        if os.getenv("DYSTREAM_FOLD_EMA", "0") == "1":
+            # This loader is inference-only. Apply the same EMA weights once
+            # on CPU before moving the model to CUDA. A long-lived
+            # average_parameters context would also retain the shadow and
+            # original parameters on the GPU for the entire live session.
+            _dystream_ema.copy_to(_dystream_model.parameters())
+            _dystream_ema = None
+            print("[DyStream] EMA folded on CPU; inference uses one weight copy.")
     else:
         print(f"[DyStream] WARNING: Checkpoint not found at {ckpt_path}")
 
@@ -201,21 +209,37 @@ def load_face_detector():
         os.path.join(VIS_DIR, "utils", "face_detector.py"),
     )
     _fd_mod = _ilu.module_from_spec(_fd_spec)
-    _fd_spec.loader.exec_module(_fd_mod)
-    FaceDetector = _fd_mod.FaceDetector
+    single_gpu = bool(os.getenv("DYSTREAM_SINGLE_GPU", "").strip())
+    egl_key = "__EGL_VENDOR_LIBRARY_FILENAMES"
+    previous_egl = os.environ.get(egl_key)
+    if single_gpu:
+        # MediaPipe initializes EGL even with the CPU delegate. EGL ignores
+        # CUDA_VISIBLE_DEVICES and may open GPU 0. This one-time portrait
+        # preprocessing needs no graphics context; LIA rendering uses CUDA.
+        os.environ[egl_key] = ""
+    try:
+        _fd_spec.loader.exec_module(_fd_mod)
+        FaceDetector = _fd_mod.FaceDetector
 
-    model_path = os.path.join(VIS_DIR, "utils", "face_landmarker.task")
-    if not os.path.exists(model_path):
-        import urllib.request
-        print("[FaceDetector] Downloading face landmarker model...")
-        url = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
-        urllib.request.urlretrieve(url, model_path)
+        model_path = os.path.join(VIS_DIR, "utils", "face_landmarker.task")
+        if not os.path.exists(model_path):
+            import urllib.request
+            print("[FaceDetector] Downloading face landmarker model...")
+            url = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+            urllib.request.urlretrieve(url, model_path)
 
-    _face_detector = FaceDetector(
-        mediapipe_model_asset_path=model_path,
-        face_detection_confidence=0.5,
-        num_faces=1,
-    )
+        _face_detector = FaceDetector(
+            mediapipe_model_asset_path=model_path,
+            face_detection_confidence=0.5,
+            num_faces=1,
+            delegate=0 if single_gpu else 1,
+        )
+    finally:
+        if single_gpu:
+            if previous_egl is None:
+                os.environ.pop(egl_key, None)
+            else:
+                os.environ[egl_key] = previous_egl
     print("[FaceDetector] Face detector ready.")
 
 
