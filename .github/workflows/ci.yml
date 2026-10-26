@@ -33,6 +33,8 @@ jobs:
         run: python -m unittest tests.test_configure_custom_runtime tests.test_s2s_launcher_contract -v
       - name: Validate single-GPU algebra, preprocessing, and measurements
         run: python -m unittest tests.test_cfg_pruning tests.test_single_gpu_face_detector tests.test_benchmark_single_gpu -v
+      - name: Validate benchmark provenance and LLM backpressure
+        run: python -m unittest tests.test_benchmark_provenance tests.test_llm_backpressure -v
       - name: Validate single-GPU launch and bridge ownership
         timeout-minutes: 5
         run: |
@@ -46,6 +48,15 @@ jobs:
           python -m pip install 'aiohttp==3.13.2' 'Pillow==12.0.0'
       - name: Validate Fish portrait and voice customization
         run: python -m unittest tests.test_customization_runtime -v
+      - name: Validate media queues and disconnected clients
+        run: python -m unittest tests.test_media_backpressure -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Validate browser media buffering and microphone resampling
+        run: |
+          node tests/test_media_buffer_bounds.js
+          node tests/test_mic_resampler.js
       - name: Validate Fish lifecycle ownership
         run: bash tests/test_fish_s2pro_lifecycle.sh
       - name: Validate release CLI
@@ -81,3 +92,5 @@ jobs:
           python -m pip install 'numpy==1.26.4' 'torch_ema==0.3'
       - name: Validate EMA folding and bounded audio history
         run: python -m unittest tests.test_inference_ema tests.test_motion_audio_history -v
+      - name: Validate streaming TTS backpressure and resource ownership
+        run: python -m unittest tests.test_official_voxcpm2_backend tests.test_voxcpm2_infra tests.test_voxcpm2_tts -v

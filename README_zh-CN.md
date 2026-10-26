@@ -169,6 +169,7 @@ ASR 在 CPU 上运行，LLM 使用远程 API。延迟在服务端回环客户端
 | [部署](docs/deployment_zh-CN.md) | 已测试主机、Fish 运行时、端口、生命周期、替代后端 |
 | [单卡部署](docs/single_gpu_4090.md) | 4090 配置、优化开关、验证命令 |
 | [单卡实测](docs/single_gpu_validation_20260921.md) | 延迟/显存/帧率、测量方法、未验证范围 |
+| [基础设施优化记录](docs/infra_optimization_20261026.md) | 有界流式队列、取消回收、论文来源、回归证据与同条件基准 |
 | [架构](docs/architecture.md) | Listener/Speaker 状态、打断、媒体边界、GPU 拓扑 |
 | [定制](README_CUSTOMIZATION.md) | 形象定制与零样本音色克隆流程 |
 | [模型权重](docs/weights.md) | 固定上游资产与运行路径 |

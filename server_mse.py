@@ -530,6 +530,76 @@ class DoubaoLiveSession:
 # DyStream -> fMP4/MSE runtime
 # -------------------------
 
+class _BoundedLoopQueueWriter:
+    """Bound both the queue and callbacks waiting to reach its owning loop.
+
+    A bounded asyncio.Queue alone does not bound fire-and-forget ``put``
+    coroutines. Slow clients must not retain one suspended task per log line.
+    """
+
+    def __init__(self, loop, output_queue, on_overflow=None):
+        self.loop = loop
+        self.queue = output_queue
+        self.on_overflow = on_overflow
+        self._slots = threading.BoundedSemaphore(max(1, output_queue.maxsize))
+        self._closed = threading.Event()
+        self._stats_lock = threading.Lock()
+        self._pending_callbacks = 0
+        self._dropped_best_effort = 0
+        self._rejected_controls = 0
+
+    def _reject(self, best_effort):
+        with self._stats_lock:
+            if best_effort:
+                self._dropped_best_effort += 1
+            else:
+                self._rejected_controls += 1
+        if not best_effort and self.on_overflow is not None:
+            self.on_overflow()
+
+    def snapshot(self):
+        with self._stats_lock:
+            return {
+                "pending_callbacks": self._pending_callbacks,
+                "callback_limit": max(1, self.queue.maxsize),
+                "dropped_best_effort": self._dropped_best_effort,
+                "rejected_controls": self._rejected_controls,
+            }
+
+    def submit(self, item, *, best_effort=False):
+        if self._closed.is_set():
+            return False
+        if not self._slots.acquire(blocking=False):
+            self._reject(best_effort)
+            return False
+        with self._stats_lock:
+            self._pending_callbacks += 1
+
+        def deliver():
+            try:
+                if not self._closed.is_set():
+                    self.queue.put_nowait(item)
+            except asyncio.QueueFull:
+                self._reject(best_effort)
+            finally:
+                with self._stats_lock:
+                    self._pending_callbacks -= 1
+                self._slots.release()
+
+        try:
+            self.loop.call_soon_threadsafe(deliver)
+        except RuntimeError:
+            with self._stats_lock:
+                self._pending_callbacks -= 1
+            self._slots.release()
+            self._reject(best_effort)
+            return False
+        return True
+
+    def close(self):
+        self._closed.set()
+
+
 class MediaPipeClient:
     """Per-browser continuous fMP4 encoder with separate video/audio writer threads.
 
@@ -558,6 +628,9 @@ class MediaPipeClient:
         self.out_q: asyncio.Queue = asyncio.Queue(maxsize=64)
         self.running = threading.Event()
         self.running.set()
+        self._text_writer = _BoundedLoopQueueWriter(
+            self.loop, self.out_q, on_overflow=self.running.clear
+        )
         self.thread = threading.Thread(target=self._run, name=f"mse-pipe-client-{client_id}", daemon=True)
         self.proc: Optional[subprocess.Popen] = None
         self.audio_w_fd: Optional[int] = None
@@ -596,6 +669,7 @@ class MediaPipeClient:
 
     def stop(self):
         self.running.clear()
+        self._text_writer.close()
         try:
             self.segment_q.put_nowait(None)
         except Exception:
@@ -606,10 +680,21 @@ class MediaPipeClient:
             self._stop_ffmpeg()
 
     def put_text(self, text: str):
-        try:
-            asyncio.run_coroutine_threadsafe(self.out_q.put(text), self.loop)
-        except Exception:
-            pass
+        # Losing a boundary/control message would desynchronize audio gating.
+        # Terminate an overloaded client instead of silently losing controls.
+        return self._text_writer.submit(text)
+
+    def put_log(self, text: str):
+        return self._text_writer.submit(text, best_effort=True)
+
+    def transport_snapshot(self):
+        return {
+            "client_id": self.client_id,
+            "running": self.running.is_set(),
+            "output_queue_depth": self.out_q.qsize(),
+            "output_queue_limit": self.out_q.maxsize,
+            **self._text_writer.snapshot(),
+        }
 
     @staticmethod
     def _filter_queue(q: queue.Queue, keep: Callable[[Any], bool]) -> int:
@@ -812,6 +897,8 @@ class MediaPipeClient:
         try:
             fut.result(timeout=2.0)
         except Exception as e:
+            fut.cancel()
+            self.running.clear()
             self.engine.log(f"[PIPE WARN] client={self.client_id} stream reset notify failed: {repr(e)}")
 
     def _put_bytes(self, data: bytes, epoch: int):
@@ -825,6 +912,7 @@ class MediaPipeClient:
         try:
             fut.result(timeout=5.0)
         except Exception:
+            fut.cancel()
             self.engine.log(f"[PIPE WARN] client={self.client_id} websocket output queue blocked")
             self.running.clear()
 
@@ -1501,6 +1589,7 @@ class RealtimeMSEEngine:
         self.args = args
         self.loop = loop
         self.log_clients: Set[asyncio.Queue] = set()
+        self._log_writers: Dict[asyncio.Queue, _BoundedLoopQueueWriter] = {}
         self.media_clients: Set[MediaPipeClient] = set()
         self._client_seq = 0
         self.running = threading.Event()
@@ -1685,13 +1774,13 @@ class RealtimeMSEEngine:
         line = f"[{ts}.{int(now % 1 * 1000):03d}] {msg}"
         print(line, flush=True)
         for q in list(self.log_clients):
-            try:
-                asyncio.run_coroutine_threadsafe(q.put({"type": "log", "message": line}), self.loop)
-            except Exception:
-                pass
+            writer = self._log_writers.get(q)
+            if writer is not None:
+                writer.submit({"type": "log", "message": line}, best_effort=True)
         for client in list(self.media_clients):
             try:
-                client.put_text(json.dumps({"type": "log", "message": line}, ensure_ascii=False))
+                put_log = getattr(client, "put_log", client.put_text)
+                put_log(json.dumps({"type": "log", "message": line}, ensure_ascii=False))
             except Exception:
                 pass
 
@@ -2064,10 +2153,14 @@ class RealtimeMSEEngine:
         self.log(f"[MEDIA] pipe client unregistered id={client.client_id} clients={len(self.media_clients)}")
 
     def register_log_client(self, q: asyncio.Queue):
+        self._log_writers[q] = _BoundedLoopQueueWriter(self.loop, q)
         self.log_clients.add(q)
 
     def unregister_log_client(self, q: asyncio.Queue):
         self.log_clients.discard(q)
+        writer = self._log_writers.pop(q, None)
+        if writer is not None:
+            writer.close()
 
     def _state_snapshot(self):
         with self._assistant_lock:
@@ -3034,6 +3127,14 @@ class RealtimeMSEEngine:
             "listener_virtual_samples": len(self._listener_virtual_audio),
             "listener_other_source": self._listener_other_source,
             "media_clients": len(self.media_clients),
+            "media_transport": [
+                client.transport_snapshot()
+                for client in list(self.media_clients)
+                if hasattr(client, "transport_snapshot")
+            ],
+            "log_transport": [
+                writer.snapshot() for writer in list(self._log_writers.values())
+            ],
             "workers": workers,
             "time": time.time(),
         }
@@ -3048,20 +3149,16 @@ async def index(request: web.Request):
     return web.FileResponse(path)
 
 
-async def media_ws(request: web.Request):
-    engine: RealtimeMSEEngine = request.app["engine"]
-    ws = web.WebSocketResponse(max_msg_size=0)
-    await ws.prepare(request)
-    client = engine.register_media_client()
-    await ws.send_str(json.dumps({"type": "mime", "mime": 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"'}))
-    await ws.send_str(json.dumps({"type": "log", "message": "[MEDIA] connected pipe encoder"}))
-    out_task = asyncio.create_task(client.out_q.get())
+async def _forward_websocket_queue(ws, output_queue, encode_item, is_running=lambda: True):
+    """Consume peer closure even when output is idle; bound stalled sends."""
+    out_task = asyncio.create_task(output_queue.get())
     recv_task = asyncio.create_task(ws.receive())
     try:
-        while True:
+        while is_running():
             done, _ = await asyncio.wait(
                 {out_task, recv_task},
                 return_when=asyncio.FIRST_COMPLETED,
+                timeout=1.0,
             )
             if recv_task in done:
                 msg = recv_task.result()
@@ -3074,19 +3171,34 @@ async def media_ws(request: web.Request):
                     break
                 recv_task = asyncio.create_task(ws.receive())
             if out_task in done:
-                item = client.filter_output_item(out_task.result())
+                item = encode_item(out_task.result())
                 if item is not None:
                     if isinstance(item, bytes):
-                        await ws.send_bytes(item)
+                        await asyncio.wait_for(ws.send_bytes(item), timeout=5.0)
                     else:
-                        await ws.send_str(str(item))
-                out_task = asyncio.create_task(client.out_q.get())
-    except Exception:
-        pass
+                        await asyncio.wait_for(ws.send_str(str(item)), timeout=5.0)
+                out_task = asyncio.create_task(output_queue.get())
     finally:
         for task in (out_task, recv_task):
             if not task.done():
                 task.cancel()
+        await asyncio.gather(out_task, recv_task, return_exceptions=True)
+
+
+async def media_ws(request: web.Request):
+    engine: RealtimeMSEEngine = request.app["engine"]
+    ws = web.WebSocketResponse(max_msg_size=0)
+    await ws.prepare(request)
+    client = engine.register_media_client()
+    try:
+        await asyncio.wait_for(ws.send_str(json.dumps({"type": "mime", "mime": 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"'})), timeout=5.0)
+        await asyncio.wait_for(ws.send_str(json.dumps({"type": "log", "message": "[MEDIA] connected pipe encoder"})), timeout=5.0)
+        await _forward_websocket_queue(
+            ws, client.out_q, client.filter_output_item, client.running.is_set
+        )
+    except Exception:
+        pass
+    finally:
         await asyncio.to_thread(engine.unregister_media_client, client)
     return ws
 
@@ -3097,11 +3209,11 @@ async def logs_ws(request: web.Request):
     await ws.prepare(request)
     q: asyncio.Queue = asyncio.Queue(maxsize=256)
     engine.register_log_client(q)
-    await ws.send_str(json.dumps({"type": "log", "message": "[LOG] connected"}))
     try:
-        while True:
-            item = await q.get()
-            await ws.send_str(json.dumps(item, ensure_ascii=False))
+        await asyncio.wait_for(ws.send_str(json.dumps({"type": "log", "message": "[LOG] connected"})), timeout=5.0)
+        await _forward_websocket_queue(
+            ws, q, lambda item: json.dumps(item, ensure_ascii=False)
+        )
     except Exception:
         pass
     finally:

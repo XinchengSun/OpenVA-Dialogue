@@ -223,6 +223,8 @@ const BUFFER_TRIM_INTERVAL_MS = 5000;
 // milliseconds keeps browser/WebSocket overhead low while removing the old
 // packetization wait of up to 100 ms.
 const MIC_SEND_SAMPLES = 640;
+const MEDIA_PENDING_MAX_BYTES = 8 * 1024 * 1024;
+const MEDIA_PENDING_MAX_SEGMENTS = 256;
 const LOG_MAX_LINES = 800;
 const LOG_TRIM_TO_LINES = 400;
 let logLineCount = 0;
@@ -526,6 +528,7 @@ function disposeSlot(slot) {
   if (!slot || slot.disposed) return;
   slot.disposed = true;
   slot.pendingSegments = [];
+  slot.pendingBytes = 0;
   if (slot.activationTimer) {
     clearTimeout(slot.activationTimer);
     slot.activationTimer = null;
@@ -724,6 +727,7 @@ function buildMSE(mime, replacing) {
     sourceBuffer: null,
     objectUrl: null,
     pendingSegments: [],
+    pendingBytes: 0,
     generation: mseGeneration,
     replacing: !!(replacing && oldActive),
     playbackStarted: false,
@@ -816,6 +820,32 @@ function handoffMSE() {
   buildMSE(currentMime, true);
 }
 
+function failMediaStream(slot, reason) {
+  if (!isCurrentSlot(slot)) return;
+  log(`media playback stopped: ${reason}; reconnect to resume`);
+  resetAssistantAudioGate('media playback stopped');
+  teardownMSE();
+  if (mediaWs && mediaWs.readyState < WebSocket.CLOSING) {
+    mediaWs.close(4001, 'playback buffer unavailable');
+  }
+}
+
+function queueMediaSegment(slot, segment) {
+  if (!isCurrentSlot(slot)) return false;
+  if (
+    slot.pendingSegments.length >= MEDIA_PENDING_MAX_SEGMENTS
+    || slot.pendingBytes + segment.byteLength > MEDIA_PENDING_MAX_BYTES
+  ) {
+    // These are arbitrary byte chunks, not independently decodable fragments.
+    // A fresh connection must provide a new init segment after overflow.
+    failMediaStream(slot, 'pending media limit exceeded');
+    return false;
+  }
+  slot.pendingSegments.push(segment);
+  slot.pendingBytes += segment.byteLength;
+  return true;
+}
+
 function appendNextSegment(slot) {
   if (!isCurrentSlot(slot)) return;
   const sourceBuffer = slot.sourceBuffer;
@@ -824,11 +854,14 @@ function appendNextSegment(slot) {
     || sourceBuffer.updating
     || slot.pendingSegments.length === 0
   ) return;
-  const seg = slot.pendingSegments.shift();
+  const seg = slot.pendingSegments[0];
   try {
     sourceBuffer.appendBuffer(seg);
+    slot.pendingSegments.shift();
+    slot.pendingBytes -= seg.byteLength;
   } catch (e) {
     log('appendBuffer ERROR: ' + e + ' buffered=' + describeBuffered(slot));
+    failMediaStream(slot, 'media append failed');
   }
 }
 
@@ -1105,7 +1138,7 @@ function connectMedia() {
     if (slot.mediaChunkCount % 20 === 1) {
       log(`media segment received generation=${slot.generation} #${slot.mediaChunkCount} bytes=${ev.data.byteLength} buffered=${describeBuffered(slot)}`);
     }
-    slot.pendingSegments.push(ev.data);
+    if (!queueMediaSegment(slot, ev.data)) return;
     appendNextSegment(slot);
     maybePlay(slot);
   };

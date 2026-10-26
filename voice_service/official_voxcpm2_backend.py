@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import math
 import os
 import sys
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
@@ -227,6 +229,12 @@ class OfficialPromptCacheBackend:
         )
         if self._released_context_limit <= 0:
             raise ValueError("VOXCPM2_CONTEXT_TOMBSTONE_LIMIT must be positive")
+        self._pcm_queue_chunks = int(os.getenv("VOXCPM2_PCM_QUEUE_CHUNKS", "8"))
+        if self._pcm_queue_chunks <= 0:
+            raise ValueError("VOXCPM2_PCM_QUEUE_CHUNKS must be positive")
+        self._pcm_stall_timeout = float(os.getenv("VOXCPM2_PCM_STALL_TIMEOUT_SEC", "5"))
+        if not math.isfinite(self._pcm_stall_timeout) or self._pcm_stall_timeout <= 0:
+            raise ValueError("VOXCPM2_PCM_STALL_TIMEOUT_SEC must be positive and finite")
         self._active_tasks: set[asyncio.Task[None]] = set()
         self._model_lock = threading.Lock()
 
@@ -277,7 +285,27 @@ class OfficialPromptCacheBackend:
                         self._close_model_sync(model)
                         raise
 
-                model, base_cache, sample_rate = await asyncio.to_thread(load)
+                load_task = asyncio.create_task(asyncio.to_thread(load))
+                try:
+                    model, base_cache, sample_rate = await asyncio.shield(load_task)
+                except asyncio.CancelledError:
+                    # Cancelling to_thread cannot stop model allocation. Keep
+                    # ownership until loading ends, then dispose the result.
+                    async def close_after_load() -> None:
+                        try:
+                            loaded_model, _, _ = await load_task
+                        except Exception:
+                            return  # load() already closes a partially built model.
+                        await self._close_model(loaded_model)
+
+                    cleanup = asyncio.create_task(close_after_load())
+                    while not cleanup.done():
+                        try:
+                            await asyncio.shield(cleanup)
+                        except asyncio.CancelledError:
+                            pass
+                    cleanup.result()
+                    raise
             except BaseException:
                 self._remove_inserted_source_path()
                 raise
@@ -311,7 +339,12 @@ class OfficialPromptCacheBackend:
                 raise RuntimeError("VoxCPM2 backend is not started")
 
             loop = asyncio.get_running_loop()
-            queue: asyncio.Queue[_WorkerMessage] = asyncio.Queue()
+            # Reserve one additional slot for terminal control messages. PCM
+            # credits include callbacks scheduled but not yet run by the loop.
+            queue: asyncio.Queue[_WorkerMessage] = asyncio.Queue(
+                maxsize=self._pcm_queue_chunks + 1
+            )
+            pcm_slots = threading.Semaphore(self._pcm_queue_chunks)
             stop_requested = threading.Event()
             state.active_stops.add(stop_requested)
             worker_task = asyncio.create_task(
@@ -323,6 +356,7 @@ class OfficialPromptCacheBackend:
                     state,
                     text,
                     stop_requested,
+                    pcm_slots,
                 )
             )
             self._active_tasks.add(worker_task)
@@ -331,6 +365,7 @@ class OfficialPromptCacheBackend:
                 while True:
                     message = await queue.get()
                     if message.kind == "pcm":
+                        pcm_slots.release()
                         if not stop_requested.is_set() and not state.invalidated.is_set():
                             yield message.value
                     elif message.kind == "done":
@@ -451,6 +486,7 @@ class OfficialPromptCacheBackend:
         state: _ContextState,
         text: str,
         stop_requested: threading.Event,
+        pcm_slots: threading.Semaphore,
     ) -> None:
         generator: Any | None = None
         acquired = False
@@ -483,7 +519,11 @@ class OfficialPromptCacheBackend:
                 if chunks:
                     waveform_seen = True
                     for chunk in chunks:
-                        self._post(loop, queue, _WorkerMessage("pcm", chunk))
+                        if not self._post_pcm(
+                            loop, queue, chunk, pcm_slots, state, stop_requested
+                        ):
+                            self._post(loop, queue, _WorkerMessage("cancelled"))
+                            return
                 if not feature_sequence:
                     raise RuntimeError("official VoxCPM2 returned no generated feature")
                 generated_features.append(self._detach_cpu(feature_sequence[-1]))
@@ -495,7 +535,11 @@ class OfficialPromptCacheBackend:
             if tail:
                 waveform_seen = True
                 for chunk in tail:
-                    self._post(loop, queue, _WorkerMessage("pcm", chunk))
+                    if not self._post_pcm(
+                        loop, queue, chunk, pcm_slots, state, stop_requested
+                    ):
+                        self._post(loop, queue, _WorkerMessage("cancelled"))
+                        return
             if not waveform_seen or not generated_features:
                 raise RuntimeError("official VoxCPM2 returned an incomplete stream")
 
@@ -523,6 +567,31 @@ class OfficialPromptCacheBackend:
     @staticmethod
     def _cancelled(state: _ContextState, stop_requested: threading.Event) -> bool:
         return state.invalidated.is_set() or stop_requested.is_set()
+
+    def _post_pcm(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        queue: asyncio.Queue[_WorkerMessage],
+        chunk: bytes,
+        slots: threading.Semaphore,
+        state: _ContextState,
+        stop_requested: threading.Event,
+    ) -> bool:
+        # Wait in the producer thread, never on the event loop. Polling the
+        # cancellation flag also releases a producer whose consumer has closed.
+        # A connected but abandoned consumer must not monopolize the model lock.
+        deadline = time.monotonic() + self._pcm_stall_timeout
+        while not self._cancelled(state, stop_requested):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("VoxCPM2 PCM consumer stalled; synthesis aborted")
+            if slots.acquire(timeout=min(0.05, remaining)):
+                if not self._cancelled(state, stop_requested):
+                    self._post(loop, queue, _WorkerMessage("pcm", chunk))
+                    return True
+                slots.release()
+                break
+        return False
 
     @staticmethod
     def _post(

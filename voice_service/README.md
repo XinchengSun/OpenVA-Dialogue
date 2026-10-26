@@ -133,3 +133,27 @@ python scripts/probe_voxcpm2_bridge.py \
 `{"type":"cancel","request_id":"..."}`。桥接服务立即取消正在消费的
 Nano async generator，Nano 自身的 `finally` 会把对应 `seq_id` 取消，旧音频
 不会进入下一轮。
+
+## 流式队列与退出回收
+
+官方 `official_prompt_cache` 后端使用 `VOXCPM2_PCM_QUEUE_CHUNKS` 限制待消费 PCM
+队列，默认 `8`，必须为正整数。网络或下游变慢时，生产线程等待空位，不丢弃正常语音；
+打断或断连会解除等待并关闭生成器，部分结果不会提交到下一句的 prompt cache。
+上限按块计数，另有一个生产线程正在处理的块及一个消费中的块；它不是总进程内存上限，
+模型内部状态和同一轮累积的语音特征仍独立占用内存。真实部署应检查首包、吞吐和声音连续性。
+
+`VOXCPM2_PCM_STALL_TIMEOUT_SEC`（默认 `5` 秒）限制生产线程连续等待队列空位的时间。
+超时会终止这次合成、报告错误并释放模型锁，使其他上下文能够继续；不会把部分结果作为完整
+语音提交。`VOXCPM2_SEND_TIMEOUT_SEC`（默认 `5` 秒）限制桥接层每次 WebSocket 发送，
+包括 PCM 和控制消息，避免连接仍存在但不再接收数据的客户端无限占用请求资源。
+两项必须为有限正数，健康路径保持全部 PCM 样本；过慢客户端会收到失败或连接结束，需重试该轮。
+
+桥接层在发送失败、请求取消时显式关闭后端生成器；Nano 包装层也同步关闭底层生成器，
+避免依赖垃圾回收才取消推理。不完整请求会释放对应上下文。官方模型加载期间收到停止信号时，
+Python 线程不能强制中止 CUDA/模型加载，因此先等待加载结束并回收模型，再完成退出。
+
+CPU 回归（使用假模型和合成 PCM，不代表 GPU 性能验证）：
+
+```bash
+python -m unittest tests.test_voxcpm2_infra tests.test_official_voxcpm2_backend tests.test_voxcpm2_tts -v
+```

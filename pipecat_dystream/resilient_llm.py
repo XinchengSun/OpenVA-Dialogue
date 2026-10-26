@@ -25,6 +25,11 @@ from .realtime_search import (
 
 TIMEOUT_EXCEPTIONS = (APITimeoutError, httpx.TimeoutException, TimeoutError)
 
+# Keep provider read-ahead bounded while downstream TTS applies backpressure.
+_HEDGE_QUEUE_MAX_CHUNKS = 16
+_HEDGE_PREANSWER_MAX_CHUNKS = 64
+_HEDGE_STREAM_CLOSE_TIMEOUT_SEC = 1.0
+
 _SENTENCE_TERMINATORS = frozenset("。！？!?")
 _SENTENCE_CLOSERS = frozenset("\"”’'」』】》〉）)]}")
 
@@ -127,14 +132,17 @@ def _chunk_has_answer_content(chunk) -> bool:
     return bool(audio and getattr(audio, "transcript", None))
 
 
-async def _close_stream(stream) -> None:
+async def _close_stream(stream, *, timeout: float | None = None) -> None:
     if stream is None:
         return
     close = getattr(stream, "close", None)
     if close is None:
         close = getattr(stream, "aclose", None)
     if close is not None:
-        await close()
+        if timeout is None:
+            await close()
+        else:
+            await asyncio.wait_for(close(), timeout=timeout)
 
 
 class RecoveringOpenAILLMService(OpenAILLMService):
@@ -376,7 +384,7 @@ class RecoveringOpenAILLMService(OpenAILLMService):
 
     async def _stream_first_answer_chunk(self, params):
         """Yield the model whose stream produces meaningful answer text first."""
-        queue: asyncio.Queue = asyncio.Queue()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=_HEDGE_QUEUE_MAX_CHUNKS)
         streams = {
             "primary": str(params["model"]),
             "hedge": self._hedge_model,
@@ -395,7 +403,19 @@ class RecoveringOpenAILLMService(OpenAILLMService):
                 stream = await self._client.chat.completions.create(
                     **request_params
                 )
+                answer_seen = False
+                preanswer_chunks = 0
                 async for chunk in stream:
+                    answer_seen = answer_seen or _chunk_has_answer_content(chunk)
+                    if not answer_seen:
+                        preanswer_chunks += 1
+                        if preanswer_chunks > _HEDGE_PREANSWER_MAX_CHUNKS:
+                            # Fail this candidate instead of silently dropping
+                            # reasoning/role metadata or retaining it unboundedly.
+                            raise RuntimeError(
+                                f"hedged LLM {label} exceeded "
+                                f"{_HEDGE_PREANSWER_MAX_CHUNKS} pre-answer chunks"
+                            )
                     await queue.put((label, "chunk", chunk))
                 await queue.put((label, "done", None))
             except asyncio.CancelledError:
@@ -404,7 +424,7 @@ class RecoveringOpenAILLMService(OpenAILLMService):
                 await queue.put((label, "error", exc))
             finally:
                 with suppress(Exception):
-                    await _close_stream(stream)
+                    await _close_stream(stream, timeout=_HEDGE_STREAM_CLOSE_TIMEOUT_SEC)
 
         tasks["primary"] = asyncio.create_task(produce("primary", 0.0))
         tasks["hedge"] = asyncio.create_task(
@@ -449,6 +469,10 @@ class RecoveringOpenAILLMService(OpenAILLMService):
 
             loser = "hedge" if winner == "primary" else "primary"
             tasks[loser].cancel()
+            # Cancellation starts cleanup immediately, but a slow provider close
+            # must not delay the winning first token. Finalization joins both
+            # producers; each provider close also has its own bounded timeout.
+            buffers[loser].clear()
             logger.info(
                 f"[LLM HEDGE] winner={winner} model={streams[winner]} "
                 f"first_content_ms={(time.monotonic() - started_at) * 1000.0:.1f}"

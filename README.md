@@ -210,6 +210,7 @@ or restart fails. See [README_CUSTOMIZATION.md](README_CUSTOMIZATION.md).
 | [Deployment](docs/deployment.md) | tested host, Fish runtime, ports, lifecycle, alternative backends |
 | [Single GPU](docs/single_gpu_4090.md) | 4090 setup, optimization switches, validation commands |
 | [Single-GPU measurements](docs/single_gpu_validation_20260921.md) | measured latency/memory/FPS, methodology, unverified scope |
+| [Infrastructure optimization record](docs/infra_optimization_20261026.md) | bounded streaming, cancellation, research sources, regression evidence, reproducible comparisons (Chinese) |
 | [Architecture](docs/architecture.md) | Listener/Speaker state, interruption, media boundaries, GPU placement |
 | [Customization](README_CUSTOMIZATION.md) | portrait and zero-shot voice-cloning workflow |
 | [Model weights](docs/weights.md) | pinned upstream assets and runtime paths |
