@@ -223,8 +223,6 @@ const BUFFER_TRIM_INTERVAL_MS = 5000;
 // milliseconds keeps browser/WebSocket overhead low while removing the old
 // packetization wait of up to 100 ms.
 const MIC_SEND_SAMPLES = 640;
-const MEDIA_PENDING_MAX_BYTES = 8 * 1024 * 1024;
-const MEDIA_PENDING_MAX_SEGMENTS = 256;
 const LOG_MAX_LINES = 800;
 const LOG_TRIM_TO_LINES = 400;
 let logLineCount = 0;
@@ -728,6 +726,7 @@ function buildMSE(mime, replacing) {
     objectUrl: null,
     pendingSegments: [],
     pendingBytes: 0,
+    quotaRetryAttempted: false,
     generation: mseGeneration,
     replacing: !!(replacing && oldActive),
     playbackStarted: false,
@@ -796,6 +795,7 @@ function buildMSE(mime, replacing) {
       nextSourceBuffer.addEventListener('error', () => {
         if (!isCurrentSlot(slot) || slot.sourceBuffer !== nextSourceBuffer) return;
         log('SOURCEBUFFER ERROR buffered=' + describeBuffered(slot));
+        failMediaStream(slot, 'media decoder rejected the stream');
       });
     } catch (e) {
       log('addSourceBuffer ERROR: ' + e);
@@ -822,25 +822,21 @@ function handoffMSE() {
 
 function failMediaStream(slot, reason) {
   if (!isCurrentSlot(slot)) return;
-  log(`media playback stopped: ${reason}; reconnect to resume`);
+  log(`media playback stopped: ${reason}; press Start to reconnect`);
+  stopMic();
   resetAssistantAudioGate('media playback stopped');
   teardownMSE();
-  if (mediaWs && mediaWs.readyState < WebSocket.CLOSING) {
-    mediaWs.close(4001, 'playback buffer unavailable');
+  const failedWs = mediaWs;
+  mediaWs = null;
+  mediaWsGeneration += 1;
+  if (failedWs && failedWs.readyState < WebSocket.CLOSING) {
+    failedWs.close(4001, 'playback buffer unavailable');
   }
+  setStatus('media stopped; press Start to reconnect');
 }
 
 function queueMediaSegment(slot, segment) {
   if (!isCurrentSlot(slot)) return false;
-  if (
-    slot.pendingSegments.length >= MEDIA_PENDING_MAX_SEGMENTS
-    || slot.pendingBytes + segment.byteLength > MEDIA_PENDING_MAX_BYTES
-  ) {
-    // These are arbitrary byte chunks, not independently decodable fragments.
-    // A fresh connection must provide a new init segment after overflow.
-    failMediaStream(slot, 'pending media limit exceeded');
-    return false;
-  }
   slot.pendingSegments.push(segment);
   slot.pendingBytes += segment.byteLength;
   return true;
@@ -859,8 +855,26 @@ function appendNextSegment(slot) {
     sourceBuffer.appendBuffer(seg);
     slot.pendingSegments.shift();
     slot.pendingBytes -= seg.byteLength;
+    slot.quotaRetryAttempted = false;
   } catch (e) {
     log('appendBuffer ERROR: ' + e + ' buffered=' + describeBuffered(slot));
+    if (e.name === 'QuotaExceededError' && !slot.quotaRetryAttempted) {
+      // MSE Prepare Append recommends removing old data before retrying quota
+      // failures. Reuse the existing retention boundary and keep this byte
+      // chunk at the queue head until appendBuffer actually accepts it.
+      const safeRemoveEnd = Math.max(0, slot.video.currentTime - BUFFER_RETENTION_SEC);
+      if (safeRemoveEnd > 1 && sourceBuffer.buffered.length > 0
+          && sourceBuffer.buffered.start(0) < safeRemoveEnd - 0.25) {
+        slot.quotaRetryAttempted = true;
+        try {
+          sourceBuffer.remove(0, safeRemoveEnd);
+          slot.lastBufferTrimAt = Date.now();
+          return; // updateend retries the unchanged head chunk once.
+        } catch (removeError) {
+          log('quota recovery remove failed: ' + removeError);
+        }
+      }
+    }
     failMediaStream(slot, 'media append failed');
   }
 }
@@ -1096,6 +1110,8 @@ function connectMedia() {
   ws.onclose = () => {
     if (mediaWs !== ws || generation !== mediaWsGeneration) return;
     mediaWs = null;
+    stopMic();
+    resetAssistantAudioGate('media websocket closed');
     log('media ws closed');
     setStatus('media closed');
     teardownMSE();

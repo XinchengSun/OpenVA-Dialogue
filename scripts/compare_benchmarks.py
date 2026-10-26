@@ -63,6 +63,11 @@ def compare(before: dict, after: dict) -> dict:
             issues.append(f"{label}: no runtime configuration fingerprint supplied")
         if not provenance.get("declared_service_commit"):
             issues.append(f"{label}: no operator-verified service commit declared")
+        measurement_sources = provenance.get("measurement_source_sha256")
+        if (not isinstance(measurement_sources, dict) or not all(
+                measurement_sources.get(name)
+                for name in ("benchmark_single_gpu.py", "benchmark_provenance.py"))):
+            issues.append(f"{label}: measurement source fingerprints are missing")
         for field in ("declared_weights_manifest_sha256", "measurement", "measurement_runtime"):
             if not provenance.get(field):
                 issues.append(f"{label}: required provenance is missing: {field}")
@@ -80,7 +85,8 @@ def compare(before: dict, after: dict) -> dict:
                     or not math.isfinite(value) or value < 0):
                 issues.append(f"{label}: invalid or missing metric: {'.'.join(path)}")
     for field in ("profile", "declared_weights_manifest_sha256", "runtime_config_sha256",
-                  "input_wav_sha256", "instruction_sha256", "measurement", "measurement_runtime"):
+                  "input_wav_sha256", "instruction_sha256", "measurement", "measurement_runtime",
+                  "measurement_source_sha256"):
         if value_at(before, "provenance", field) != value_at(after, "provenance", field):
             issues.append(f"mismatched provenance: {field}")
     before_devices, after_devices = target_devices(before), target_devices(after)

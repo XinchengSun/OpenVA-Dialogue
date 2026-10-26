@@ -47,6 +47,7 @@ EVENT_FIELDS = {"type", "turn_id", "generation", "epoch", "mime", "media_time"}
 TRANSPORT_FIELDS = {
     "client_id", "running", "output_queue_depth", "output_queue_limit",
     "pending_callbacks", "callback_limit", "dropped_best_effort", "rejected_controls",
+    "diagnostic_queue_depth", "diagnostic_queue_limit", "diagnostic_pending_callbacks", "diagnostic_callback_limit",
 }
 
 

@@ -25,10 +25,9 @@ from .realtime_search import (
 
 TIMEOUT_EXCEPTIONS = (APITimeoutError, httpx.TimeoutException, TimeoutError)
 
-# Keep provider read-ahead bounded while downstream TTS applies backpressure.
+# Bound this hedge iterator's queue when its consumer pauses. Pipecat normally
+# queues downstream frames independently; this is not end-to-end TTS backpressure.
 _HEDGE_QUEUE_MAX_CHUNKS = 16
-_HEDGE_PREANSWER_MAX_CHUNKS = 64
-_HEDGE_STREAM_CLOSE_TIMEOUT_SEC = 1.0
 
 _SENTENCE_TERMINATORS = frozenset("。！？!?")
 _SENTENCE_CLOSERS = frozenset("\"”’'」』】》〉）)]}")
@@ -132,17 +131,29 @@ def _chunk_has_answer_content(chunk) -> bool:
     return bool(audio and getattr(audio, "transcript", None))
 
 
-async def _close_stream(stream, *, timeout: float | None = None) -> None:
+async def _close_stream(stream) -> None:
     if stream is None:
         return
     close = getattr(stream, "close", None)
     if close is None:
         close = getattr(stream, "aclose", None)
     if close is not None:
-        if timeout is None:
-            await close()
-        else:
-            await asyncio.wait_for(close(), timeout=timeout)
+        # Some SDKs mark a response closed before transport cleanup finishes;
+        # cancelling that await can make a later close() a no-op. Keep ownership
+        # through repeated caller cancellation, then propagate cancellation.
+        # Cleanup depends on the SDK/transport and has no hard time bound.
+        close_task = asyncio.ensure_future(close())
+        cancelled = False
+        try:
+            while not close_task.done():
+                try:
+                    await asyncio.shield(close_task)
+                except asyncio.CancelledError:
+                    cancelled = True
+            close_task.result()
+        finally:
+            if cancelled:
+                raise asyncio.CancelledError
 
 
 class RecoveringOpenAILLMService(OpenAILLMService):
@@ -390,6 +401,9 @@ class RecoveringOpenAILLMService(OpenAILLMService):
             "hedge": self._hedge_model,
         }
         tasks = {}
+        # Preserve pre-answer metadata until a winner is selected. The existing
+        # first-answer deadline bounds waiting time, not buffered bytes; an
+        # arbitrary chunk-count failure would reject otherwise valid responses.
         buffers = {"primary": [], "hedge": []}
         started_at = time.monotonic()
 
@@ -403,20 +417,12 @@ class RecoveringOpenAILLMService(OpenAILLMService):
                 stream = await self._client.chat.completions.create(
                     **request_params
                 )
-                answer_seen = False
-                preanswer_chunks = 0
                 async for chunk in stream:
-                    answer_seen = answer_seen or _chunk_has_answer_content(chunk)
-                    if not answer_seen:
-                        preanswer_chunks += 1
-                        if preanswer_chunks > _HEDGE_PREANSWER_MAX_CHUNKS:
-                            # Fail this candidate instead of silently dropping
-                            # reasoning/role metadata or retaining it unboundedly.
-                            raise RuntimeError(
-                                f"hedged LLM {label} exceeded "
-                                f"{_HEDGE_PREANSWER_MAX_CHUNKS} pre-answer chunks"
-                            )
                     await queue.put((label, "chunk", chunk))
+                    # Buffered SDK chunks can be available without an I/O await.
+                    # Yield so this producer cannot repeatedly take the next free
+                    # slot before an already-ready competing stream gets one.
+                    await asyncio.sleep(0)
                 await queue.put((label, "done", None))
             except asyncio.CancelledError:
                 raise
@@ -424,7 +430,7 @@ class RecoveringOpenAILLMService(OpenAILLMService):
                 await queue.put((label, "error", exc))
             finally:
                 with suppress(Exception):
-                    await _close_stream(stream, timeout=_HEDGE_STREAM_CLOSE_TIMEOUT_SEC)
+                    await _close_stream(stream)
 
         tasks["primary"] = asyncio.create_task(produce("primary", 0.0))
         tasks["hedge"] = asyncio.create_task(
@@ -471,7 +477,7 @@ class RecoveringOpenAILLMService(OpenAILLMService):
             tasks[loser].cancel()
             # Cancellation starts cleanup immediately, but a slow provider close
             # must not delay the winning first token. Finalization joins both
-            # producers; each provider close also has its own bounded timeout.
+            # producers and waits for their actual SDK cleanup to complete.
             buffers[loser].clear()
             logger.info(
                 f"[LLM HEDGE] winner={winner} model={streams[winner]} "

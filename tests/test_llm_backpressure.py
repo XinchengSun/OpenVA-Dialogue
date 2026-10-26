@@ -1,10 +1,11 @@
-"""Exercise hedge stream lifecycle without importing Pipecat or provider SDKs."""
+"""Exercise production hedge methods without Pipecat; one test uses SDK close APIs."""
 
 from __future__ import annotations
 
 import ast
 import asyncio
 from contextlib import suppress
+from itertools import repeat
 from pathlib import Path
 import time
 from types import SimpleNamespace
@@ -88,8 +89,7 @@ class FakeStream:
         except asyncio.CancelledError:
             self.close_cancelled = True
             raise
-        finally:
-            self.closed.set()
+        self.closed.set()
 
 
 def make_service(primary, hedge, *, delay=0.0, deadline=1.0, on_create=None):
@@ -151,11 +151,12 @@ class HedgeBackpressureTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(hedge.close_started.wait(), 0.5)
             self.assertFalse(hedge.closed.is_set())
         finally:
+            hedge.close_gate.set()
             await asyncio.wait_for(stream.aclose(), 0.5)
-        self.assertTrue(hedge.close_cancelled)
+        self.assertFalse(hedge.close_cancelled)
         self.assertTrue(hedge.closed.is_set())
 
-    async def test_loser_close_times_out_even_while_consumer_is_paused(self):
+    async def test_loser_close_remains_owned_while_consumer_is_paused(self):
         hedge_opened = asyncio.Event()
         primary = FakeStream([chunk("answer")], before_read=hedge_opened)
         hedge = FakeStream(before_read=asyncio.Event(), close_gate=asyncio.Event())
@@ -164,16 +165,18 @@ class HedgeBackpressureTests(unittest.IsolatedAsyncioTestCase):
             on_create=lambda model: hedge_opened.set() if model == "hedge-model" else None,
         )
         method = load_hedge_stream()
-        method.__globals__["_HEDGE_STREAM_CLOSE_TIMEOUT_SEC"] = 0.02
         stream = method(service, {"model": "primary-model"})
         try:
             await anext(stream)
-            await asyncio.wait_for(hedge.closed.wait(), 0.5)
-            self.assertTrue(hedge.close_cancelled)
+            await asyncio.wait_for(hedge.close_started.wait(), 0.5)
+            self.assertFalse(hedge.closed.is_set())
+            self.assertFalse(hedge.close_cancelled)
         finally:
+            hedge.close_gate.set()
             await stream.aclose()
+        self.assertTrue(hedge.closed.is_set())
 
-    async def test_cancelled_consumer_bounds_stalled_close_and_joins_cleanup(self):
+    async def test_repeated_consumer_cancellation_waits_for_actual_cleanup(self):
         existing_tasks = asyncio.all_tasks()
         both_opened = asyncio.Event()
         primary = FakeStream(before_read=asyncio.Event(), close_gate=asyncio.Event())
@@ -182,20 +185,72 @@ class HedgeBackpressureTests(unittest.IsolatedAsyncioTestCase):
             both_opened.set() if model == "hedge-model" else None
         ))
         method = load_hedge_stream()
-        method.__globals__["_HEDGE_STREAM_CLOSE_TIMEOUT_SEC"] = 0.02
         stream = method(service, {"model": "primary-model"})
         task = asyncio.create_task(anext(stream))
-        await both_opened.wait()
-        task.cancel()
-        with self.assertRaises(asyncio.CancelledError):
-            await asyncio.wait_for(task, 0.5)
-        self.assertTrue(primary.close_cancelled)
-        self.assertTrue(hedge.close_cancelled)
+        try:
+            await both_opened.wait()
+            task.cancel()
+            await asyncio.wait_for(primary.close_started.wait(), 0.5)
+            await asyncio.wait_for(hedge.close_started.wait(), 0.5)
+            task.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(task.done())
+            self.assertFalse(primary.closed.is_set())
+            self.assertFalse(hedge.closed.is_set())
+        finally:
+            primary.close_gate.set()
+            hedge.close_gate.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 0.5)
+        self.assertFalse(primary.close_cancelled)
+        self.assertFalse(hedge.close_cancelled)
         self.assertTrue(primary.closed.is_set())
         self.assertTrue(hedge.closed.is_set())
         self.assertEqual(asyncio.all_tasks() - existing_tasks, set())
 
-    async def test_reasoning_only_candidate_is_bounded_while_hedge_can_win(self):
+    async def test_real_sdk_close_waits_for_transport_release_after_cancellation(self):
+        try:
+            import httpx
+            import openai
+        except ImportError:
+            self.skipTest("OpenAI and httpx are optional for this SDK contract test")
+
+        class SlowTransport(httpx.AsyncByteStream):
+            def __init__(self):
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+                self.released = False
+
+            async def __aiter__(self):
+                yield b"synthetic"
+
+            async def aclose(self):
+                self.started.set()
+                await self.release.wait()
+                self.released = True
+
+        transport = SlowTransport()
+        response = httpx.Response(200, stream=transport)
+        stream = object.__new__(openai.AsyncStream)
+        stream.response = response
+        close = load_hedge_stream().__globals__["_close_stream"]
+        task = asyncio.create_task(close(stream))
+        try:
+            await asyncio.wait_for(transport.started.wait(), 0.5)
+            self.assertTrue(response.is_closed)  # SDK latch is not cleanup proof.
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(task.done())
+            self.assertFalse(transport.released)
+        finally:
+            transport.release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 0.5)
+        self.assertTrue(transport.released)
+
+    async def test_losing_metadata_is_not_emitted_when_hedge_wins(self):
         primary = FakeStream(chunk(reasoning="hidden") for _ in range(10_000))
         answer = chunk("hedge answer")
         hedge = FakeStream([answer])
@@ -203,8 +258,20 @@ class HedgeBackpressureTests(unittest.IsolatedAsyncioTestCase):
         stream = load_hedge_stream()(service, {"model": "primary-model"})
         result = [value async for value in stream]
         self.assertEqual(result, [answer])
-        self.assertLessEqual(primary.read_count, 65)
+        # A ready hedge must get a queue slot without waiting for the entire
+        # buffered primary prefix. This catches queue-producer starvation.
+        self.assertLessEqual(primary.read_count, 32)
         self.assertEqual([primary.close_count, hedge.close_count], [1, 1])
+
+    async def test_buffered_winner_preserves_all_chunks_in_order(self):
+        chunks = [chunk(str(index)) for index in range(512)]
+        chunks += [chunk(finish_reason="stop"), chunk(usage={"total_tokens": 512})]
+        primary = FakeStream(chunks)
+        service = make_service(primary, FakeStream(), delay=10.0)
+        result = [value async for value in load_hedge_stream()(service, {"model": "primary-model"})]
+        self.assertEqual(result, chunks)
+        self.assertEqual(primary.read_count, len(chunks))
+        self.assertEqual(primary.close_count, 1)
 
     async def test_preserves_winner_metadata_answer_finish_and_usage_order(self):
         chunks = [chunk(), chunk(reasoning="brief"), chunk("answer"),
@@ -215,13 +282,23 @@ class HedgeBackpressureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, chunks)
         self.assertEqual(primary.close_count, 1)
 
-    async def test_excess_preanswer_metadata_fails_explicitly_without_unbounded_buffer(self):
-        primary = FakeStream(chunk(reasoning="hidden") for _ in range(1_000))
-        hedge = FakeStream(chunk(reasoning="hidden") for _ in range(1_000))
-        service = make_service(primary, hedge, deadline=30.0)
-        with self.assertRaisesRegex(RuntimeError, "exceeded 64 pre-answer chunks"):
+    async def test_valid_long_metadata_prefix_is_preserved_before_answer(self):
+        # Baseline accepts this valid stream within its first-answer deadline.
+        # The earlier 64-chunk cap failed it before the answer could arrive.
+        chunks = [chunk(reasoning="metadata") for _ in range(128)]
+        chunks += [chunk("answer"), chunk(finish_reason="stop")]
+        primary, hedge = FakeStream(chunks), FakeStream()
+        service = make_service(primary, hedge, deadline=2.0)
+        result = [value async for value in load_hedge_stream()(service, {"model": "primary-model"})]
+        self.assertEqual(result, chunks)
+        self.assertEqual([primary.close_count, hedge.close_count], [1, 1])
+
+    async def test_reasoning_only_stream_keeps_existing_first_answer_deadline(self):
+        primary = FakeStream(repeat(chunk(reasoning="metadata")))
+        hedge = FakeStream()
+        service = make_service(primary, hedge, deadline=0.02)
+        with self.assertRaisesRegex(TimeoutError, "deadline exceeded"):
             await anext(load_hedge_stream()(service, {"model": "primary-model"}))
-        self.assertEqual([primary.read_count, hedge.read_count], [65, 65])
         self.assertEqual([primary.close_count, hedge.close_count], [1, 1])
 
     async def test_error_after_answer_is_forwarded_and_provider_closed(self):

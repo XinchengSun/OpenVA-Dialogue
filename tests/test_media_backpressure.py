@@ -4,6 +4,7 @@ import ast
 import asyncio
 import __future__
 import json
+import math
 import os
 from pathlib import Path
 import queue
@@ -18,9 +19,9 @@ import aiohttp
 SOURCE = Path(__file__).resolve().parents[1] / "server_mse.py"
 TREE = ast.parse(SOURCE.read_text(encoding="utf-8"))
 NAMESPACE = dict(asyncio=asyncio, threading=threading, queue=queue, os=os,
-                 json=json, aiohttp=aiohttp)
+                 json=json, aiohttp=aiohttp, math=math)
 NAMES = {"_BoundedLoopQueueWriter", "MediaPipeClient", "_forward_websocket_queue",
-         "media_ws", "logs_ws"}
+         "_websocket_send_timeout", "_send_websocket_item", "media_ws", "logs_ws"}
 exec(compile(ast.Module(body=[node for node in TREE.body
                              if getattr(node, "name", None) in NAMES], type_ignores=[]),
              str(SOURCE), "exec", flags=__future__.annotations.compiler_flag), NAMESPACE)
@@ -125,6 +126,50 @@ class FakeSocket:
 
 
 class WebSocketLifetimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ready_consumer_survives_log_burst_and_receives_boundary(self):
+        ws = FakeSocket()
+        engine = SimpleNamespace(loop=asyncio.get_running_loop(), log=lambda message: None)
+        client = Client(engine, 1)
+        forwarding = asyncio.create_task(forward(
+            ws, client.out_q, client.filter_output_item, client.running.is_set,
+            diagnostic_queue=client.log_q,
+        ))
+        await asyncio.sleep(0)
+        for index in range(10000):
+            client.put_log(f"diagnostic {index}")
+        # The socket can consume, but the event loop has not run log callbacks.
+        self.assertEqual(client.out_q.qsize(), 0)
+        self.assertTrue(client.put_text("assistant_media_boundary"))
+        for _ in range(100):
+            if "assistant_media_boundary" in ws.sent:
+                break
+            await asyncio.sleep(0.001)
+        self.assertTrue(client.running.is_set())
+        self.assertIn("assistant_media_boundary", ws.sent)
+        self.assertEqual(client.transport_snapshot()["rejected_controls"], 0)
+        self.assertGreater(client.transport_snapshot()["dropped_best_effort"], 0)
+        ws.disconnect()
+        await asyncio.wait_for(forwarding, 1)
+        self.assertFalse(client.log_q._getters)
+
+    async def test_diagnostics_never_reorder_critical_fifo(self):
+        ws = FakeSocket()
+        output, diagnostic = asyncio.Queue(), asyncio.Queue()
+        for item in [b"init", "boundary", b"moof", b"mdat"]:
+            output.put_nowait(item)
+        for item in ["log one", "log two"]:
+            diagnostic.put_nowait(item)
+        task = asyncio.create_task(forward(ws, output, lambda item: item, diagnostic_queue=diagnostic))
+        for _ in range(100):
+            if len(ws.sent) == 6:
+                break
+            await asyncio.sleep(0.001)
+        ws.disconnect()
+        await asyncio.wait_for(task, 1)
+        self.assertEqual([item for item in ws.sent if item not in ("log one", "log two")],
+                         [b"init", "boundary", b"moof", b"mdat"])
+        self.assertEqual(ws.sent[0], b"init")
+
     async def test_idle_disconnect_releases_waiting_queue_getter(self):
         ws = FakeSocket()
         output = asyncio.Queue()
@@ -200,10 +245,18 @@ class WebSocketLifetimeTests(unittest.IsolatedAsyncioTestCase):
         proxy.wait_for = fast_timeout
         with patch.dict(NAMESPACE, asyncio=proxy):
             with self.assertRaises(asyncio.TimeoutError):
-                await forward(ws, output, lambda item: item)
+                await forward(ws, output, lambda item: item, send_timeout=5.0)
         self.assertTrue(ws.send_cancelled)
         self.assertFalse(output._getters)
         self.assertFalse(ws.incoming._getters)
+
+    def test_unmeasured_send_deadline_is_disabled_by_default(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(NAMESPACE["_websocket_send_timeout"](), 0)
+        for value in ("nan", "inf", "-1"):
+            with patch.dict(os.environ, {"PIPE_WEBSOCKET_SEND_TIMEOUT_SEC": value}):
+                with self.assertRaises(ValueError):
+                    NAMESPACE["_websocket_send_timeout"]()
 
     async def test_logs_handler_unregisters_on_quiet_peer_close(self):
         ws = FakeSocket()

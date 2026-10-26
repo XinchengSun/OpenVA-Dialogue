@@ -229,12 +229,16 @@ class OfficialPromptCacheBackend:
         )
         if self._released_context_limit <= 0:
             raise ValueError("VOXCPM2_CONTEXT_TOMBSTONE_LIMIT must be positive")
-        self._pcm_queue_chunks = int(os.getenv("VOXCPM2_PCM_QUEUE_CHUNKS", "8"))
-        if self._pcm_queue_chunks <= 0:
-            raise ValueError("VOXCPM2_PCM_QUEUE_CHUNKS must be positive")
+        # Queue sizing changes producer scheduling and needs a deployment
+        # profile. Zero preserves the existing unbounded production behavior.
+        self._pcm_queue_chunks = int(os.getenv("VOXCPM2_PCM_QUEUE_CHUNKS", "0"))
+        if self._pcm_queue_chunks < 0:
+            raise ValueError("VOXCPM2_PCM_QUEUE_CHUNKS must be non-negative")
         self._pcm_stall_timeout = float(os.getenv("VOXCPM2_PCM_STALL_TIMEOUT_SEC", "5"))
-        if not math.isfinite(self._pcm_stall_timeout) or self._pcm_stall_timeout <= 0:
-            raise ValueError("VOXCPM2_PCM_STALL_TIMEOUT_SEC must be positive and finite")
+        if not math.isfinite(self._pcm_stall_timeout) or self._pcm_stall_timeout < 0:
+            raise ValueError("VOXCPM2_PCM_STALL_TIMEOUT_SEC must be non-negative and finite")
+        if self._pcm_queue_chunks and self._pcm_stall_timeout == 0:
+            raise ValueError("bounded PCM queue requires a positive stall timeout")
         self._active_tasks: set[asyncio.Task[None]] = set()
         self._model_lock = threading.Lock()
 
@@ -342,9 +346,10 @@ class OfficialPromptCacheBackend:
             # Reserve one additional slot for terminal control messages. PCM
             # credits include callbacks scheduled but not yet run by the loop.
             queue: asyncio.Queue[_WorkerMessage] = asyncio.Queue(
-                maxsize=self._pcm_queue_chunks + 1
+                maxsize=self._pcm_queue_chunks + 1 if self._pcm_queue_chunks else 0
             )
-            pcm_slots = threading.Semaphore(self._pcm_queue_chunks)
+            pcm_slots = (threading.Semaphore(self._pcm_queue_chunks)
+                         if self._pcm_queue_chunks else None)
             stop_requested = threading.Event()
             state.active_stops.add(stop_requested)
             worker_task = asyncio.create_task(
@@ -365,7 +370,8 @@ class OfficialPromptCacheBackend:
                 while True:
                     message = await queue.get()
                     if message.kind == "pcm":
-                        pcm_slots.release()
+                        if pcm_slots is not None:
+                            pcm_slots.release()
                         if not stop_requested.is_set() and not state.invalidated.is_set():
                             yield message.value
                     elif message.kind == "done":
@@ -486,7 +492,7 @@ class OfficialPromptCacheBackend:
         state: _ContextState,
         text: str,
         stop_requested: threading.Event,
-        pcm_slots: threading.Semaphore,
+        pcm_slots: threading.Semaphore | None,
     ) -> None:
         generator: Any | None = None
         acquired = False
@@ -573,10 +579,15 @@ class OfficialPromptCacheBackend:
         loop: asyncio.AbstractEventLoop,
         queue: asyncio.Queue[_WorkerMessage],
         chunk: bytes,
-        slots: threading.Semaphore,
+        slots: threading.Semaphore | None,
         state: _ContextState,
         stop_requested: threading.Event,
     ) -> bool:
+        if slots is None:
+            if self._cancelled(state, stop_requested):
+                return False
+            self._post(loop, queue, _WorkerMessage("pcm", chunk))
+            return True
         # Wait in the producer thread, never on the event loop. Polling the
         # cancellation flag also releases a producer whose consumer has closed.
         # A connected but abandoned consumer must not monopolize the model lock.

@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "review_date": "2026-10-26",
+  "baseline_commit": "73a2d4846172ad1e1ea1037b5294b922113e8de9",
+  "superseded_candidate": "958aee3eb3b8e7cd856aa486d050a3e3df53ca91",
+  "candidate_identity": "Commit containing this review; full SHA recorded in external review artifact manifest",
+  "status": "reviewed_test_candidate_not_deployment_acceptance",
+  "scope": "No GPU, remote server, model weights, or paid API calls",
+  "python_unittest": {
+    "discovered": 187,
+    "passed": 169,
+    "skipped": 18,
+    "failed": 0,
+    "groups": {
+      "release": {"discovered": 56, "passed": 52, "skipped": 4},
+      "provenance_llm_media_and_real_loopback": {"discovered": 43, "passed": 43, "skipped": 0},
+      "tts_and_openai_speech": {"discovered": 76, "passed": 62, "skipped": 14},
+      "inference_contracts": {"discovered": 12, "passed": 12, "skipped": 0}
+    },
+    "skip_reasons": ["Four Linux-only checks on Windows", "Fourteen Pipecat adapter tests without the complete Pipecat runtime"]
+  },
+  "integration_boundaries": {
+    "aiohttp_loopback": "Two real WebSocket tests; engine and encoder replaced, no MP4 decoding",
+    "sdk_cleanup": "Actual OpenAI 2.35.1/httpx 0.28.1 methods over synthetic transport; no provider connection",
+    "browser_script": "Six full production JS scenarios with DOM/MSE fakes; no real browser decoding",
+    "tts_context": "Actual OfficialPromptCacheBackend with fake numerical model; same-turn failure recovery and explicit cancellation verified"
+  },
+  "other_checks": ["Existing microphone resampler", "Eight customization frontend tests", "Python compileall", "git diff --check"],
+  "valid_baseline_regressions": {
+    "tests": 5,
+    "expected_failures_on_original": 5,
+    "errors": 0,
+    "correction": "Excluded former whole-turn-release assertion because that expectation was wrong"
+  },
+  "disabled_or_withdrawn": {
+    "llm_preanswer_64_chunk_rejection": "removed",
+    "forced_sdk_close_1s_deadline": "removed; retain ownership until actual cooperative cleanup",
+    "tts_pcm_queue_limit": "default 0, optional experiment only",
+    "tts_send_timeout": "default 0, optional experiment only",
+    "media_send_timeout": "default 0, optional experiment only",
+    "browser_8mib_256_chunk_limits": "removed"
+  },
+  "unproven": [
+    "End-to-end backpressure: Pipecat input queues and downstream speaker deque remain unbounded",
+    "Actual GPU memory reclamation or performance gains",
+    "Whole Pipecat pipeline integration on supported Linux/Python3.11 stack",
+    "Real browser decoder/playback and lip synchronization",
+    "Optimal queue/deadline parameters or production readiness",
+    "Hosted CI execution"
+  ]
+}

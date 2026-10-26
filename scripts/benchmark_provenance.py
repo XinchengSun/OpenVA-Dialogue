@@ -61,6 +61,11 @@ def collect_provenance(root: Path, args) -> dict:
         "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
         "checkout": checkout_identity(root),
         "declared_service_commit": args.service_commit.lower() if args.service_commit else None,
+        "measurement_source_sha256": {
+            name: file_sha256(root / "scripts" / name)
+            if (root / "scripts" / name).is_file() else None
+            for name in ("benchmark_single_gpu.py", "benchmark_provenance.py")
+        },
         "measurement_runtime": {
             "python": platform.python_version(),
             "system": platform.system(),

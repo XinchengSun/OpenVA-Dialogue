@@ -626,11 +626,15 @@ class MediaPipeClient:
         self.video_job_q: queue.Queue = queue.Queue(maxsize=1)
         self.audio_job_q: queue.Queue = queue.Queue(maxsize=1)
         self.out_q: asyncio.Queue = asyncio.Queue(maxsize=64)
+        # Diagnostic logs cannot consume credits or slots needed by the A/V
+        # boundary/control timeline. They have a separate best-effort mailbox.
+        self.log_q: asyncio.Queue = asyncio.Queue(maxsize=64)
         self.running = threading.Event()
         self.running.set()
         self._text_writer = _BoundedLoopQueueWriter(
             self.loop, self.out_q, on_overflow=self.running.clear
         )
+        self._log_writer = _BoundedLoopQueueWriter(self.loop, self.log_q)
         self.thread = threading.Thread(target=self._run, name=f"mse-pipe-client-{client_id}", daemon=True)
         self.proc: Optional[subprocess.Popen] = None
         self.audio_w_fd: Optional[int] = None
@@ -670,6 +674,7 @@ class MediaPipeClient:
     def stop(self):
         self.running.clear()
         self._text_writer.close()
+        self._log_writer.close()
         try:
             self.segment_q.put_nowait(None)
         except Exception:
@@ -685,15 +690,21 @@ class MediaPipeClient:
         return self._text_writer.submit(text)
 
     def put_log(self, text: str):
-        return self._text_writer.submit(text, best_effort=True)
+        return self._log_writer.submit(text, best_effort=True)
 
     def transport_snapshot(self):
+        diagnostic = self._log_writer.snapshot()
         return {
             "client_id": self.client_id,
             "running": self.running.is_set(),
             "output_queue_depth": self.out_q.qsize(),
             "output_queue_limit": self.out_q.maxsize,
             **self._text_writer.snapshot(),
+            "diagnostic_queue_depth": self.log_q.qsize(),
+            "diagnostic_queue_limit": self.log_q.maxsize,
+            "diagnostic_pending_callbacks": diagnostic["pending_callbacks"],
+            "diagnostic_callback_limit": diagnostic["callback_limit"],
+            "dropped_best_effort": diagnostic["dropped_best_effort"],
         }
 
     @staticmethod
@@ -3149,14 +3160,39 @@ async def index(request: web.Request):
     return web.FileResponse(path)
 
 
-async def _forward_websocket_queue(ws, output_queue, encode_item, is_running=lambda: True):
-    """Consume peer closure even when output is idle; bound stalled sends."""
+def _websocket_send_timeout():
+    """Optional deployment policy, disabled until the operator chooses a budget."""
+    timeout = float(os.getenv("PIPE_WEBSOCKET_SEND_TIMEOUT_SEC", "0"))
+    if not math.isfinite(timeout) or timeout < 0:
+        raise ValueError("PIPE_WEBSOCKET_SEND_TIMEOUT_SEC must be finite and nonnegative")
+    return timeout
+
+
+async def _send_websocket_item(ws, item, timeout):
+    sending = ws.send_bytes(item) if isinstance(item, bytes) else ws.send_str(str(item))
+    if timeout > 0:
+        await asyncio.wait_for(sending, timeout=timeout)
+    else:
+        await sending
+
+
+async def _forward_websocket_queue(
+    ws, output_queue, encode_item, is_running=lambda: True, *, diagnostic_queue=None,
+    send_timeout=None,
+):
+    """Preserve critical FIFO; diagnostics use spare send opportunities only."""
+    if send_timeout is None:
+        send_timeout = _websocket_send_timeout()
     out_task = asyncio.create_task(output_queue.get())
     recv_task = asyncio.create_task(ws.receive())
+    log_task = asyncio.create_task(diagnostic_queue.get()) if diagnostic_queue is not None else None
     try:
         while is_running():
+            waiting = {out_task, recv_task}
+            if log_task is not None:
+                waiting.add(log_task)
             done, _ = await asyncio.wait(
-                {out_task, recv_task},
+                waiting,
                 return_when=asyncio.FIRST_COMPLETED,
                 timeout=1.0,
             )
@@ -3173,28 +3209,31 @@ async def _forward_websocket_queue(ws, output_queue, encode_item, is_running=lam
             if out_task in done:
                 item = encode_item(out_task.result())
                 if item is not None:
-                    if isinstance(item, bytes):
-                        await asyncio.wait_for(ws.send_bytes(item), timeout=5.0)
-                    else:
-                        await asyncio.wait_for(ws.send_str(str(item)), timeout=5.0)
+                    await _send_websocket_item(ws, item, send_timeout)
                 out_task = asyncio.create_task(output_queue.get())
+            elif log_task is not None and log_task in done:
+                await _send_websocket_item(ws, log_task.result(), send_timeout)
+                log_task = asyncio.create_task(diagnostic_queue.get())
     finally:
-        for task in (out_task, recv_task):
+        remaining = [task for task in (out_task, recv_task, log_task) if task is not None]
+        for task in remaining:
             if not task.done():
                 task.cancel()
-        await asyncio.gather(out_task, recv_task, return_exceptions=True)
+        await asyncio.gather(*remaining, return_exceptions=True)
 
 
 async def media_ws(request: web.Request):
     engine: RealtimeMSEEngine = request.app["engine"]
+    send_timeout = _websocket_send_timeout()
     ws = web.WebSocketResponse(max_msg_size=0)
     await ws.prepare(request)
     client = engine.register_media_client()
     try:
-        await asyncio.wait_for(ws.send_str(json.dumps({"type": "mime", "mime": 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"'})), timeout=5.0)
-        await asyncio.wait_for(ws.send_str(json.dumps({"type": "log", "message": "[MEDIA] connected pipe encoder"})), timeout=5.0)
+        await _send_websocket_item(ws, json.dumps({"type": "mime", "mime": 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"'}), send_timeout)
+        await _send_websocket_item(ws, json.dumps({"type": "log", "message": "[MEDIA] connected pipe encoder"}), send_timeout)
         await _forward_websocket_queue(
-            ws, client.out_q, client.filter_output_item, client.running.is_set
+            ws, client.out_q, client.filter_output_item, client.running.is_set,
+            diagnostic_queue=client.log_q, send_timeout=send_timeout,
         )
     except Exception:
         pass
@@ -3205,14 +3244,15 @@ async def media_ws(request: web.Request):
 
 async def logs_ws(request: web.Request):
     engine: RealtimeMSEEngine = request.app["engine"]
+    send_timeout = _websocket_send_timeout()
     ws = web.WebSocketResponse(max_msg_size=0)
     await ws.prepare(request)
     q: asyncio.Queue = asyncio.Queue(maxsize=256)
     engine.register_log_client(q)
     try:
-        await asyncio.wait_for(ws.send_str(json.dumps({"type": "log", "message": "[LOG] connected"})), timeout=5.0)
+        await _send_websocket_item(ws, json.dumps({"type": "log", "message": "[LOG] connected"}), send_timeout)
         await _forward_websocket_queue(
-            ws, q, lambda item: json.dumps(item, ensure_ascii=False)
+            ws, q, lambda item: json.dumps(item, ensure_ascii=False), send_timeout=send_timeout,
         )
     except Exception:
         pass

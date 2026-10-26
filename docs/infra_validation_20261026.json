@@ -1,5 +1,9 @@
 {
   "schema_version": 1,
+  "record_status": "historical_candidate_superseded_by_correctness_review",
+  "candidate_commit": "958aee3eb3b8e7cd856aa486d050a3e3df53ca91",
+  "review": "infra_correctness_review_20261026.md",
+  "correction": "One old baseline assertion incorrectly required whole-turn context release on a single failed sentence; do not treat six failures as six verified fixes.",
   "validation_date": "2026-10-26",
   "baseline_commit": "73a2d4846172ad1e1ea1037b5294b922113e8de9",
   "candidate_identity": "Git commit containing this record; local evidence manifest records the full resulting SHA",

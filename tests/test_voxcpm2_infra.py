@@ -253,7 +253,7 @@ class VoxCPM2InfrastructureTests(unittest.IsolatedAsyncioTestCase):
         await stream.aclose()
         self.assertEqual(closed, [True])
 
-    async def test_send_failure_releases_request_context(self):
+    async def test_send_failure_preserves_shared_turn_context(self):
         released = []
 
         class Backend:
@@ -282,9 +282,9 @@ class VoxCPM2InfrastructureTests(unittest.IsolatedAsyncioTestCase):
                     raise ConnectionError("client gone")
 
         await VoxCPM2WebSocketBridge(Backend()).handle_connection(Socket())
-        self.assertEqual(released, ["turn"])
+        self.assertEqual(released, [])
 
-    async def test_cancelling_blocked_send_closes_and_releases_before_exit(self):
+    async def test_cancelling_blocked_send_closes_without_poisoning_turn(self):
         sending = asyncio.Event()
         closed = []
         released = []
@@ -327,9 +327,9 @@ class VoxCPM2InfrastructureTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await asyncio.wait_for(task, 1)
         self.assertEqual(closed, [True])
-        self.assertEqual(released, ["turn"])
+        self.assertEqual(released, [])
 
-    async def test_hung_pcm_and_error_sends_time_out_and_release_context(self):
+    async def test_hung_pcm_and_error_sends_close_request_but_preserve_turn(self):
         closed = []
         released = []
 
@@ -367,10 +367,10 @@ class VoxCPM2InfrastructureTests(unittest.IsolatedAsyncioTestCase):
             bridge = VoxCPM2WebSocketBridge(Backend())
         await asyncio.wait_for(bridge.handle_connection(Socket()), 1)
         self.assertEqual(closed, [True])
-        self.assertEqual(released, ["turn"])
+        self.assertEqual(released, [])
 
-    def test_stall_and_send_timeouts_must_be_positive_and_finite(self):
-        for value in ("0", "-1", "nan", "inf"):
+    def test_stall_and_send_timeouts_must_be_nonnegative_and_finite(self):
+        for value in ("-1", "nan", "inf"):
             with self.subTest(value=value):
                 with patch.dict(os.environ, {"VOXCPM2_PCM_STALL_TIMEOUT_SEC": value}):
                     with self.assertRaises(ValueError):
@@ -378,6 +378,107 @@ class VoxCPM2InfrastructureTests(unittest.IsolatedAsyncioTestCase):
                 with patch.dict(os.environ, {"VOXCPM2_SEND_TIMEOUT_SEC": value}):
                     with self.assertRaises(ValueError):
                         VoxCPM2WebSocketBridge(_BurstModel())
+
+    def test_bounded_queue_requires_a_stall_timeout(self):
+        with patch.dict(os.environ, {"VOXCPM2_PCM_STALL_TIMEOUT_SEC": "0"}):
+            with self.assertRaisesRegex(ValueError, "positive stall timeout"):
+                self._backend(_BurstModel())
+
+    async def test_optional_send_timeout_closes_transport_before_return(self):
+        closes = []
+
+        class Socket:
+            async def send(self, _message):
+                await asyncio.Future()
+
+            async def close(self, **kwargs):
+                closes.append(kwargs)
+
+        with patch.dict(os.environ, {"VOXCPM2_SEND_TIMEOUT_SEC": "0.01"}):
+            bridge = VoxCPM2WebSocketBridge(_BurstModel())
+        with self.assertRaises(TimeoutError):
+            await bridge._send(Socket(), b"\x01\x00")
+        self.assertEqual(closes, [{"code": 1011, "reason": "TTS send deadline exceeded"}])
+
+    def test_unprofiled_queue_and_send_bounds_are_disabled_by_default(self):
+        with patch.dict(os.environ):
+            for name in ("VOXCPM2_PCM_QUEUE_CHUNKS", "VOXCPM2_PCM_STALL_TIMEOUT_SEC",
+                         "VOXCPM2_SEND_TIMEOUT_SEC"):
+                os.environ.pop(name, None)
+            backend = OfficialPromptCacheBackend(
+                model_path="fake", reference_wav=str(self.reference),
+                model_factory=lambda *_args, **_kwargs: _BurstModel(),
+            )
+            bridge = VoxCPM2WebSocketBridge(backend)
+        self.assertEqual(backend._pcm_queue_chunks, 0)
+        self.assertEqual(bridge._send_timeout, 0)
+
+    async def test_failed_sentence_does_not_poison_next_official_sentence(self):
+        model = _BurstModel(count=5)
+        backend = self._backend(model)
+        await backend.start()
+
+        class Socket:
+            def __init__(self, request_id, fail_pcm=False):
+                self.first = True
+                self.request_id = request_id
+                self.fail_pcm = fail_pcm
+                self.events = []
+
+            async def recv(self):
+                if self.first:
+                    self.first = False
+                    return json.dumps({"type": "synthesize", "request_id": self.request_id,
+                                       "context_id": "shared-turn", "text": "sentence"})
+                await asyncio.Future()
+
+            async def send(self, message):
+                if isinstance(message, bytes) and self.fail_pcm:
+                    raise ConnectionError("transient transport error")
+                self.events.append(message if isinstance(message, bytes) else json.loads(message))
+
+        try:
+            bridge = VoxCPM2WebSocketBridge(backend)
+            first = Socket("first", fail_pcm=True)
+            await bridge.handle_connection(first)
+            self.assertNotIn("shared-turn", backend._released_contexts)
+            self.assertEqual(backend._contexts["shared-turn"].cache["revision"], 0)
+            second = Socket("second")
+            await bridge.handle_connection(second)
+            self.assertEqual(sum(isinstance(item, bytes) for item in second.events), 5)
+            self.assertEqual(second.events[-1]["status"], "completed")
+            self.assertEqual(backend._contexts["shared-turn"].cache["revision"], 1)
+        finally:
+            await backend.stop()
+
+    async def test_explicit_cancel_tombstones_whole_official_turn(self):
+        backend = self._backend(_BurstModel())
+        await backend.start()
+        first_pcm = asyncio.Event()
+
+        class Socket:
+            first = True
+
+            async def recv(self):
+                if self.first:
+                    self.first = False
+                    return json.dumps({"type": "synthesize", "request_id": "request",
+                                       "context_id": "turn", "text": "sentence"})
+                await first_pcm.wait()
+                return json.dumps({"type": "cancel", "request_id": "request"})
+
+            async def send(self, message):
+                if isinstance(message, bytes):
+                    first_pcm.set()
+                    await asyncio.sleep(0)
+
+        try:
+            await VoxCPM2WebSocketBridge(backend).handle_connection(Socket())
+            self.assertIn("turn", backend._released_contexts)
+            self.assertNotIn("turn", backend._contexts)
+            self.assertEqual(backend._active_tasks, set())
+        finally:
+            await backend.stop()
 
 
 if __name__ == "__main__":

@@ -34,7 +34,9 @@ jobs:
       - name: Validate single-GPU algebra, preprocessing, and measurements
         run: python -m unittest tests.test_cfg_pruning tests.test_single_gpu_face_detector tests.test_benchmark_single_gpu -v
       - name: Validate benchmark provenance and LLM backpressure
-        run: python -m unittest tests.test_benchmark_provenance tests.test_llm_backpressure -v
+        run: |
+          python -m pip install 'openai==2.35.1' 'httpx==0.28.1'
+          python -m unittest tests.test_benchmark_provenance tests.test_llm_backpressure -v
       - name: Validate single-GPU launch and bridge ownership
         timeout-minutes: 5
         run: |
@@ -49,7 +51,7 @@ jobs:
       - name: Validate Fish portrait and voice customization
         run: python -m unittest tests.test_customization_runtime -v
       - name: Validate media queues and disconnected clients
-        run: python -m unittest tests.test_media_backpressure -v
+        run: python -m unittest tests.test_media_backpressure tests.test_media_socket_integration -v
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

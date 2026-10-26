@@ -81,6 +81,8 @@ class ComparisonTests(unittest.TestCase):
             "provenance": {
                 "checkout": {"commit": "a" * 40, "dirty_tracked": False, "untracked_file_count": 0},
                 "declared_service_commit": "a" * 40,
+                "measurement_source_sha256": {"benchmark_single_gpu.py": "a" * 64,
+                                              "benchmark_provenance.py": "b" * 64},
                 "profile": "single_gpu_voxcpm2", "runtime_config_sha256": ["config-hash"],
                 "declared_weights_manifest_sha256": "weights-hash", "input_wav_sha256": "input-hash",
                 "instruction_sha256": "instruction-hash",
@@ -114,7 +116,8 @@ class ComparisonTests(unittest.TestCase):
         self.assertIn("candidate: benchmark status is not pass", result["comparison_gaps"])
 
     def test_changed_input_config_hardware_or_method_is_flagged(self):
-        for field in ("input_wav_sha256", "runtime_config_sha256", "measurement", "measurement_runtime"):
+        for field in ("input_wav_sha256", "runtime_config_sha256", "measurement", "measurement_runtime",
+                      "measurement_source_sha256"):
             with self.subTest(field=field):
                 after = self.report()
                 after["provenance"][field] = "changed"
@@ -150,7 +153,8 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(compare(before, copy.deepcopy(before))["status"], "review_required")
 
     def test_matching_missing_methodology_cannot_be_declared_matched(self):
-        for field in ("declared_weights_manifest_sha256", "measurement", "measurement_runtime"):
+        for field in ("declared_weights_manifest_sha256", "measurement", "measurement_runtime",
+                      "measurement_source_sha256"):
             before = self.report()
             del before["provenance"][field]
             self.assertEqual(compare(before, copy.deepcopy(before))["status"], "review_required")

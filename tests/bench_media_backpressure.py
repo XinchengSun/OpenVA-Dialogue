@@ -43,10 +43,15 @@ async def measure(source, messages):
     for _ in range(5):
         await asyncio.sleep(0)
     pending = asyncio.all_tasks() - tasks_before
+    queues = [client.out_q]
+    if hasattr(client, "log_q"):
+        queues.append(client.log_q)
     result = {
         "submitted_log_messages": messages,
-        "queued_messages": client.out_q.qsize(),
-        "pending_queue_putters": len(client.out_q._putters),
+        "queued_messages": sum(q.qsize() for q in queues),
+        "critical_queue_depth": client.out_q.qsize(),
+        "diagnostic_queue_depth": client.log_q.qsize() if hasattr(client, "log_q") else None,
+        "pending_queue_putters": sum(len(q._putters) for q in queues),
         "pending_async_tasks": len(pending),
         "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
     }

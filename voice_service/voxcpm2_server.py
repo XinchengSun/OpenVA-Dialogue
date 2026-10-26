@@ -285,9 +285,9 @@ class VoxCPM2WebSocketBridge:
 
     def __init__(self, backend: PCMBackend) -> None:
         self._backend = backend
-        self._send_timeout = float(os.getenv("VOXCPM2_SEND_TIMEOUT_SEC", "5"))
-        if not math.isfinite(self._send_timeout) or self._send_timeout <= 0:
-            raise ValueError("VOXCPM2_SEND_TIMEOUT_SEC must be positive and finite")
+        self._send_timeout = float(os.getenv("VOXCPM2_SEND_TIMEOUT_SEC", "0"))
+        if not math.isfinite(self._send_timeout) or self._send_timeout < 0:
+            raise ValueError("VOXCPM2_SEND_TIMEOUT_SEC must be non-negative and finite")
 
     async def handle_connection(self, websocket: Any) -> None:
         request_id = ""
@@ -295,7 +295,6 @@ class VoxCPM2WebSocketBridge:
         generation_task: asyncio.Task[int] | None = None
         control_task: asyncio.Task[None] | None = None
         cancelled = asyncio.Event()
-        synthesis_completed = False
         try:
             raw_request = await websocket.recv()
             request = self._parse_request(raw_request)
@@ -385,7 +384,6 @@ class VoxCPM2WebSocketBridge:
                 )
             else:
                 await generation_task
-                synthesis_completed = True
                 await self._try_send_json(
                     websocket,
                     {
@@ -418,12 +416,15 @@ class VoxCPM2WebSocketBridge:
             ]
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
-            if generation_task is not None and not synthesis_completed:
+            # A Pipecat turn reuses one context across sentences. A transient
+            # request failure must not tombstone that turn and poison the next
+            # sentence; _stream_audio closes only this request's generator.
+            if generation_task is not None and cancelled.is_set():
                 try:
                     await self._backend.release_context(context_id)
                 except Exception:
                     logger.exception(
-                        "failed to release incomplete VoxCPM2 context %s", context_id
+                        "failed to release cancelled VoxCPM2 context %s", context_id
                     )
 
     async def _stream_audio(
@@ -472,8 +473,19 @@ class VoxCPM2WebSocketBridge:
         return value
 
     async def _send(self, websocket: Any, message: str | bytes) -> None:
-        async with asyncio.timeout(self._send_timeout):
+        if self._send_timeout == 0:
             await websocket.send(message)
+        else:
+            try:
+                async with asyncio.timeout(self._send_timeout):
+                    await websocket.send(message)
+            except TimeoutError:
+                # A timed-out transport is retired, not reused for later
+                # control writes. The real WebSocket applies close_timeout.
+                close = getattr(websocket, "close", None)
+                if callable(close):
+                    await close(code=1011, reason="TTS send deadline exceeded")
+                raise
 
     async def _try_send_json(self, websocket: Any, message: dict[str, Any]) -> None:
         try:
