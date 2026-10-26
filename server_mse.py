@@ -1379,7 +1379,9 @@ class MediaPipeClient:
         if self.proc.poll() is not None:
             raise RuntimeError(f"ffmpeg exited code={self.proc.returncode}")
 
-        frames = np.ascontiguousarray(frames.astype(np.uint8))
+        # push_segment already owns a copy. Reuse contiguous uint8 input here;
+        # astype's default copy would duplicate the entire segment per client.
+        frames = np.ascontiguousarray(frames, dtype=np.uint8)
         audio = np.asarray(audio, dtype=np.float32)
         n_frames = int(frames.shape[0])
 
@@ -2951,7 +2953,7 @@ class RealtimeMSEEngine:
                     if visible and queued:
                         audio_buf = np.concatenate(
                             [audio_buf, media_chunk]
-                        ).astype(np.float32)
+                        ).astype(np.float32, copy=False)
                         source_audio_frames = int(
                             np.ceil(len(media_chunk) / 640.0)
                         )
@@ -3038,8 +3040,8 @@ class RealtimeMSEEngine:
                     last_drop_log = now
 
             while len(frames_buf) >= seg_frames and len(audio_buf) >= seg_samples:
-                seg_f = np.stack(frames_buf[:seg_frames], axis=0).astype(np.uint8)
-                seg_a = audio_buf[:seg_samples].astype(np.float32)
+                seg_f = np.stack(frames_buf[:seg_frames], axis=0).astype(np.uint8, copy=False)
+                seg_a = audio_buf[:seg_samples].astype(np.float32, copy=False)
                 seg_meta = list(audio_frame_meta_buf[:seg_frames])
                 del frames_buf[:seg_frames]
                 audio_buf = audio_buf[seg_samples:]
