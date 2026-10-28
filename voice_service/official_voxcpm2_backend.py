@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import math
 import os
 import sys
@@ -241,6 +242,18 @@ class OfficialPromptCacheBackend:
             raise ValueError("bounded PCM queue requires a positive stall timeout")
         self._active_tasks: set[asyncio.Task[None]] = set()
         self._model_lock = threading.Lock()
+        self._memory_recorder = None
+        self._memory_requests = 0
+
+    def _record_memory(self, stage, tts_model, cache=None):
+        recorder = self._memory_recorder
+        if recorder is None or not recorder.enabled:
+            return
+        runtime = {"prompt": cache}
+        for name in ("base_lm", "residual_lm"):
+            kv_cache = getattr(getattr(tts_model, name, None), "kv_cache", None)
+            runtime[name] = vars(kv_cache) if hasattr(kv_cache, "__dict__") else {}
+        recorder.record(stage, {"tts": tts_model}, runtime)
 
     async def start(self) -> None:
         async with self._lifecycle_lock:
@@ -265,6 +278,8 @@ class OfficialPromptCacheBackend:
                     factory = VoxCPM.from_pretrained
 
                 def load() -> tuple[Any, Mapping[str, Any], int]:
+                    self._memory_recorder = None
+                    self._memory_requests = 0
                     model = factory(
                         self._model_path,
                         load_denoiser=False,
@@ -274,9 +289,15 @@ class OfficialPromptCacheBackend:
                     )
                     try:
                         tts_model = model.tts_model
+                        if os.getenv("OPENVA_MEMORY_PROFILE_DIR", "").strip():
+                            import torch
+                            from inference_memory import MemoryRecorder
+                            self._memory_recorder = MemoryRecorder("tts", torch, next(tts_model.parameters()).device)
+                            self._record_memory("model_loaded", tts_model)
                         base_cache = tts_model.build_prompt_cache(
                             reference_wav_path=str(self._reference_wav)
                         )
+                        self._record_memory("prompt_ready", tts_model, base_cache)
                         sample_rate = int(tts_model.sample_rate)
                         if sample_rate <= 0:
                             raise RuntimeError(
@@ -284,6 +305,18 @@ class OfficialPromptCacheBackend:
                             )
                         if not isinstance(base_cache, Mapping):
                             raise RuntimeError("VoxCPM2 returned an invalid prompt cache")
+                        if getattr(tts_model, "audio_vae", None) is not None:
+                            import torch
+                            from inference_memory import (
+                                enable_prompt_encoder_offload, cache_decoder_weight_norm,
+                            )
+                            encoder_memory = enable_prompt_encoder_offload(torch, tts_model)
+                            decoder_memory = cache_decoder_weight_norm(torch, tts_model)
+                            logging.getLogger(__name__).info(
+                                "VoxCPM2 inference memory: encoder=%s decoder=%s",
+                                encoder_memory, decoder_memory,
+                            )
+                            self._record_memory("vae_memory_ready", tts_model, base_cache)
                         return model, base_cache, sample_rate
                     except BaseException:
                         self._close_model_sync(model)
@@ -452,6 +485,8 @@ class OfficialPromptCacheBackend:
             self._model = None
             self._base_cache = None
             self.sample_rate = 0
+            self._memory_recorder = None
+            self._memory_requests = 0
             self._released_contexts.clear()
             try:
                 if model is not None:
@@ -555,6 +590,9 @@ class OfficialPromptCacheBackend:
                 text,
                 new_audio_feature,
             )
+            self._memory_requests += 1
+            if self._memory_requests & (self._memory_requests - 1) == 0:
+                self._record_memory(f"requests_{self._memory_requests}", tts_model, merged_cache)
             if self._cancelled(state, stop_requested):
                 self._post(loop, queue, _WorkerMessage("cancelled"))
                 return

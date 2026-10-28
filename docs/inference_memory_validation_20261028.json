@@ -1,0 +1,514 @@
+{
+  "date": "2026-10-28",
+  "baseline_commit": "c6220ee5c618af2af95117d70d625e818c27dcf7",
+  "scope": "Measured CUDA components with synthetic inputs and random FP32 weights; not trained full-pipeline validation",
+  "environment": {
+    "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+    "gpu_total_mib": 8188,
+    "torch": "2.8.0+cu126",
+    "cuda": "12.6",
+    "driver": "566.24",
+    "os": "Windows",
+    "python": "3.12.3 (tags/v3.12.3:f6650f9, Apr  9 2024, 14:05:25) [MSC v.1938 64 bit (AMD64)]",
+    "torchvision": "0.23.0+cu126",
+    "timm": "1.0.20"
+  },
+  "units": "Bytes; MiB = 2**20 bytes. Allocated/reserved are per-process PyTorch statistics, not whole-device NVML.",
+  "motion": {
+    "scope": "Production motion core, random FP32 weights, no Wav2Vec/TTS/renderer",
+    "shape": {
+      "layers": 12,
+      "hidden": 768,
+      "cfg_batch": 4,
+      "sequence": 94
+    },
+    "replay_outputs": 13,
+    "placement": {
+      "inactive_tensor_bytes_kept_on_cpu": 154368000,
+      "identical_position_buffer_bytes_shared": 106954752
+    },
+    "before": {
+      "loaded": {
+        "role": "motion-core",
+        "stage": "loaded",
+        "device": "cuda",
+        "allocated_bytes": 1195307008,
+        "reserved_bytes": 1281359872,
+        "peak_allocated_bytes": 1195307008,
+        "peak_reserved_bytes": 1281359872,
+        "inactive_split_bytes": 86052864,
+        "allocation_retries": 0,
+        "unique_cuda_storage_bytes": 1181151232,
+        "allocated_minus_labelled_storage_bytes": 14155776,
+        "allocator_backend": "native",
+        "allocator_pools": {
+          "(0, 0)": {
+            "reserved_bytes": 1281359872,
+            "allocated_bytes": 1195307008,
+            "active_bytes": 1195307008
+          }
+        }
+      },
+      "captured": {
+        "role": "motion-core",
+        "stage": "captured",
+        "device": "cuda",
+        "allocated_bytes": 1217738752,
+        "reserved_bytes": 1348468736,
+        "peak_allocated_bytes": 1232398336,
+        "peak_reserved_bytes": 1348468736,
+        "inactive_split_bytes": 109758464,
+        "allocation_retries": 0,
+        "unique_cuda_storage_bytes": 1185918512,
+        "allocated_minus_labelled_storage_bytes": 31820240,
+        "allocator_backend": "native",
+        "allocator_pools": {
+          "(0, 0)": {
+            "reserved_bytes": 1304428544,
+            "allocated_bytes": 1209210880,
+            "active_bytes": 1209210880
+          },
+          "(1, 0)": {
+            "reserved_bytes": 44040192,
+            "allocated_bytes": 8527872,
+            "active_bytes": 8527872
+          }
+        }
+      },
+      "steady": {
+        "role": "motion-core",
+        "stage": "steady",
+        "device": "cuda",
+        "allocated_bytes": 1217738752,
+        "reserved_bytes": 1348468736,
+        "peak_allocated_bytes": 1232398336,
+        "peak_reserved_bytes": 1348468736,
+        "inactive_split_bytes": 109758464,
+        "allocation_retries": 0,
+        "unique_cuda_storage_bytes": 1185918512,
+        "allocated_minus_labelled_storage_bytes": 31820240,
+        "allocator_backend": "native",
+        "allocator_pools": {
+          "(0, 0)": {
+            "reserved_bytes": 1304428544,
+            "allocated_bytes": 1209210880,
+            "active_bytes": 1209210880
+          },
+          "(1, 0)": {
+            "reserved_bytes": 44040192,
+            "allocated_bytes": 8527872,
+            "active_bytes": 8527872
+          }
+        }
+      }
+    },
+    "after": {
+      "loaded": {
+        "role": "motion-core",
+        "stage": "loaded",
+        "device": "cuda",
+        "allocated_bytes": 922449920,
+        "reserved_bytes": 1050673152,
+        "peak_allocated_bytes": 922449920,
+        "peak_reserved_bytes": 1050673152,
+        "inactive_split_bytes": 128223232,
+        "allocation_retries": 0,
+        "unique_cuda_storage_bytes": 919828480,
+        "allocated_minus_labelled_storage_bytes": 2621440,
+        "allocator_backend": "native",
+        "allocator_pools": {
+          "(0, 0)": {
+            "reserved_bytes": 1050673152,
+            "allocated_bytes": 922449920,
+            "active_bytes": 922449920
+          }
+        }
+      },
+      "captured": {
+        "role": "motion-core",
+        "stage": "captured",
+        "device": "cuda",
+        "allocated_bytes": 948027392,
+        "reserved_bytes": 1117782016,
+        "peak_allocated_bytes": 963619840,
+        "peak_reserved_bytes": 1117782016,
+        "inactive_split_bytes": 148783104,
+        "allocation_retries": 0,
+        "unique_cuda_storage_bytes": 924595760,
+        "allocated_minus_labelled_storage_bytes": 23431632,
+        "allocator_backend": "native",
+        "allocator_pools": {
+          "(0, 0)": {
+            "reserved_bytes": 1073741824,
+            "allocated_bytes": 939499520,
+            "active_bytes": 939499520
+          },
+          "(1, 0)": {
+            "reserved_bytes": 44040192,
+            "allocated_bytes": 8527872,
+            "active_bytes": 8527872
+          }
+        }
+      },
+      "steady": {
+        "role": "motion-core",
+        "stage": "steady",
+        "device": "cuda",
+        "allocated_bytes": 948027392,
+        "reserved_bytes": 1117782016,
+        "peak_allocated_bytes": 963619840,
+        "peak_reserved_bytes": 1117782016,
+        "inactive_split_bytes": 148783104,
+        "allocation_retries": 0,
+        "unique_cuda_storage_bytes": 924595760,
+        "allocated_minus_labelled_storage_bytes": 23431632,
+        "allocator_backend": "native",
+        "allocator_pools": {
+          "(0, 0)": {
+            "reserved_bytes": 1073741824,
+            "allocated_bytes": 939499520,
+            "active_bytes": 939499520
+          },
+          "(1, 0)": {
+            "reserved_bytes": 44040192,
+            "allocated_bytes": 8527872,
+            "active_bytes": 8527872
+          }
+        }
+      }
+    },
+    "comparison": {
+      "shape": [
+        13,
+        4,
+        1,
+        512
+      ],
+      "array_equal": true,
+      "max_absolute_error": 0.0
+    },
+    "late_offload_experiment": {
+      "role": "motion-core",
+      "stage": "steady",
+      "device": "cuda",
+      "allocated_bytes": 948158464,
+      "reserved_bytes": 1327497216,
+      "peak_allocated_bytes": 1195307008,
+      "peak_reserved_bytes": 1327497216,
+      "inactive_split_bytes": 358367232,
+      "allocation_retries": 0,
+      "unique_cuda_storage_bytes": 924595760,
+      "allocated_minus_labelled_storage_bytes": 23562704
+    }
+  },
+  "renderer": {
+    "scope": "Full production LIA FaceGenerator, random FP32 weights and synthetic features; no motion/TTS/checkpoint",
+    "warmup_frames": 3,
+    "measured_frames": 1,
+    "before": {
+      "loaded": {
+        "role": "renderer-component",
+        "stage": "loaded",
+        "device": "cuda",
+        "allocated_bytes": 310299648,
+        "reserved_bytes": 314572800,
+        "peak_allocated_bytes": 310299648,
+        "peak_reserved_bytes": 314572800,
+        "inactive_split_bytes": 4273152,
+        "allocation_retries": 0,
+        "unique_cuda_storage_bytes": 298823100,
+        "allocated_minus_labelled_storage_bytes": 11476548,
+        "allocator_backend": "native",
+        "allocator_pools": {
+          "(0, 0)": {
+            "reserved_bytes": 314572800,
+            "allocated_bytes": 310299648,
+            "active_bytes": 310299648
+          }
+        }
+      },
+      "steady": {
+        "role": "renderer-component",
+        "stage": "steady",
+        "device": "cuda",
+        "allocated_bytes": 471331840,
+        "reserved_bytes": 1371537408,
+        "peak_allocated_bytes": 1006449664,
+        "peak_reserved_bytes": 1371537408,
+        "inactive_split_bytes": 231214080,
+        "allocation_retries": 0,
+        "unique_cuda_storage_bytes": 448452028,
+        "allocated_minus_labelled_storage_bytes": 22879812,
+        "allocator_backend": "native",
+        "allocator_pools": {
+          "(0, 0)": {
+            "reserved_bytes": 1371537408,
+            "allocated_bytes": 471331840,
+            "active_bytes": 471331840
+          }
+        }
+      }
+    },
+    "after": {
+      "loaded": {
+        "role": "renderer-component",
+        "stage": "loaded",
+        "device": "cuda",
+        "allocated_bytes": 310299648,
+        "reserved_bytes": 314572800,
+        "peak_allocated_bytes": 310299648,
+        "peak_reserved_bytes": 314572800,
+        "inactive_split_bytes": 4273152,
+        "allocation_retries": 0,
+        "unique_cuda_storage_bytes": 298823100,
+        "allocated_minus_labelled_storage_bytes": 11476548,
+        "allocator_backend": "native",
+        "allocator_pools": {
+          "(0, 0)": {
+            "reserved_bytes": 314572800,
+            "allocated_bytes": 310299648,
+            "active_bytes": 310299648
+          }
+        }
+      },
+      "steady": {
+        "role": "renderer-component",
+        "stage": "steady",
+        "device": "cuda",
+        "allocated_bytes": 469496832,
+        "reserved_bytes": 1191182336,
+        "peak_allocated_bytes": 838022656,
+        "peak_reserved_bytes": 1191182336,
+        "inactive_split_bytes": 82054144,
+        "allocation_retries": 0,
+        "unique_cuda_storage_bytes": 448452028,
+        "allocated_minus_labelled_storage_bytes": 21044804,
+        "allocator_backend": "native",
+        "allocator_pools": {
+          "(0, 0)": {
+            "reserved_bytes": 1191182336,
+            "allocated_bytes": 469496832,
+            "active_bytes": 469496832
+          }
+        }
+      }
+    },
+    "comparison": {
+      "shape": [
+        1,
+        3,
+        512,
+        512
+      ],
+      "array_equal": true,
+      "max_absolute_error": 0.0
+    }
+  },
+  "audio_vae": {
+    "scope": "Official AudioVAE v2 architecture with random FP32 weights; no LM or trained speech checkpoint",
+    "source_sha256": "2efdff1708d8ec1471624aae6f232d0f933de26b788b6901c434246847e2d3a8",
+    "torch": "2.8.0+cu126",
+    "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+    "decode_patches": 2,
+    "latent_shape": [
+      1,
+      64,
+      4
+    ],
+    "offload": {
+      "enabled": true,
+      "encoder_cuda_storage_bytes": 387301888,
+      "allocated_freed_bytes": 387302912
+    },
+    "decoder_cache": {
+      "enabled": true,
+      "modules_cached": 45,
+      "original_parameter_bytes_kept_on_cpu": 182856964
+    },
+    "streamed_audio_max_abs_error": 0.0,
+    "automatic_reload_max_abs_error": 0.0,
+    "before": {
+      "role": "audiovae",
+      "stage": "before_offload",
+      "device": "cuda",
+      "allocated_bytes": 753222656,
+      "reserved_bytes": 1092616192,
+      "peak_allocated_bytes": 906646016,
+      "peak_reserved_bytes": 1092616192,
+      "inactive_split_bytes": 165329920,
+      "allocation_retries": 0,
+      "unique_cuda_storage_bytes": 753201428,
+      "allocated_minus_labelled_storage_bytes": 21228,
+      "allocator_backend": "native",
+      "allocator_pools": {
+        "(0, 0)": {
+          "reserved_bytes": 1092616192,
+          "allocated_bytes": 753222656,
+          "active_bytes": 753222656
+        }
+      }
+    },
+    "after": {
+      "role": "audiovae",
+      "stage": "after_offload",
+      "device": "cuda",
+      "allocated_bytes": 365919744,
+      "reserved_bytes": 536870912,
+      "peak_allocated_bytes": 906646016,
+      "peak_reserved_bytes": 1092616192,
+      "inactive_split_bytes": 170951168,
+      "allocation_retries": 0,
+      "unique_cuda_storage_bytes": 365899540,
+      "allocated_minus_labelled_storage_bytes": 20204,
+      "allocator_backend": "native",
+      "allocator_pools": {
+        "(0, 0)": {
+          "reserved_bytes": 536870912,
+          "allocated_bytes": 365919744,
+          "active_bytes": 365919744
+        }
+      }
+    },
+    "decode_steady": {
+      "role": "audiovae",
+      "stage": "decode_steady",
+      "device": "cuda",
+      "allocated_bytes": 184104960,
+      "reserved_bytes": 228589568,
+      "peak_allocated_bytes": 207634432,
+      "peak_reserved_bytes": 228589568,
+      "inactive_split_bytes": 27707392,
+      "allocation_retries": 0,
+      "unique_cuda_storage_bytes": 183042576,
+      "allocated_minus_labelled_storage_bytes": 1062384,
+      "allocator_backend": "native",
+      "allocator_pools": {
+        "(0, 0)": {
+          "reserved_bytes": 228589568,
+          "allocated_bytes": 184104960,
+          "active_bytes": 184104960
+        }
+      }
+    },
+    "steady": {
+      "role": "audiovae",
+      "stage": "steady",
+      "device": "cuda",
+      "allocated_bytes": 184168960,
+      "reserved_bytes": 228589568,
+      "peak_allocated_bytes": 711594496,
+      "peak_reserved_bytes": 991952896,
+      "inactive_split_bytes": 27643392,
+      "allocation_retries": 0,
+      "unique_cuda_storage_bytes": 183042576,
+      "allocated_minus_labelled_storage_bytes": 1126384,
+      "allocator_backend": "native",
+      "allocator_pools": {
+        "(0, 0)": {
+          "reserved_bytes": 228589568,
+          "allocated_bytes": 184168960,
+          "active_bytes": 184168960
+        }
+      }
+    }
+  },
+  "validation": {
+    "discovered": 122,
+    "passed": 108,
+    "skipped": 14,
+    "skip_reason": "Pipecat adapter dependency not installed",
+    "failed": 0,
+    "cpu_compileall": "passed",
+    "git_diff_check": "passed"
+  },
+  "unvalidated": [
+    "Trained-weight full-pipeline outputs and perceptual quality",
+    "Full VoxCPM2 LM/KV/torch.compile workspace residency",
+    "Concurrent renderer/motion/TTS whole-device peak, contexts and driver allocations",
+    "12 GiB startup and sustained multi-turn capacity on the target GPU",
+    "Latency impact of a later reference-audio re-encode reload"
+  ],
+  "upstream": {
+    "commit": "cce58a5b59303c9bd63d12f23afe6a49a4a80c59",
+    "sources": [
+      {
+        "url": "https://raw.githubusercontent.com/OpenBMB/VoxCPM/cce58a5b59303c9bd63d12f23afe6a49a4a80c59/src/voxcpm/model/voxcpm2.py",
+        "file": "voxcpm2.py",
+        "sha256": "31ad554bc15a4da18cf820c6fda97a5b2c56ac8e9a5e66031a264d363661575c"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/OpenBMB/VoxCPM/cce58a5b59303c9bd63d12f23afe6a49a4a80c59/src/voxcpm/modules/minicpm4/model.py",
+        "file": "model.py",
+        "sha256": "0733349295d13b2ec57e979058fa64becec821b9bd475e188eb4033fc016d2d2"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/OpenBMB/VoxCPM/cce58a5b59303c9bd63d12f23afe6a49a4a80c59/src/voxcpm/core.py",
+        "file": "core.py",
+        "sha256": "fb7162a6c8bb9b29a8cf32f0e97344f55761e5bafda4193a13476cc78ab5a8ba"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/OpenBMB/VoxCPM/cce58a5b59303c9bd63d12f23afe6a49a4a80c59/src/voxcpm/modules/audiovae/audio_vae.py",
+        "file": "upstream_audio_vae.py",
+        "sha256": "cabe57717c94437ace644b8da7fa4db811a5bdacb437e341a875f890bf8308f9"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/OpenBMB/VoxCPM/cce58a5b59303c9bd63d12f23afe6a49a4a80c59/src/voxcpm/modules/audiovae/audio_vae_v2.py",
+        "file": "upstream_audio_vae_v2.py",
+        "sha256": "2efdff1708d8ec1471624aae6f232d0f933de26b788b6901c434246847e2d3a8"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/OpenBMB/VoxCPM/cce58a5b59303c9bd63d12f23afe6a49a4a80c59/src/voxcpm/modules/minicpm4/cache.py",
+        "file": "upstream_cache.py",
+        "sha256": "644acd3bf7cf8313f2ba285f68c41967fcedb57e5f5d8f38a883acc385ee030d"
+      }
+    ]
+  },
+  "raw_evidence_sha256": {
+    "motion_final_before/baseline_summary.json": "a38891156958309942c28f859ff9ce5fa455f49edda61afe667cbb2cfd164d83",
+    "motion_final_after/baseline_summary.json": "c09c3a81e416cc5cca826279f2addd4fed1bc686bb99af1b408690d30c1e8e8d",
+    "motion_prepared_final/baseline_summary.json": "223bf60ee02b7305426765e4ab6fb8005a8e9ac4f1059409d0b6cec859565871",
+    "renderer_final_before/renderer_summary.json": "779347fcb7f86b0738da79715f287954f35d93bbaddf56a2a24b861704fbbb83",
+    "renderer_final_after/renderer_summary.json": "d20a99bf8059e91c83009c6b7307057763a91082242e5825263ebacf04b94ba0",
+    "vae_final/audiovae_summary.json": "402b537bec5a94a90bbc2cd63938118339e3e37e9d1586c5690aae85759cdc4c",
+    "motion_final_before/predictions.npy": "bea4c9742deba2e88a3ef15c8554cce04f1482a2401b7eabbb968733488d212b",
+    "motion_final_after/predictions.npy": "bea4c9742deba2e88a3ef15c8554cce04f1482a2401b7eabbb968733488d212b",
+    "renderer_final_before/frame_float.npy": "fe807a1b9ccbb9d15bf14da96ad35bf945f6578b19c4af67b3240c247781f1a2",
+    "renderer_final_after/frame_float.npy": "fe807a1b9ccbb9d15bf14da96ad35bf945f6578b19c4af67b3240c247781f1a2",
+    "combined_final_regression.log": "443193f8e26a5a3d3d2bd43abfb6a6db126dab774dd1472a7493e5fb266d3cf3",
+    "final_component_runs.json": "38ef20e59c54d009bb8c8da6a271cebf8a43064d1beb01cde96320c9cf03ec6d"
+  },
+  "candidate_source_sha256": {
+    "inference_memory.py": "e81cb8f51d0e2eb0ca84ab0c5a871c712df895a36190eb4564d7f84e5fe5dfd2",
+    "app.py": "b18d1d6300b82e32a8a4dd73f3ca686588cb33b0f4da565a2b438fe362bd63cc",
+    "dual_gpu_mic_realtime_ui_v8_playbuffer.py": "a404f8a69938bed015bc4582140d3a26cc12e642aa772511a59afcd709653d8a",
+    "voice_service/official_voxcpm2_backend.py": "76d5ecf6f1bb161d15fe9f65337f4f3bb0057e5f52e241164b95f15f5b634f6f",
+    "tests/bench_motion_memory.py": "c17773024a03e079d27aafef13a48c4cceed0107e69c0aff102d92642c25f512",
+    "tests/bench_renderer_memory.py": "c2b8279eea0e75924e9d400a14e1915358435b63d620ea5da4293f7ef7d83d7f",
+    "tests/bench_prompt_encoder_memory.py": "92e6b93d9a08469c040216eced8d57471c6d634351df8a892ec918b41f379804",
+    "tests/motion_memory_fixture.py": "9ce48f2de2be552e13cd784d1b0fdc0e54d03646763af7442bcd9d1059d770ef",
+    "tests/test_motion_memory.py": "357a479de6bd18fa3fab266c6e94be74ff2e80e77f4ac57baf823736dd69ec24",
+    "tests/test_spade_memory.py": "f7234797ade94f3c8c1d40477e907ce81fb37165129ba4e7707ee9259e57bb0a",
+    "tests/test_tts_memory.py": "c9e2b0aa31f57ee03e1ae2710c8817fb4ccac4d13ef4c099c5977cf636138336",
+    "tests/test_inference_ema.py": "3d460becd14428d3302249bff22cfc620892661509b6c9312b8fe5cd147f3c70",
+    "model/motion_generation/motion_gen_gpt_flowmatching_addaudio_linear_twowavencoder.py": "bd0e84672ff53ab77c8a6129bdd25687fab89b925d07943fd81661d4cde80e8b",
+    "tools/visualization_0416/utils/model_0506/model/head_animation/LIA_3d/util.py": "efe6062f315297eb31829420210426361fc44d6878576132f0e1bf5c41f4963b"
+  },
+  "source_hash_note": "candidate_source_sha256 hashes local working-tree bytes; candidate_source_lf_sha256 normalizes CRLF for cross-platform Git checkouts",
+  "candidate_source_lf_sha256": {
+    "inference_memory.py": "e81cb8f51d0e2eb0ca84ab0c5a871c712df895a36190eb4564d7f84e5fe5dfd2",
+    "app.py": "7da4b009bf736aa2052c5e94aceb6effe4ca01724c228a9ad7a1254d2a18a1d4",
+    "dual_gpu_mic_realtime_ui_v8_playbuffer.py": "d29085f7678b0a1cdefac06bdb168e74a34d11fb61c754f913641388bd7031a0",
+    "voice_service/official_voxcpm2_backend.py": "d827182b73008174a9d2da89feec87ab893e8c5cab4f8d3c07b2658ca0ee95d6",
+    "tests/bench_motion_memory.py": "c17773024a03e079d27aafef13a48c4cceed0107e69c0aff102d92642c25f512",
+    "tests/bench_renderer_memory.py": "c2b8279eea0e75924e9d400a14e1915358435b63d620ea5da4293f7ef7d83d7f",
+    "tests/bench_prompt_encoder_memory.py": "92e6b93d9a08469c040216eced8d57471c6d634351df8a892ec918b41f379804",
+    "tests/motion_memory_fixture.py": "9ce48f2de2be552e13cd784d1b0fdc0e54d03646763af7442bcd9d1059d770ef",
+    "tests/test_motion_memory.py": "357a479de6bd18fa3fab266c6e94be74ff2e80e77f4ac57baf823736dd69ec24",
+    "tests/test_spade_memory.py": "f7234797ade94f3c8c1d40477e907ce81fb37165129ba4e7707ee9259e57bb0a",
+    "tests/test_tts_memory.py": "c9e2b0aa31f57ee03e1ae2710c8817fb4ccac4d13ef4c099c5977cf636138336",
+    "tests/test_inference_ema.py": "48fe5a68dfca9d0612f4d811eed45f29a240a8d20f3602594aabd7a26ecaef16",
+    "model/motion_generation/motion_gen_gpt_flowmatching_addaudio_linear_twowavencoder.py": "35eda54656c3bf9448f1ec518bbe8010001d2e9423896234c5bbac87d3b36626",
+    "tools/visualization_0416/utils/model_0506/model/head_animation/LIA_3d/util.py": "f06e32473578b43f76e982ceddc923c113ce50e9fd3927fe88d3b3857341b539"
+  },
+  "baseline_renderer_util_sha256": "e12279253cdac51c5537042cae47a75ec153bf3237a18ac9413c88e42dd1d3c9"
+}

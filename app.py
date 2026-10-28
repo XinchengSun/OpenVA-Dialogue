@@ -138,7 +138,16 @@ def load_dystream_model():
     else:
         print(f"[DyStream] WARNING: Checkpoint not found at {ckpt_path}")
 
-    _dystream_model.eval().to(DEVICE)
+    _dystream_model.eval()
+    from inference_memory import MemoryRecorder, place_motion_for_inference
+    memory = MemoryRecorder("motion-load", torch, DEVICE)
+    if os.getenv("DYSTREAM_SINGLE_GPU", "").strip() and DEVICE.startswith("cuda") and _dystream_ema is None:
+        placement = place_motion_for_inference(torch, _dystream_model, DEVICE)
+        print(f"[MOTION_MEMORY] selective inference placement: {placement}", flush=True)
+    else:
+        _dystream_model.to(DEVICE)
+    if memory.enabled:
+        memory.record("model_loaded", {"motion": _dystream_model})
 
     # Noise scheduler
     _noise_scheduler = FlowMatchEulerDiscreteScheduler(

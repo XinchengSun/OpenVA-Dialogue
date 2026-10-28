@@ -172,6 +172,7 @@ ASR 在 CPU 上运行，LLM 使用远程 API。延迟在服务端回环客户端
 | [基础设施正确性审查](docs/infra_correctness_review_20261026.md) | 反例复现、接口契约、已撤回策略、实验边界与验证依据 |
 | [推理热路径优化](docs/inference_performance_20261026.md) | 渲染固定计算缓存、时间步设备处理、可选条件投影复用、CPU 对照与 GPU 验收边界 |
 | [头像编码器用后卸载](docs/reference_encoder_offload_20261028.md) | 保留头像特征、释放初始化编码器显存，包含组件测量与 12 GiB 目标边界 |
+| [推理显存核查](docs/inference_memory_audit_20261028.md) | 动作选择性加载、SPADE 临时存储复用、AudioVAE 卸载、CUDA 组件实测及待完成的整机 12 GiB 验收 |
 | [架构](docs/architecture.md) | Listener/Speaker 状态、打断、媒体边界、GPU 拓扑 |
 | [定制](README_CUSTOMIZATION.md) | 形象定制与零样本音色克隆流程 |
 | [模型权重](docs/weights.md) | 固定上游资产与运行路径 |

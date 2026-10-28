@@ -66,6 +66,11 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
 
     model = app._dystream_model
     noise_scheduler = app._noise_scheduler
+    from inference_memory import MemoryRecorder
+    memory = MemoryRecorder("motion", torch, device)
+    memory_frames = 0
+    if memory.enabled:
+        memory.record("loaded", {"motion": model})
 
     audio_sr = int(app.OmegaConf.select(app._dystream_cfg.config, "model.audio_sr", default=16000))
     pose_fps = int(app.OmegaConf.select(app._dystream_cfg.config, "model.pose_fps", default=25))
@@ -475,6 +480,18 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
                         noise_scheduler=noise_scheduler,
                         num_inference_steps=args.denoising_steps,
                     )
+                    memory_frames += 1
+                    if memory.enabled and memory_frames & (memory_frames - 1) == 0:
+                        gpt = getattr(model, "cuda_graph_gpt", None)
+                        diffusion = getattr(model, "cuda_graph_diffusion", None)
+                        memory.record(f"frames_{memory_frames}", {"motion": model}, {
+                            "gpt": vars(gpt) if gpt is not None else {},
+                            "diffusion": vars(diffusion) if diffusion is not None else {},
+                            "audio": audio_tensor, "other_audio": audio_other_tensor,
+                            "features": audio_feat, "other_features": audio_other_feat,
+                            "past_motion": past_motion, "anchor": anchor_motion, "output": out1,
+                            "ema": getattr(app._dystream_ema, "shadow_params", None),
+                        })
 
                     anchor_blend = 0.0
                     if current_mode == "IDLE_NO_USER":
@@ -893,9 +910,15 @@ def render_worker(args, anchor_q, motion_q, frame_q):
     import app
 
     device = app.DEVICE
+    from inference_memory import MemoryRecorder
+    memory = MemoryRecorder("render", torch, device)
+    memory_chunks = 0
 
     print(f"[RENDER_GPU{args.render_gpu}] loading visualization...", flush=True)
     app.load_visualization_model()
+    if memory.enabled:
+        memory.record("loaded", {name: module for name, module in app._vis_ctx.items()
+                                 if isinstance(module, torch.nn.Module)})
 
     image_path = get_paths(app, args.sample)
 
@@ -961,6 +984,10 @@ def render_worker(args, anchor_q, motion_q, frame_q):
             torch.cuda.synchronize()
         b = time.perf_counter()
         print(f"[RENDER_WARMUP] {k} render={b - a:.4f}s", flush=True)
+
+    if memory.enabled:
+        memory.record("warmed", {"generator": face_generator, "flow": flow_estimator},
+                      {"face_features": face_feat, "anchor": warm_anchor, "warm_chunk": warm_chunk})
 
     # 预热完成后再放行 motion。
     anchor_q.put(anchor_np)
@@ -1119,6 +1146,10 @@ def render_worker(args, anchor_q, motion_q, frame_q):
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         r1 = time.perf_counter()
+        memory_chunks += 1
+        if memory.enabled and memory_chunks & (memory_chunks - 1) == 0:
+            memory.record(f"chunks_{memory_chunks}", {"generator": face_generator, "flow": flow_estimator},
+                          {"face_features": face_feat, "anchor": warm_anchor, "warm_chunk": warm_chunk})
 
         # Keep turn metadata all the way to the MSE engine so stale idle/answer
         # frames can be discarded without guessing from queue order.
