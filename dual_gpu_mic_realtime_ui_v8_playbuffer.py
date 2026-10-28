@@ -851,6 +851,34 @@ class ListeningLatentFaceController:
         self.frame_i += int(out.shape[0])
         return out
 
+def offload_reference_encoders(torch, vis_ctx, names=("face_encoder", "motion_encoder")):
+    """Release startup-only encoder CUDA storage, keeping cached features intact."""
+    encoders = {name: vis_ctx[name] for name in names}
+    cuda_tensor_bytes = {
+        name: sum(t.numel() * t.element_size()
+                  for tensors in (module.parameters(), module.buffers())
+                  for t in tensors if t.is_cuda)
+        for name, module in encoders.items()
+    }
+    cuda_device = next((p.device for module in encoders.values()
+                        for p in module.parameters() if p.is_cuda), None)
+    before = {}
+    if cuda_device is not None:
+        torch.cuda.synchronize(cuda_device)
+        before = {"allocated": torch.cuda.memory_allocated(cuda_device),
+                  "reserved": torch.cuda.memory_reserved(cuda_device)}
+    for module in encoders.values():
+        module.cpu()
+    result = {"encoder_cuda_tensor_bytes": cuda_tensor_bytes}
+    if cuda_device is not None:
+        torch.cuda.synchronize(cuda_device)
+        with torch.cuda.device(cuda_device):
+            torch.cuda.empty_cache()
+        result["allocated_freed_bytes"] = before["allocated"] - torch.cuda.memory_allocated(cuda_device)
+        result["reserved_released_bytes"] = before["reserved"] - torch.cuda.memory_reserved(cuda_device)
+    return result
+
+
 def render_worker(args, anchor_q, motion_q, frame_q):
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["HF_HUB_OFFLINE"] = "1"
@@ -877,6 +905,9 @@ def render_worker(args, anchor_q, motion_q, frame_q):
 
     anchor_np = motion_latent_cpu.numpy()
 
+    motion_offload = offload_reference_encoders(torch, app._vis_ctx, ("motion_encoder",))
+    print(f"[RENDER_MEMORY] motion encoder offloaded to CPU: {motion_offload}", flush=True)
+
     transform = app._vis_ctx["transform"]
     face_encoder = app._vis_ctx["face_encoder"]
     flow_estimator = app._vis_ctx["flow_estimator"]
@@ -887,12 +918,19 @@ def render_worker(args, anchor_q, motion_q, frame_q):
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     fe0 = time.perf_counter()
-    face_feat = face_encoder(ref_img_tensor).detach()
+    with torch.no_grad():
+        face_feat = face_encoder(ref_img_tensor).detach()
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     fe1 = time.perf_counter()
 
     print(f"[RENDER_GPU{args.render_gpu}] cached face_feat={fe1 - fe0:.4f}s", flush=True)
+
+    # The avatar is fixed for this worker. Subsequent frames consume face_feat
+    # and anchor_np, never these encoders or the source image CUDA tensor.
+    del ref_img_tensor
+    offload_stats = offload_reference_encoders(torch, app._vis_ctx, ("face_encoder",))
+    print(f"[RENDER_MEMORY] face encoder offloaded to CPU: {offload_stats}", flush=True)
 
     warm_anchor = torch.from_numpy(anchor_np).float()
     if warm_anchor.dim() == 1:

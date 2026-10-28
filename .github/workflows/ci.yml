@@ -98,3 +98,5 @@ jobs:
         run: python -m unittest tests.test_official_voxcpm2_backend tests.test_voxcpm2_infra tests.test_voxcpm2_tts -v
       - name: Validate inference reuse and byte-preserving media packing
         run: python -m unittest tests.test_render_constant_cache tests.test_diffusion_condition_reuse tests.test_motion_timestep_batch tests.test_media_copy_performance tests.test_render_stride_and_d2h -v
+      - name: Validate startup-only reference encoder offload
+        run: python -m unittest tests.test_reference_encoder_offload -v

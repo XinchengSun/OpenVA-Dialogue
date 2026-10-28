@@ -89,6 +89,10 @@ and official VoxCPM installer is not provided by this change.
    context on physical GPU 0 even when CUDA is restricted to another card.
    The audit includes graphics contexts and resolves CUDA worker thread IDs,
    rather than checking only CUDA compute processes.
+6. Move the reference motion and face encoders back to CPU immediately after
+   their last startup use. Cached avatar features stay on the GPU; subsequent
+   rendering retains the original precision and model settings. See the
+   [offload measurements and limits](reference_encoder_offload_20261028.md).
 
 This profile keeps recurrent motion history, speaker/listener audio routing,
 render resolution, interruption handling, and the existing denoising count.
