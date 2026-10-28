@@ -104,3 +104,5 @@ jobs:
         run: python -m unittest tests.test_motion_memory tests.test_spade_memory tests.test_tts_memory -v
       - name: Validate renderer reuse and strict judge negative controls
         run: python -m unittest tests.test_spectral_norm_cache tests.test_renderer_memory_integration tests.test_renderer_reuse_judge -v
+      - name: Validate CPU text lookup and suspended-generator memory accounting
+        run: python -m unittest tests.test_text_embedding_offload tests.test_text_embedding_judge tests.test_generator_memory_inventory -v

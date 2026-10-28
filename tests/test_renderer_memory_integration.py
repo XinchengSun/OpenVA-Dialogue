@@ -18,7 +18,7 @@ class RendererMemoryIntegrationTests(unittest.TestCase):
     def test_loader_flags_apply_only_after_loading_original_checkpoint(self):
         function = next(node for node in ast.parse((ROOT / "app.py").read_text(encoding="utf-8")).body
                         if isinstance(node, ast.FunctionDef) and node.name == "load_visualization_model")
-        for enabled in (False, True):
+        for enabled in (False, True, None):
             head = nn.Module()
             head.face_generator = spectral_norm(nn.Conv2d(3, 3, 1))
             for name in ("flow_estimator", "face_encoder", "motion_encoder"):
@@ -33,14 +33,20 @@ class RendererMemoryIntegrationTests(unittest.TestCase):
                              OmegaConf=SimpleNamespace(load=lambda *a: SimpleNamespace(resume_ckpt="test", model={})),
                              DEVICE="cuda", T=transforms)
             exec(compile(ast.Module(body=[function], type_ignores=[]), str(ROOT / "app.py"), "exec"), namespace)
-            with patch.dict(os.environ, {"DYSTREAM_CACHE_SPECTRAL_NORM": str(int(enabled)),
-                                         "DYSTREAM_RELEASE_RENDER_INTERMEDIATES": str(int(enabled))}), \
+            settings = dict(os.environ)
+            for key in ("DYSTREAM_CACHE_SPECTRAL_NORM", "DYSTREAM_RELEASE_RENDER_INTERMEDIATES"):
+                if enabled is None:
+                    settings.pop(key, None)
+                else:
+                    settings[key] = str(int(enabled))
+            expected_enabled = enabled is not False
+            with patch.dict(os.environ, settings, clear=True), \
                     patch.object(torch, "load", return_value={"state_dict": state}):
                 namespace["load_visualization_model"]()
             renderer = namespace["_vis_ctx"]["face_generator"]
             self.assertIs(renderer, head.face_generator)
-            self.assertEqual(renderer._release_render_intermediates, enabled)
-            self.assertEqual(renderer.weight_orig.device.type, "cpu" if enabled else "cuda")
+            self.assertEqual(renderer._release_render_intermediates, expected_enabled)
+            self.assertEqual(renderer.weight_orig.device.type, "cpu" if expected_enabled else "cuda")
             for key, value in head.state_dict().items():
                 torch.testing.assert_close(value.cpu(), state[key], rtol=0, atol=0)
 

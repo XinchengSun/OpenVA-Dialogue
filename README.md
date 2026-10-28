@@ -214,7 +214,8 @@ or restart fails. See [README_CUSTOMIZATION.md](README_CUSTOMIZATION.md).
 | [Inference performance changes](docs/inference_performance_20261026.md) | invariant renderer caches, device timestep handling, optional diffusion conditioning reuse, CPU measurements and GPU acceptance limits (Chinese) |
 | [Reference encoder offload](docs/reference_encoder_offload_20261028.md) | release startup-only encoder GPU storage while retaining cached avatar features; component measurements and 12 GiB limits (Chinese) |
 | [Inference memory audit](docs/inference_memory_audit_20261028.md) | selective motion loading, SPADE storage reuse, AudioVAE offload, measured CUDA components and pending full 12 GiB acceptance (Chinese) |
-| [RBA renderer optimization](docs/rba_renderer_optimization_20261028.md) | opt-in spectral-weight reuse and shorter temporary lifetimes; trained-checkpoint equivalence, measured memory gains, unresolved latency gains (Chinese) |
+| [RBA renderer optimization](docs/rba_renderer_optimization_20261028.md) | original spectral-weight reuse experiments and shorter temporary lifetimes; trained-checkpoint equivalence and measured memory gains (Chinese) |
+| [Memory round 4](docs/memory_round4_20261028.md) | renderer optimizations now enabled by default, optional CPU text lookup, weight/KV inventory and in-stream memory diagnostics (Chinese) |
 | [Architecture](docs/architecture.md) | Listener/Speaker state, interruption, media boundaries, GPU placement |
 | [Customization](README_CUSTOMIZATION.md) | portrait and zero-shot voice-cloning workflow |
 | [Model weights](docs/weights.md) | pinned upstream assets and runtime paths |

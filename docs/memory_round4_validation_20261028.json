@@ -1,0 +1,443 @@
+{
+  "date": "2026-10-28",
+  "baseline_commit": "28ef493fa8fc9995a025338ef6bf1090055a2816",
+  "rba_method_commit": "df4378df1949761d2d5f051cc2d3f5e01e3cfabb",
+  "scope": "Enable previously verified renderer defaults; optional trained-word-table offload and standalone memory accounting, not full pipeline validation",
+  "current_defaults": {
+    "DYSTREAM_CACHE_SPECTRAL_NORM": "1",
+    "DYSTREAM_RELEASE_RENDER_INTERMEDIATES": "1",
+    "VOXCPM2_CPU_TEXT_EMBEDDING": "0",
+    "OPENVA_MEMORY_PROFILE_DIR": ""
+  },
+  "environment": {
+    "python": "3.12.3 (tags/v3.12.3:f6650f9, Apr  9 2024, 14:05:25) [MSC v.1938 64 bit (AMD64)]",
+    "torch": "2.8.0+cu126",
+    "cuda": "12.6",
+    "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+    "threads": 14
+  },
+  "judge": {
+    "baseline_commit": "28ef493fa8fc9995a025338ef6bf1090055a2816",
+    "objective": "Reduce persistent embedding CUDA storage without changing lookup bytes, vocabulary, dtype, context or RNG",
+    "judge": {
+      "tests\\bench_text_embedding_memory.py": "816c9a71024ea5f48503770b2ed275c30f8d4b42a066b52d4500d23ac54ec320",
+      "tests\\test_text_embedding_judge.py": "dc37084eceda0a965c3451479d83921c443eef7b7a5ef31082ce95d79b121da9",
+      "..\\evidence\\rba_round4\\embedding_download.json": "6cb43a9971e096a9983e79d2fd0ed94cbd83ca06b9f7474180cb779c0d5fdf7c"
+    },
+    "negative_controls": [
+      "value change",
+      "NaN",
+      "shape",
+      "dtype"
+    ],
+    "scope": "Actual pretrained BF16 embedding table; no full speech generation acceptance",
+    "precision": "Unchanged BF16 lookup followed by original GPU arithmetic"
+  },
+  "embedding_source": {
+    "revision": "32279effe8c19989596f05d353d1447f51d9e915",
+    "tensor": "base_lm.embed_tokens.weight",
+    "dtype": "BF16",
+    "shape": [
+      73448,
+      2048
+    ],
+    "size_bytes": 300843008,
+    "file_byte_range": [
+      71504,
+      300914511
+    ],
+    "tensor_sha256": "7b7e11c548e6e9e36777326e5c2bba02ec9cd87999bd1df5730613be861c6452",
+    "full_checkpoint_sha256_verified": false,
+    "source_total_file_bytes": 4580080592,
+    "elapsed_s": 76.82609620000585
+  },
+  "embedding_runs": {
+    "embedding_final_baseline_a": {
+      "scope": "Trained VoxCPM2 word-table lookup only; no full LM/voice generation",
+      "torch": "2.8.0+cu126",
+      "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+      "threads": 14,
+      "offload": null,
+      "setup_ms": 0.001200009137392044,
+      "before_allocated_bytes": 300843008,
+      "after_allocated_bytes": 300843008,
+      "freed_bytes": 0,
+      "all_rows_checked": 73448,
+      "all_rows_bitwise_equal": true,
+      "rng_preserved": true,
+      "output_chunk_hashes": [
+        "c87f87f3e939aef89b84c7b7022ab3401a32f4943bb65d910d5d7908437bd192",
+        "8191007a9c4089052f2f6824dbc8e3ad1bfd0984ed43c42cedc254d233db9769",
+        "effcd5db44a596486ca96826dadd36ec16121f6abec2899244b179dbedfd1380",
+        "5790f6fea3b70b881d1e2ab7387be61695d358844ad90b11d23452b9c672f22a",
+        "c37633b2bf10ab20bad2ec6363c5c64baedc4f134a143c7945088d389740bd77",
+        "5dd0d7a37f8924980cf542f69befb5a6159f009a3cef02167e281de0fd7b4f07",
+        "f428333ca42b83692c8f14b29bb70442e431a3586ba26fa11b02d85a5f777227",
+        "ccc02c5801a7f226678cf563f0d9caefab44da17307bfc36c301d7a55c557628",
+        "1b2c6be2efebbe219c373e5f8c19154dcf46790a2095f11952801004220244f8"
+      ],
+      "timing": {
+        "32": {
+          "window_ms": [
+            0.01736799953505397,
+            0.014072000049054623,
+            0.017812000587582588
+          ],
+          "median_ms": 0.01736799953505397
+        },
+        "128": {
+          "window_ms": [
+            0.015168000245466828,
+            0.01447599963285029,
+            0.014323999639600515
+          ],
+          "median_ms": 0.01447599963285029
+        },
+        "512": {
+          "window_ms": [
+            0.012148000532761216,
+            0.012927999487146735,
+            0.012687999987974763
+          ],
+          "median_ms": 0.012687999987974763
+        },
+        "2048": {
+          "window_ms": [
+            0.01657600048929453,
+            0.01996799954213202,
+            0.01842800062149763
+          ],
+          "median_ms": 0.01842800062149763
+        },
+        "8192": {
+          "window_ms": [
+            0.30957599985413253,
+            0.31840399955399334,
+            0.3099240001756698
+          ],
+          "median_ms": 0.3099240001756698
+        }
+      },
+      "source_tensor": {
+        "revision": "32279effe8c19989596f05d353d1447f51d9e915",
+        "tensor": "base_lm.embed_tokens.weight",
+        "dtype": "BF16",
+        "shape": [
+          73448,
+          2048
+        ],
+        "size_bytes": 300843008,
+        "file_byte_range": [
+          71504,
+          300914511
+        ],
+        "tensor_sha256": "7b7e11c548e6e9e36777326e5c2bba02ec9cd87999bd1df5730613be861c6452",
+        "full_checkpoint_sha256_verified": false,
+        "source_total_file_bytes": 4580080592,
+        "elapsed_s": 76.82609620000585
+      },
+      "benchmark_sha256": "816c9a71024ea5f48503770b2ed275c30f8d4b42a066b52d4500d23ac54ec320"
+    },
+    "embedding_final_candidate_v2": {
+      "scope": "Trained VoxCPM2 word-table lookup only; no full LM/voice generation",
+      "torch": "2.8.0+cu126",
+      "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+      "threads": 14,
+      "offload": {
+        "enabled": true,
+        "table_bytes_kept_on_cpu": 300843008,
+        "allocated_freed_bytes": 300843008,
+        "dtype": "torch.bfloat16",
+        "shape": [
+          73448,
+          2048
+        ]
+      },
+      "setup_ms": 61.92959999316372,
+      "before_allocated_bytes": 300843008,
+      "after_allocated_bytes": 0,
+      "freed_bytes": 300843008,
+      "all_rows_checked": 73448,
+      "all_rows_bitwise_equal": true,
+      "rng_preserved": true,
+      "output_chunk_hashes": [
+        "c87f87f3e939aef89b84c7b7022ab3401a32f4943bb65d910d5d7908437bd192",
+        "8191007a9c4089052f2f6824dbc8e3ad1bfd0984ed43c42cedc254d233db9769",
+        "effcd5db44a596486ca96826dadd36ec16121f6abec2899244b179dbedfd1380",
+        "5790f6fea3b70b881d1e2ab7387be61695d358844ad90b11d23452b9c672f22a",
+        "c37633b2bf10ab20bad2ec6363c5c64baedc4f134a143c7945088d389740bd77",
+        "5dd0d7a37f8924980cf542f69befb5a6159f009a3cef02167e281de0fd7b4f07",
+        "f428333ca42b83692c8f14b29bb70442e431a3586ba26fa11b02d85a5f777227",
+        "ccc02c5801a7f226678cf563f0d9caefab44da17307bfc36c301d7a55c557628",
+        "1b2c6be2efebbe219c373e5f8c19154dcf46790a2095f11952801004220244f8"
+      ],
+      "timing": {
+        "32": {
+          "window_ms": [
+            0.17947199987247586,
+            0.2168800006620586,
+            0.2255760005209595
+          ],
+          "median_ms": 0.2168800006620586
+        },
+        "128": {
+          "window_ms": [
+            0.2879479993134737,
+            0.27226799982599914,
+            0.26340799988247454
+          ],
+          "median_ms": 0.27226799982599914
+        },
+        "512": {
+          "window_ms": [
+            0.46027200063690543,
+            0.4465880000498146,
+            0.43485600035637617
+          ],
+          "median_ms": 0.4465880000498146
+        },
+        "2048": {
+          "window_ms": [
+            1.1961280007380992,
+            1.2196319992654026,
+            1.1620639998000115
+          ],
+          "median_ms": 1.1961280007380992
+        },
+        "8192": {
+          "window_ms": [
+            6.1443159996997565,
+            6.127704000100493,
+            6.309091999428347
+          ],
+          "median_ms": 6.1443159996997565
+        }
+      },
+      "source_tensor": {
+        "revision": "32279effe8c19989596f05d353d1447f51d9e915",
+        "tensor": "base_lm.embed_tokens.weight",
+        "dtype": "BF16",
+        "shape": [
+          73448,
+          2048
+        ],
+        "size_bytes": 300843008,
+        "file_byte_range": [
+          71504,
+          300914511
+        ],
+        "tensor_sha256": "7b7e11c548e6e9e36777326e5c2bba02ec9cd87999bd1df5730613be861c6452",
+        "full_checkpoint_sha256_verified": false,
+        "source_total_file_bytes": 4580080592,
+        "elapsed_s": 76.82609620000585
+      },
+      "benchmark_sha256": "816c9a71024ea5f48503770b2ed275c30f8d4b42a066b52d4500d23ac54ec320"
+    },
+    "embedding_final_baseline_b": {
+      "scope": "Trained VoxCPM2 word-table lookup only; no full LM/voice generation",
+      "torch": "2.8.0+cu126",
+      "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+      "threads": 14,
+      "offload": null,
+      "setup_ms": 0.0008999777492135763,
+      "before_allocated_bytes": 300843008,
+      "after_allocated_bytes": 300843008,
+      "freed_bytes": 0,
+      "all_rows_checked": 73448,
+      "all_rows_bitwise_equal": true,
+      "rng_preserved": true,
+      "output_chunk_hashes": [
+        "c87f87f3e939aef89b84c7b7022ab3401a32f4943bb65d910d5d7908437bd192",
+        "8191007a9c4089052f2f6824dbc8e3ad1bfd0984ed43c42cedc254d233db9769",
+        "effcd5db44a596486ca96826dadd36ec16121f6abec2899244b179dbedfd1380",
+        "5790f6fea3b70b881d1e2ab7387be61695d358844ad90b11d23452b9c672f22a",
+        "c37633b2bf10ab20bad2ec6363c5c64baedc4f134a143c7945088d389740bd77",
+        "5dd0d7a37f8924980cf542f69befb5a6159f009a3cef02167e281de0fd7b4f07",
+        "f428333ca42b83692c8f14b29bb70442e431a3586ba26fa11b02d85a5f777227",
+        "ccc02c5801a7f226678cf563f0d9caefab44da17307bfc36c301d7a55c557628",
+        "1b2c6be2efebbe219c373e5f8c19154dcf46790a2095f11952801004220244f8"
+      ],
+      "timing": {
+        "32": {
+          "window_ms": [
+            0.022127999691292644,
+            0.016324000898748636,
+            0.016627999721094966
+          ],
+          "median_ms": 0.016627999721094966
+        },
+        "128": {
+          "window_ms": [
+            0.0189800001680851,
+            0.012623999500647187,
+            0.014244000194594264
+          ],
+          "median_ms": 0.014244000194594264
+        },
+        "512": {
+          "window_ms": [
+            0.017468000296503305,
+            0.018316000932827592,
+            0.0183999992441386
+          ],
+          "median_ms": 0.018316000932827592
+        },
+        "2048": {
+          "window_ms": [
+            0.01721200067549944,
+            0.017719999887049198,
+            0.020528000313788652
+          ],
+          "median_ms": 0.017719999887049198
+        },
+        "8192": {
+          "window_ms": [
+            0.3285760001745075,
+            0.30889200046658516,
+            0.33667200012132525
+          ],
+          "median_ms": 0.3285760001745075
+        }
+      },
+      "source_tensor": {
+        "revision": "32279effe8c19989596f05d353d1447f51d9e915",
+        "tensor": "base_lm.embed_tokens.weight",
+        "dtype": "BF16",
+        "shape": [
+          73448,
+          2048
+        ],
+        "size_bytes": 300843008,
+        "file_byte_range": [
+          71504,
+          300914511
+        ],
+        "tensor_sha256": "7b7e11c548e6e9e36777326e5c2bba02ec9cd87999bd1df5730613be861c6452",
+        "full_checkpoint_sha256_verified": false,
+        "source_total_file_bytes": 4580080592,
+        "elapsed_s": 76.82609620000585
+      },
+      "benchmark_sha256": "816c9a71024ea5f48503770b2ed275c30f8d4b42a066b52d4500d23ac54ec320"
+    }
+  },
+  "embedding_freed_bytes": 300843008,
+  "checkpoint_inventory": {
+    "revision": "32279effe8c19989596f05d353d1447f51d9e915",
+    "header_bytes": 71496,
+    "data_start": 71504,
+    "checkpoint_group_bytes": {
+      "base_lm": 2943488000,
+      "enc_to_lm_proj": 4198400,
+      "feat_decoder": 424081536,
+      "feat_encoder": 415422464,
+      "fsq_layer": 4199424,
+      "fusion_concat_proj": 16781312,
+      "lm_to_dit_proj": 4196352,
+      "res_to_dit_proj": 4196352,
+      "residual_lm": 755044352,
+      "stop_head": 8192,
+      "stop_proj": 8392704
+    },
+    "embedding_entries": {
+      "base_lm.embed_tokens.weight": {
+        "dtype": "BF16",
+        "shape": [
+          73448,
+          2048
+        ],
+        "data_offsets": [
+          0,
+          300843008
+        ]
+      }
+    },
+    "checkpoint_sha256": "f7f964cfa9da23653baec6e6f7750719977ad944ed9f95fe52fe3a620506891d",
+    "full_file_hash_verified": false
+  },
+  "kv_inventory": {
+    "scope": "Actual official StaticKVCache class at production configuration, standalone process; not full TTS runtime",
+    "source_sha256": "644acd3bf7cf8313f2ba285f68c41967fcedb57e5f5d8f38a883acc385ee030d",
+    "layers": [
+      28,
+      8
+    ],
+    "max_length": 8192,
+    "dtype": "bfloat16",
+    "allocated_delta_bytes": 301989888,
+    "storage_bytes": [
+      234881024,
+      67108864
+    ]
+  },
+  "validation": {
+    "regression_cases": 165,
+    "passed": 150,
+    "skipped": 15,
+    "failed": 0,
+    "skip_reasons": {
+      "Pipecat absent": 14,
+      "Linux symlink test on Windows": 1
+    },
+    "final_targeted_tts_cases_passed": 39,
+    "final_profile_integration_cases_passed": 8,
+    "compileall": "passed",
+    "diff_check": "passed",
+    "remote_ci": "not run"
+  },
+  "limitations": [
+    "Full VoxCPM2 PCM, speaker similarity and end-to-end latency not tested",
+    "Whole safetensors LFS hash not verified; only fixed tensor range downloaded and hashed",
+    "Checkpoint payload counts are not GPU runtime peaks",
+    "No trained full-pipeline simultaneous memory measurement or 12GiB GPU acceptance",
+    "Existing private environment values override new defaults; no remote service was changed"
+  ],
+  "source_sha256": {
+    "app.py": "b3cad1bd39ddc10783f780cd13555d82a71014d3c0753048b81f85bd5af321d0",
+    ".env.example": "58a45579f30343fc24be48a83815ebc0e658906af8c244bdd1036850356cfef9",
+    "inference_memory.py": "e651b52b34a12c7c216dd0a7c775207b82ec13707308ccd4747911aa7d568d75",
+    "voice_service/official_voxcpm2_backend.py": "5e4537daf8b126682a814bf7db067e8f18c7ecdff938ab1ef037deff26fbd6b9",
+    "voice_service/text_embedding_offload.py": "fff651e145af6653bb5ac7c1cdfac3736f773bcca0c7d4b5c0e3d2c1253de798",
+    "tests/bench_text_embedding_memory.py": "816c9a71024ea5f48503770b2ed275c30f8d4b42a066b52d4500d23ac54ec320",
+    "tests/test_text_embedding_offload.py": "904d25cebe053313739f038f9fee88fd33596168ab304c5f125e9366ae2e3098",
+    "tests/test_text_embedding_judge.py": "dc37084eceda0a965c3451479d83921c443eef7b7a5ef31082ce95d79b121da9",
+    "tests/test_generator_memory_inventory.py": "1a3edf047dcb6ffbb33160671baecb3aa005d25cc26a2e93d86c8ba8678d3599",
+    "tests/test_renderer_memory_integration.py": "0ebe998e1d0d55d4abca19b8eb174c5b5ce6fe562233e2bca7749d5d90b8446b"
+  },
+  "source_lf_sha256": {
+    "app.py": "07651e266c13f9e5fcae97e1b26b779b95c7b779fe124478784be04a3dc88213",
+    ".env.example": "5789e3bdcd191a9f36d969203c03b02fdc6446ec81d48598de688f0c790771df",
+    "inference_memory.py": "e651b52b34a12c7c216dd0a7c775207b82ec13707308ccd4747911aa7d568d75",
+    "voice_service/official_voxcpm2_backend.py": "13e34a193b811308484765df041cfe512e8b7428d55580db7b180c67ef543606",
+    "voice_service/text_embedding_offload.py": "fff651e145af6653bb5ac7c1cdfac3736f773bcca0c7d4b5c0e3d2c1253de798",
+    "tests/bench_text_embedding_memory.py": "816c9a71024ea5f48503770b2ed275c30f8d4b42a066b52d4500d23ac54ec320",
+    "tests/test_text_embedding_offload.py": "904d25cebe053313739f038f9fee88fd33596168ab304c5f125e9366ae2e3098",
+    "tests/test_text_embedding_judge.py": "dc37084eceda0a965c3451479d83921c443eef7b7a5ef31082ce95d79b121da9",
+    "tests/test_generator_memory_inventory.py": "1a3edf047dcb6ffbb33160671baecb3aa005d25cc26a2e93d86c8ba8678d3599",
+    "tests/test_renderer_memory_integration.py": "0ebe998e1d0d55d4abca19b8eb174c5b5ce6fe562233e2bca7749d5d90b8446b"
+  },
+  "raw_sha256": {
+    "embedding_baseline_a.log": "9994629c5dbb185d9402e9a120482dc69deb94e837709b57ed6d3f5759a6accb",
+    "embedding_contract.json": "b45f2643c03d3d4bf9b0c313487d1f1e812672aa4e3e9d1e270ee499742947c1",
+    "embedding_download.json": "6cb43a9971e096a9983e79d2fd0ed94cbd83ca06b9f7474180cb779c0d5fdf7c",
+    "embedding_final_baseline_a.log": "5cdbb4998d717a008daf9bdec68332a128241bd872c178ca18fa3a211714e748",
+    "embedding_final_baseline_b.log": "d1c55140470b582655fd5b40cc873ed67e3595d93759fcbe9a5e5ec2fff02d85",
+    "embedding_final_candidate.log": "27a66be7d1d7da12c6f764b4438ce4ae382982ae4c9dde46e188e7e7155fb230",
+    "embedding_final_candidate_v2.log": "df3e4316c62d48a43acf9891e6db8a8432c1dad48fb1d4573851a5e7ded2ae4b",
+    "embedding_final_tests.log": "e64722e05e840eaf06b7500d668b9190eb6018e818f90a138a9a11671bc9307a",
+    "embedding_tests.log": "5bd6b6c82a51eda665fd6bdf2c100873f0213618199c959f48c1b821bcd795b1",
+    "final_integration_tests.log": "02d80f4fbe0f4323c499ec61ef5cb77a5e75d9ba5779c81e246874438187134b",
+    "final_tts_regression.log": "2a80cc6d2fc3f164410b3e9018d37c9a2cd9107e94a589e91cc51884091c4dd6",
+    "kv_cache_inventory.json": "98ced8d8be9ed642ba6b946e8e5b9097c0f38791724ebf94feb36dc3b55115a1",
+    "regression.log": "de264a0633960a521d4eca9a41a6e48b683c137cbfe7d8a1925fa3dbd545a90a",
+    "renderer_default_tests.log": "68ef5fd32ae2774d1390f073bc78e448856f4a34a78d7e05fa8f0031035cea9e",
+    "stream_memory_tests.log": "83f402a014d6ba57bcc91310159a4d94dcefa3a7852df807bfca13081ef2f4c3",
+    "voxcpm2_config.json": "405f0dcd92f7feba6011ed4eac5c8d4f74cba9712f07fd5cfa3063bbdd95402c",
+    "voxcpm2_header_audit.json": "f99f273050413a091584e88b60b67c8e7495a73605aff2d2f87f6227d75ab3fc",
+    "voxcpm2_safetensors_header.json": "145756b515751ae8ac3a516f9448b0aea03592d53eba918adfd74766432cf9e4",
+    "embedding_baseline_a/result.json": "0a612d768165173ac07d2bd3fcfbae2532e9dc5666b62164aaff988117a46b95",
+    "embedding_final_baseline_a/result.json": "bb2f036e35153d4e5a7c14173df61e8fb83256ba45cbc4a4573934f70ecd5545",
+    "embedding_final_baseline_b/result.json": "2ebcdda84848a169413e33275b91fdf6413daf429ed42ee0ee9778d499e5a5fa",
+    "embedding_final_candidate/result.json": "155b0ed25fbca9eec7f57b0509a5859c219fe3f0f2c0f960e98923926dd658fe",
+    "embedding_final_candidate_v2/result.json": "a797c9350221a3e668aae29c9f54bdf470e01674710437f235e4aea2290c251f"
+  }
+}

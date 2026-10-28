@@ -216,6 +216,7 @@ class OfficialPromptCacheBackend:
         self._local_files_only = local_files_only
         self._model_factory = model_factory
         self._trim_config = _LeadingTrimConfig.from_env()
+        self._cpu_text_embedding = _bool_env("VOXCPM2_CPU_TEXT_EMBEDDING")
 
         self._model: Any | None = None
         self._base_cache: Mapping[str, Any] | None = None
@@ -245,11 +246,14 @@ class OfficialPromptCacheBackend:
         self._memory_recorder = None
         self._memory_requests = 0
 
-    def _record_memory(self, stage, tts_model, cache=None):
+    def _record_memory(self, stage, tts_model, cache=None, generator=None):
         recorder = self._memory_recorder
         if recorder is None or not recorder.enabled:
             return
         runtime = {"prompt": cache}
+        if generator is not None:
+            from inference_memory import suspended_generator_cuda_tensors
+            runtime["suspended_generation"] = suspended_generator_cuda_tensors(recorder.torch, generator)
         for name in ("base_lm", "residual_lm"):
             kv_cache = getattr(getattr(tts_model, name, None), "kv_cache", None)
             runtime[name] = vars(kv_cache) if hasattr(kv_cache, "__dict__") else {}
@@ -305,6 +309,11 @@ class OfficialPromptCacheBackend:
                             )
                         if not isinstance(base_cache, Mapping):
                             raise RuntimeError("VoxCPM2 returned an invalid prompt cache")
+                        if self._cpu_text_embedding:
+                            from voice_service.text_embedding_offload import offload_text_embedding
+                            embedding_memory = offload_text_embedding(tts_model)
+                            logging.getLogger(__name__).info("VoxCPM2 text table memory: %s", embedding_memory)
+                            self._record_memory("text_embedding_ready", tts_model, base_cache)
                         if getattr(tts_model, "audio_vae", None) is not None:
                             import torch
                             from inference_memory import (
@@ -544,6 +553,7 @@ class OfficialPromptCacheBackend:
             trimmer = _LeadingPCMFilter(self.sample_rate, self._trim_config)
             generated_features: list[Any] = []
             waveform_seen = False
+            memory_chunks = 0
             generator = tts_model.generate_with_prompt_cache_streaming(
                 target_text=text,
                 prompt_cache=state.cache,
@@ -556,6 +566,9 @@ class OfficialPromptCacheBackend:
                 if self._cancelled(state, stop_requested):
                     self._post(loop, queue, _WorkerMessage("cancelled"))
                     return
+                memory_chunks += 1
+                if self._memory_recorder is not None and memory_chunks & (memory_chunks - 1) == 0:
+                    self._record_memory(f"stream_chunks_{memory_chunks}", tts_model, state.cache, generator)
                 chunks = trimmer.push(waveform)
                 if chunks:
                     waveform_seen = True

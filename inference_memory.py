@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import time
+import types
 
 
 class _FixedWeightNorm:
@@ -368,3 +369,47 @@ class MemoryRecorder:
         with self.path.open("a", encoding="utf-8") as output:
             output.write(json.dumps(result, ensure_ascii=False) + "\n")
         return result
+
+
+def suspended_generator_cuda_tensors(torch, generator, max_depth=8):
+    """Read suspended generator frames for opt-in size accounting, never data.
+
+    Torch's inference-mode wrapper and VoxCPM2 keep nested generators in locals.
+    Follow only built-in containers and generator objects, without advancing
+    them or retaining CPU text, audio, model objects, or arbitrary attributes.
+    """
+    seen = set()
+
+    def visit(value, depth):
+        if isinstance(value, torch.Tensor):
+            return value if value.is_cuda else None
+        if depth > max_depth or id(value) in seen:
+            return None
+        if isinstance(value, types.GeneratorType):
+            seen.add(id(value))
+            if value.gi_running or value.gi_frame is None:
+                return None
+            output = {}
+            names = value.gi_code.co_varnames + value.gi_code.co_freevars + value.gi_code.co_cellvars
+            for name in dict.fromkeys(names):
+                child = visit(value.gi_frame.f_locals.get(name), depth + 1)
+                if child is not None:
+                    output["local." + name] = child
+            child = visit(value.gi_yieldfrom, depth + 1)
+            if child is not None:
+                output["yieldfrom"] = child
+            return output or None
+        if isinstance(value, (dict, list, tuple)):
+            seen.add(id(value))
+            # Dictionary keys can themselves contain user text. Keep positions,
+            # while frame-local labels above come only from trusted code names.
+            items = enumerate(value.values()) if isinstance(value, dict) else enumerate(value)
+            output = {}
+            for key, item in items:
+                child = visit(item, depth + 1)
+                if child is not None:
+                    output[str(key)] = child
+            return output or None
+        return None
+
+    return visit(generator, 0) or {}
