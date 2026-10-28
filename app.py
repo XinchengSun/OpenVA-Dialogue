@@ -187,6 +187,11 @@ def load_visualization_model():
     checkpoint = torch.load(vis_ckpt, map_location="cpu")
     model.load_state_dict(checkpoint["state_dict"], strict=False)
     model.eval().to(DEVICE)
+    if os.getenv("DYSTREAM_CACHE_SPECTRAL_NORM", "0") == "1":
+        from inference_memory import cache_renderer_spectral_norm
+        cached = cache_renderer_spectral_norm(torch, model.face_generator)
+        print(f"[RENDER_MEMORY] spectral norm cache: {cached}", flush=True)
+    model.face_generator._release_render_intermediates = os.getenv("DYSTREAM_RELEASE_RENDER_INTERMEDIATES", "0") == "1"
 
     transform = T.Compose([
         T.Resize((512, 512)),

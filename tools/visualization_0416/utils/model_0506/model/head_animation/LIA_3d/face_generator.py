@@ -191,6 +191,10 @@ class FaceGenerator(nn.Module):
 
         warping_field = self._identity_grid_on(tgt_latent.device)[None] + deltas
         warping_feature_volume = F.grid_sample(ref_feats, warping_field, mode="bilinear", align_corners=False)
+        if getattr(self, '_release_render_intermediates', False):
+            # Their last consumers have run; keep only the warped features for
+            # projection/occlusion rather than pinning warp temporaries to return.
+            del z_emb, condition, z, deltas, warping_field
         
         # decoding
         seg = self.projection(warping_feature_volume) # Bx256x64x64
@@ -201,6 +205,10 @@ class FaceGenerator(nn.Module):
             occlusion_map = torch.sigmoid(self.occlusion(warping_feature_volume_reshape))  # Bx1x64x64
             seg = seg * occlusion_map
 
+        if getattr(self, '_release_render_intermediates', False):
+            if self.flag_estimate_occlusion_map:
+                del warping_feature_volume_reshape, occlusion_map
+            del warping_feature_volume
 
         x = self.fc(seg)  # Bx512x64x64
         x = self.G_middle_0(x, seg)

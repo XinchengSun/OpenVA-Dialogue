@@ -36,7 +36,7 @@
           "source": "tools/pretrained_model/epoch=0-step=312000.ckpt",
           "target": "tools/pretrained_model/epoch=0-step=312000.ckpt",
           "size_bytes": 1579672001,
-          "sha256": null
+          "sha256": "a9f06f55912dfa12ea18d77315f1c1675c5f67669097db8f155b4a4d75f9d31d"
         }
       ]
     },

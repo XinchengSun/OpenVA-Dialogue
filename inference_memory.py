@@ -52,6 +52,51 @@ class _FixedWeightNorm:
         self.storage_refs = tuple(p.untyped_storage() for p in parameters)
 
 
+class _FixedSpectralNorm(_FixedWeightNorm):
+    def parameters(self, module):
+        # SpectralNorm's eval result depends on all three tensors. Include the
+        # power-iteration buffers in invalidation and keep their exact values.
+        return tuple(getattr(module, self.name + suffix) for suffix in ("_orig", "_u", "_v"))
+
+
+def cache_renderer_spectral_norm(torch, renderer):
+    """Cache fixed eval spectral weights, retaining original state on CPU.
+
+    Caller opts in before rendering; training/grad-enabled forwards use the
+    original hook on the input device. No power iteration or dtype is changed.
+    """
+    if not isinstance(renderer, torch.nn.Module) or renderer.training:
+        return {"enabled": False, "reason": "no_eval_renderer"}
+    candidates, seen = [], set()
+    for module in renderer.modules():
+        for key, hook in module._forward_pre_hooks.items():
+            if type(hook).__name__ != "SpectralNorm" or type(hook).__module__ != "torch.nn.utils.spectral_norm":
+                continue
+            replacement = _FixedSpectralNorm(torch, hook)
+            tensors = replacement.parameters(module)
+            if module.training or any(id(t) in seen or t.is_inference() or t.grad is not None for t in tensors):
+                return {"enabled": False, "reason": "shared_or_unversioned_or_training_state"}
+            if any(t.device.type != "cuda" or t.device != tensors[0].device for t in tensors):
+                return {"enabled": False, "reason": "requires_cuda_state"}
+            seen.update(id(t) for t in tensors)
+            candidates.append((module, key, replacement))
+    if not candidates:
+        existing = any(isinstance(hook, _FixedSpectralNorm) for module in renderer.modules()
+                       for hook in module._forward_pre_hooks.values())
+        return {"enabled": existing, "reason": "already_cached" if existing else "no_legacy_spectral_norm"}
+    device = candidates[0][2].parameters(candidates[0][0])[0].device
+    original_bytes = 0
+    with torch.no_grad():
+        for module, key, replacement in candidates:
+            original_bytes += sum(t.numel() * t.element_size() for t in replacement.parameters(module))
+            replacement(module, ())
+            module._forward_pre_hooks[key] = replacement
+    with torch.cuda.device(device):
+        torch.cuda.empty_cache()
+    return {"enabled": True, "modules_cached": len(candidates),
+            "original_state_bytes_kept_on_cpu": original_bytes}
+
+
 def cache_decoder_weight_norm(torch, tts_model):
     """Reuse fixed effective decoder weights; original checkpoint keys stay CPU."""
     decoder = getattr(getattr(tts_model, "audio_vae", None), "decoder", None)
