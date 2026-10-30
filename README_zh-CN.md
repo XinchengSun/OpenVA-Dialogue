@@ -175,6 +175,7 @@ ASR 在 CPU 上运行，LLM 使用远程 API。延迟在服务端回环客户端
 | [推理显存核查](docs/inference_memory_audit_20261028.md) | 动作选择性加载、SPADE 临时存储复用、AudioVAE 卸载、CUDA 组件实测及待完成的整机 12 GiB 验收 |
 | [按 RBA 方法优化渲染器](docs/rba_renderer_optimization_20261028.md) | 可开关的谱归一化缓存与临时张量释放、真实训练权重数值对照、显存收益及未确认的耗时收益 |
 | [第四轮显存优化](docs/memory_round4_20261028.md) | 已默认启用渲染优化、词表 CPU 卸载实验、权重/KV 清点及流式显存诊断 |
+| [回复首声等待审计](docs/reply_latency_audit_20261030.md) | 对照开源设计，重放结束判断、文本释放与浏览器门限，区分配置等待和线上实测 |
 | [架构](docs/architecture.md) | Listener/Speaker 状态、打断、媒体边界、GPU 拓扑 |
 | [定制](README_CUSTOMIZATION.md) | 形象定制与零样本音色克隆流程 |
 | [模型权重](docs/weights.md) | 固定上游资产与运行路径 |
