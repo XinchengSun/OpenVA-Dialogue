@@ -164,6 +164,8 @@ ASR 在 CPU 上运行，LLM 使用远程 API。延迟在服务端回环客户端
 
 ## 文档
 
+模型组成、推理流程、优化状态、实测依据与 TODO 集中见 [模型与优化 README](README_MODEL.md)。
+
 | 文档 | 内容 |
 | --- | --- |
 | [部署](docs/deployment_zh-CN.md) | 已测试主机、Fish 运行时、端口、生命周期、替代后端 |

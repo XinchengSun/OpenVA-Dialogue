@@ -205,6 +205,8 @@ or restart fails. See [README_CUSTOMIZATION.md](README_CUSTOMIZATION.md).
 
 ## Documentation
 
+For the consolidated model architecture, inference flow, optimization status, evidence and TODOs, see [Model and optimization README (Chinese)](README_MODEL.md).
+
 | Guide | Contents |
 | --- | --- |
 | [Deployment](docs/deployment.md) | tested host, Fish runtime, ports, lifecycle, alternative backends |
