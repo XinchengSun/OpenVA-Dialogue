@@ -59,6 +59,7 @@ jobs:
         run: |
           node tests/test_media_buffer_bounds.js
           node tests/test_mic_resampler.js
+          node tests/test_ws_proxy_path.js
       - name: Validate Fish lifecycle ownership
         run: bash tests/test_fish_s2pro_lifecycle.sh
       - name: Validate release CLI

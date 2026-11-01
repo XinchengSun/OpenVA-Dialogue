@@ -44,8 +44,8 @@ function harness() {
       tracks.push(track);
       return {getTracks: () => [track]};
     }}},
-    location: {protocol: "http:", host: "localhost"},
-    URL: {revokeObjectURL() {}}, setInterval() {}, setTimeout, clearTimeout,
+    location: {protocol: "http:", host: "localhost", href: "http://localhost/"},
+    URL: class extends URL { static revokeObjectURL() {} }, setInterval() {}, setTimeout, clearTimeout,
     performance, console,
   });
   vm.runInContext(script, context);

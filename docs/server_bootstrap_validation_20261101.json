@@ -1,0 +1,39 @@
+{
+  "date": "2026-11-01",
+  "service_started": true,
+  "real_dialogue_completed": true,
+  "browser_playback_verified": true,
+  "test_microphone": "file-backed generated Chinese speech; real backend inference",
+  "selected_llm": "qwen-flash",
+  "thinking": false,
+  "model_samples_per_candidate": 3,
+  "model_comparison": {
+    "qwen-flash": {
+      "successful_samples": 3,
+      "first_content_median_ms": 330.34515008330345,
+      "first_sentence_median_ms": 422.46717028319836,
+      "production_release_median_ms": 471.1207877844572
+    },
+    "qwen3.8-flash": {
+      "successful_samples": 3,
+      "first_content_median_ms": 437.75499053299427,
+      "first_sentence_median_ms": 835.4667443782091,
+      "production_release_median_ms": 875.0420641154051
+    },
+    "qwen3.7-flash": {
+      "successful_samples": 3,
+      "first_content_median_ms": 339.9396240711212,
+      "first_sentence_median_ms": 719.8702190071344,
+      "production_release_median_ms": 758.4341913461685
+    }
+  },
+  "server_source_baseline": "73a2d4846172ad1e1ea1037b5294b922113e8de9",
+  "server_model_optimizations_from_local_branch_deployed": false,
+  "browser_proxy_prefix_fix_deployed": true,
+  "speaking_status_fix_deployed": true,
+  "strict_single_gpu_ownership_verified": false,
+  "target_12gib_verified": false,
+  "voice_end_to_server_media_boundary_ms_single_turn": 1534.4959607422347,
+  "browser_perceptual_quality_validated": false,
+  "scope": "Functional startup and browser playback; no optimized full-service or quality acceptance"
+}

@@ -178,6 +178,7 @@ ASR 在 CPU 上运行，LLM 使用远程 API。延迟在服务端回环客户端
 | [按 RBA 方法优化渲染器](docs/rba_renderer_optimization_20261028.md) | 可开关的谱归一化缓存与临时张量释放、真实训练权重数值对照、显存收益及未确认的耗时收益 |
 | [第四轮显存优化](docs/memory_round4_20261028.md) | 已默认启用渲染优化、词表 CPU 卸载实验、权重/KV 清点及流式显存诊断 |
 | [回复首声等待审计](docs/reply_latency_audit_20261030.md) | 对照开源设计，重放结束判断、文本释放与浏览器门限，区分配置等待和线上实测 |
+| [服务启动与代理修复](docs/server_bootstrap_20261101.md) | 旧基线真实对话、千问小样本选型、浏览器检查与未完成的 GPU 归属核验 |
 | [架构](docs/architecture.md) | Listener/Speaker 状态、打断、媒体边界、GPU 拓扑 |
 | [定制](README_CUSTOMIZATION.md) | 形象定制与零样本音色克隆流程 |
 | [模型权重](docs/weights.md) | 固定上游资产与运行路径 |

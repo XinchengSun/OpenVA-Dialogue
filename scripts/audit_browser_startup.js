@@ -28,8 +28,8 @@ function replay(ahead, replacing, playbackStarted = false) {
   const context = vm.createContext({
     document: {getElementById: element, createTextNode: value => value},
     WebSocket: {OPEN: 1}, window: {}, navigator: {},
-    location: {protocol: "http:", host: "localhost"},
-    URL: {revokeObjectURL() {}}, setInterval() {}, setTimeout() { return 1; },
+    location: {protocol: "http:", host: "localhost", href: "http://localhost/"},
+    URL: class extends URL { static revokeObjectURL() {} }, setInterval() {}, setTimeout() { return 1; },
     clearTimeout() {}, performance, console,
   });
   vm.runInContext(script, context);

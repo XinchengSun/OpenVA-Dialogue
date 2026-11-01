@@ -279,8 +279,9 @@ function ensureIdlePlaying() {
 }
 
 function wsUrl(path) {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${proto}//${location.host}${path}`;
+  const url = new URL(path.replace(/^\/+/, ''), new URL('.', location.href));
+  url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return url.href;
 }
 
 function isCurrentSlot(slot) {
@@ -441,6 +442,7 @@ function releaseLiveAudio(turn, reason = '') {
   activeSlot.video.muted = false;
   visibleAssistantTurn = { ...turn };
   setLiveVisible(true, 'assistant media started');
+  setStatus('assistant speaking');
   const changed = liveAudioHeld;
   liveAudioHeld = false;
   if (changed && reason) log(`live audio released: ${reason}`);

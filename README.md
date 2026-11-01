@@ -219,6 +219,7 @@ For the consolidated model architecture, inference flow, optimization status, ev
 | [RBA renderer optimization](docs/rba_renderer_optimization_20261028.md) | original spectral-weight reuse experiments and shorter temporary lifetimes; trained-checkpoint equivalence and measured memory gains (Chinese) |
 | [Memory round 4](docs/memory_round4_20261028.md) | renderer optimizations now enabled by default, optional CPU text lookup, weight/KV inventory and in-stream memory diagnostics (Chinese) |
 | [Reply latency audit](docs/reply_latency_audit_20261030.md) | pinned upstream design comparison and controlled turn/text/browser gate replays; no full-service latency claim (Chinese) |
+| [Server bootstrap and proxy fixes](docs/server_bootstrap_20261101.md) | live baseline dialogue, small-sample Qwen selection, browser checks and remaining GPU ownership limits (Chinese) |
 | [Architecture](docs/architecture.md) | Listener/Speaker state, interruption, media boundaries, GPU placement |
 | [Customization](README_CUSTOMIZATION.md) | portrait and zero-shot voice-cloning workflow |
 | [Model weights](docs/weights.md) | pinned upstream assets and runtime paths |
