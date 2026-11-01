@@ -118,3 +118,21 @@ Enable `OPENVA_LATENCY_TRACE_DIR` for hashed media and stage timing. Join media
 chunks by hash **and order** because identical chunks can recur. Trace files
 contain lengths/hashes/timing, not raw text, PCM or encoded media. Disable tracing
 after diagnosis if its extra disk I/O is undesirable.
+
+## Startup follow-up (2026-11-02 local time)
+
+A user screenshot remained at the initial disconnected screen, and the service
+had received no new media connection. The exact browser-side cause was not
+established from the screenshot. Startup errors previously went only to collapsed
+logs. The page now displays connection/permission progress and persistent visible
+errors, keeps failed startup retryable, checks browser capabilities, and invokes
+AudioContext resume synchronously in the button gesture before awaiting a socket.
+The boot status distinguishes a running client script from an unloaded script.
+
+An isolated Edge test **without disabling autoplay restrictions** passed: denying
+microphone permission showed the specific error; granting test-profile permission
+produced a running AudioContext and a visible 512×512 stream with 326 decoded
+frames. Its microphone used a synthetic WAV; this is not acceptance of the user's
+physical microphone or embedded browser. Twenty-three local startup, playback,
+transport and tracing checks passed. No model, reference voice, precision, steps
+or GPU scheduling configuration changed in this follow-up.

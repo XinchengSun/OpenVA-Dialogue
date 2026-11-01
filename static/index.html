@@ -103,6 +103,7 @@
     button.primary:hover { background: linear-gradient(135deg, #7b89ff, #9a78ff); }
     button.danger { color: #ffb6bd; border-color: rgba(255,107,120,.34); background: rgba(104,36,45,.35); }
     button:disabled { cursor: not-allowed; opacity: .5; transform: none; }
+    .startupError { color: var(--red); line-height: 1.6; }
     details { margin-top: 10px; border: 1px solid var(--line); border-radius: 13px; background: rgba(15,19,28,.72); }
     summary { padding: 12px 15px; color: #b8c1d1; cursor: pointer; user-select: none; font-size: 13px; }
     .settingsBody { padding: 0 15px 15px; }
@@ -135,7 +136,7 @@
       <p class="subtitle">点击开始，与定制数字人自然交谈</p>
     </div>
     <div class="topActions">
-      <div class="status" id="status">未连接</div>
+      <div class="status" id="status">页面正在加载…</div>
       <a class="customizeLink" href="/customize?new=1">更换数字人</a>
     </div>
   </header>
@@ -149,6 +150,8 @@
     <button id="stopBtn" title="结束采集，模型保持热加载">结束对话</button>
     <button id="interruptBtn" class="danger">打断回复</button>
   </div>
+  <p id="startupError" class="startupError" role="alert" hidden></p>
+  <noscript><p class="startupError">浏览器未启用 JavaScript，无法启动对话。请在 Edge 或 Chrome 中打开测试链接。</p></noscript>
   <details>
     <summary>对话设置</summary>
     <div class="settingsBody">
@@ -173,6 +176,7 @@ const interruptBtn = document.getElementById('interruptBtn');
 const instructionEl = document.getElementById('instruction');
 const logEl = document.getElementById('log');
 const statusEl = document.getElementById('status');
+const startupErrorEl = document.getElementById('startupError');
 
 let mediaWs = null, logWs = null, micWs = null, currentMime = null;
 let audioCtx = null, processor = null, micStream = null, zeroGain = null;
@@ -262,8 +266,26 @@ function setStatus(s) {
   } else if (s.includes('error')) {
     label = '连接异常'; state = 'error';
   }
+  if (!startupErrorEl.hidden) {
+    label = '启动失败'; state = 'error';
+  }
   statusEl.dataset.state = state;
   statusEl.textContent = label;
+}
+
+function showStartupError(error) {
+  const name = error?.name || '';
+  let message = error?.message || String(error);
+  if (name === 'NotAllowedError') message = '未获得麦克风权限。请允许此页面使用麦克风，然后重新开始。';
+  else if (name === 'NotFoundError') message = '没有找到可用麦克风，请连接或启用麦克风后重试。';
+  else if (name === 'NotReadableError') message = '麦克风无法读取，可能被其他程序占用。';
+  else if (name === 'SecurityError') message = '浏览器阻止了音频或媒体连接，请在系统 Edge 或 Chrome 中打开测试链接。';
+  startupErrorEl.textContent = message;
+  startupErrorEl.hidden = false;
+  setStatus('error');
+  const panel = document.querySelector('.debugPanel');
+  if (panel) panel.open = true;
+  log(`start error: ${name} ${message}`);
 }
 
 function setLiveVisible(show, reason = '') {
@@ -1174,6 +1196,7 @@ function connectMedia() {
   ws.onerror = () => {
     if (mediaWs !== ws || generation !== mediaWsGeneration) return;
     log('media ws error');
+    showStartupError(new Error('画面连接失败，请重新打开测试链接后重试。'));
   };
   ws.onmessage = ev => {
     if (mediaWs !== ws || generation !== mediaWsGeneration) return;
@@ -1357,12 +1380,17 @@ async function startMic(generation) {
   let nextProcessor = null;
   let nextZeroGain = null;
   try {
-    await waitForMicOpen(ws, generation);
     nextAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    // Invoke resume within the button gesture, before awaiting the network.
+    const resumed = nextAudioCtx.resume();
+    setStatus('正在连接麦克风…');
+    await waitForMicOpen(ws, generation);
+    setStatus('请允许浏览器使用麦克风…');
     nextStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       video: false,
     });
+    await resumed;
     if (generation !== micLifecycleGeneration || micWs !== ws) {
       throw new Error('mic start cancelled');
     }
@@ -1446,14 +1474,19 @@ startBtn.onclick = async () => {
   const generation = ++micLifecycleGeneration;
   startInProgress = true;
   startBtn.disabled = true;
-  startBtn.textContent = '对话中';
+  startBtn.textContent = '正在启动…';
+  startupErrorEl.hidden = true;
+  setStatus('正在连接画面…');
   try {
+    if (!window.MediaSource) throw new Error('当前浏览器不支持视频流，请在系统 Edge 或 Chrome 中打开。');
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('当前页面无法使用麦克风，请在系统 Edge 或 Chrome 中打开 HTTPS 测试链接。');
     ensureIdlePlaying();
     connectLogs();
     connectMedia();
     await startMic(generation);
     if (generation !== micLifecycleGeneration) throw new Error('mic start cancelled');
     appStarted = true;
+    startBtn.textContent = '对话中';
     setLiveVisible(false, 'system ready; listener until assistant speaks');
     ensureIdlePlaying();
     if (activeSlot) {
@@ -1468,7 +1501,7 @@ startBtn.onclick = async () => {
     appStarted = false;
     startBtn.disabled = false;
     startBtn.textContent = '开始对话';
-    log('start error: ' + e);
+    showStartupError(e);
   } finally {
     if (generation === micLifecycleGeneration) startInProgress = false;
   }
@@ -1488,6 +1521,8 @@ setInterval(() => {
   maybeReturnToListenerAtBoundary();
 }, 20);
 ensureIdlePlaying();
+setStatus('等待开始');
+log('client boot: startup diagnostics 20261102');
 </script>
 </body>
 </html>
