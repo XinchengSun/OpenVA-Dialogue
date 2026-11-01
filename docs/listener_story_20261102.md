@@ -52,7 +52,7 @@ Both new runs had only 1× playback, no seeks, and no browser exceptions. They h
 four and one dropped browser frames respectively. This is finite-sample evidence,
 not a guarantee for every network or the user's embedded browser.
 
-The real story contained **five sentences / 180 Chinese characters**. All five
+The real story contained **five sentences / 180 characters including punctuation**. All five
 sentence hashes reached TTS and all five requests completed; output PCM covered
 **35.36 seconds**. AAC decoded from the captured browser media was transcribed
 back from the opening about A-Ming and the injured bird through the final line
@@ -67,7 +67,8 @@ regression confirms that a six-sentence story retains its ending with cap zero.
 
 Captured H.264 streams remain native 25 fps. Audio/video track duration
 differences were about 19 ms and 5 ms. **Track duration is not a lip-sync or
-mouth-naturalness metric.** The story speaks roughly 5.1 characters per second.
+mouth-naturalness metric.** Excluding punctuation, the text contains 162 Hanzi,
+about 4.58 Hanzi per second of output audio.
 The user's impression of fast mouth motion still needs to distinguish speech
 pace from mouth motion/phoneme alignment; no blind mouth-motion filtering or
 voice time stretching was introduced.
