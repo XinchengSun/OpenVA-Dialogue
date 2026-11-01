@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from latency_trace import trace, text_fields
+
 import asyncio
 import json
 import logging
@@ -201,8 +203,10 @@ class LocalPCMTTSService(TTSService):
         request_id = uuid.uuid4().hex
         metadata_received = False
         audio_received = False
+        trace("tts_request", context=context_id, request=request_id, **text_fields(text))
         try:
             async with self._connector(self._uri) as websocket:
+                trace("tts_connected", context=context_id, request=request_id)
                 self._active[context_id][request_id] = websocket
                 await websocket.send(
                     json.dumps(
@@ -225,6 +229,8 @@ class LocalPCMTTSService(TTSService):
                             raise RuntimeError("TTS audio arrived before start metadata")
                         if not message or len(message) % 2:
                             raise RuntimeError("TTS bridge returned invalid PCM16 audio")
+                        if not audio_received:
+                            trace("tts_first_pcm", context=context_id, request=request_id, bytes=len(message))
                         audio_received = True
                         yield TTSAudioRawFrame(
                             audio=message,
@@ -277,6 +283,7 @@ class LocalPCMTTSService(TTSService):
                         if status == "completed" and not audio_received:
                             raise RuntimeError("TTS completed without PCM audio")
                         self._ready = True
+                        trace("tts_done", context=context_id, request=request_id, status=status)
                         return
                     elif event_type == "error":
                         raise RuntimeError(str(event.get("error", "unknown bridge error")))

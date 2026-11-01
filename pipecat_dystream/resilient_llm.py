@@ -14,6 +14,7 @@ from loguru import logger
 from openai import APITimeoutError
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.settings import assert_given
+from latency_trace import trace, text_fields
 
 from .realtime_search import (
     RealtimeSearchPolicy,
@@ -44,6 +45,8 @@ class _ReplyStreamState:
     finish_reason: str | None = None
     visible_text_emitted: bool = False
     limit_reached: bool = False
+    trace_id: int = 0
+    first_content_seen: bool = False
 
 
 def _terminator_width(text: str, index: int) -> int:
@@ -227,6 +230,7 @@ class RecoveringOpenAILLMService(OpenAILLMService):
     async def _emit_visible_text(self, state: _ReplyStreamState, text: str) -> None:
         if not text:
             return
+        trace("llm_sentence_released", request=state.trace_id, sentence=state.sentences_emitted, **text_fields(text))
         await super()._push_llm_text(text)
         state.visible_text_emitted = True
 
@@ -261,6 +265,9 @@ class RecoveringOpenAILLMService(OpenAILLMService):
         if not text or state.limit_reached:
             return
 
+        if not state.first_content_seen:
+            state.first_content_seen = True
+            trace("llm_first_content", request=state.trace_id)
         state.buffer += text
         if await self._emit_complete_sentences(state, final=False):
             raise _ReplyLimitReached
@@ -325,6 +332,9 @@ class RecoveringOpenAILLMService(OpenAILLMService):
                 self._realtime_search_failures += 1
             raise
         finally:
+            state = self._reply_state.get()
+            trace("llm_stream_closed", request=state.trace_id if state else None,
+                  finish_reason=state.finish_reason if state else None)
             with suppress(Exception):
                 await _close_stream(stream)
 
@@ -512,7 +522,8 @@ class RecoveringOpenAILLMService(OpenAILLMService):
                 f"remaining={len(context.get_messages())}"
             )
 
-        state = _ReplyStreamState()
+        state = _ReplyStreamState(trace_id=time.monotonic_ns())
+        trace("llm_request", request=state.trace_id, messages=len(context.get_messages()))
         state_token = self._reply_state.set(state)
 
         try:
