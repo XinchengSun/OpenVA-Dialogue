@@ -36,7 +36,7 @@ jobs:
       - name: Validate benchmark provenance and LLM backpressure
         run: |
           python -m pip install 'openai==2.35.1' 'httpx==0.28.1'
-          python -m unittest tests.test_benchmark_provenance tests.test_llm_backpressure -v
+          python -m unittest tests.test_benchmark_provenance tests.test_llm_backpressure tests.test_latency_trace -v
       - name: Validate single-GPU launch and bridge ownership
         timeout-minutes: 5
         run: |
