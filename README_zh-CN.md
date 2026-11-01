@@ -179,6 +179,7 @@ ASR 在 CPU 上运行，LLM 使用远程 API。延迟在服务端回环客户端
 | [第四轮显存优化](docs/memory_round4_20261028.md) | 已默认启用渲染优化、词表 CPU 卸载实验、权重/KV 清点及流式显存诊断 |
 | [回复首声等待审计](docs/reply_latency_audit_20261030.md) | 对照开源设计，重放结束判断、文本释放与浏览器门限，区分配置等待和线上实测 |
 | [ASR/LLM/TTS 分段计时](docs/latency_trace_20261101.md) | 可选运行时事件，辨别首句积攒、整段等待与实际首 PCM |
+| [服务器逐项实测与显存结果](docs/server_ab_20261101.md) | 九组完整服务对照、动态分配器、真实权重数值检查、长首句与浏览器等待 |
 | [服务启动与代理修复](docs/server_bootstrap_20261101.md) | 旧基线真实对话、千问小样本选型、浏览器检查与未完成的 GPU 归属核验 |
 | [架构](docs/architecture.md) | Listener/Speaker 状态、打断、媒体边界、GPU 拓扑 |
 | [定制](README_CUSTOMIZATION.md) | 形象定制与零样本音色克隆流程 |
