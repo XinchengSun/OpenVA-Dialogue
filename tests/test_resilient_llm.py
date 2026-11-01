@@ -231,11 +231,21 @@ class ReplySentenceLimitTests(unittest.IsolatedAsyncioTestCase):
         self.assertCountEqual(emitted_texts(service), ["甲句。", "乙句。"])
         self.assertEqual([stream.close_count for stream in streams], [1, 1])
 
-    async def test_default_limit_is_three_and_non_positive_limit_is_rejected(self):
+    async def test_explicit_default_remains_three_and_negative_limit_is_rejected(self):
         service, _ = make_service()
         self.assertEqual(service.reply_max_sentences, 3)
-        with self.assertRaisesRegex(ValueError, "must be positive"):
-            make_service(max_sentences=0)
+        with self.assertRaisesRegex(ValueError, "must be nonnegative"):
+            make_service(max_sentences=-1)
+
+    async def test_unlimited_story_retains_all_sentences_and_ending(self):
+        story = ["小镇有一盏旧台灯。", "店主想把它扔掉。", "孩子把断线接好了。",
+                 "那晚停电，台灯照亮了楼道。", "邻居们围在灯下讲故事。", "店主从此把它留在窗前。"]
+        stream = FakeStream([completion_chunk(s) for s in story] + [completion_chunk(finish_reason="stop")])
+        service, _ = make_service(streams=[stream], max_sentences=0)
+        await service._process_context(LLMContext([{"role":"user", "content":"你讲一个故事"}]))
+        self.assertEqual("".join(emitted_texts(service)), "".join(story))
+        self.assertEqual(len(emitted_texts(service)), 6)
+        self.assertEqual(stream.close_count, 1)
 
 
 class RealtimeSearchIntegrationTests(unittest.IsolatedAsyncioTestCase):

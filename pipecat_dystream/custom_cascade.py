@@ -33,8 +33,10 @@ from .voxcpm2_tts import LocalPCMTTSService
 
 DEFAULT_SYSTEM_INSTRUCTION = (
     "你是一个友好、自然的中文语音助手。无论用户使用什么语言，你都只用中文回答。"
-    "用自然口语直接回答：简单问题一到两句，普通问题两到三句。"
-    "除非用户明确要求详细，回答不要超过三句；不要复述问题，不要使用 Markdown、列表或序号。"
+    "用自然口语直接、简洁地回答。讲故事、解释、提供步骤等请求必须给出完整内容，"
+    "故事要有开端、事件和结局，不要只答应讲故事或只说标题、开场白。"
+    "未指定长度时，讲约150字的完整短故事；用户指定更长内容时按要求展开。"
+    "不要复述问题，不要使用 Markdown、列表或序号。"
     "每次回答必须把最后一句说完整，不能为了缩短长度在半句话处截断。"
 )
 
@@ -377,13 +379,13 @@ def create_custom_cascade_components(
             extra=llm_extra,
             system_instruction=_system_instruction(),
             temperature=float(os.getenv("PIPECAT_LLM_TEMPERATURE", "0.3")),
-            max_tokens=int(os.getenv("PIPECAT_LLM_MAX_TOKENS", "256")),
+            max_tokens=int(os.getenv("PIPECAT_LLM_MAX_TOKENS", "2048")),
         ),
         timeout_fallback_text=os.getenv(
             "PIPECAT_LLM_TIMEOUT_FALLBACK_TEXT", "刚才网络有点慢，请再说一遍。"
         ),
         history_max_messages=int(os.getenv("PIPECAT_LLM_HISTORY_MAX_MESSAGES", "12")),
-        reply_max_sentences=int(os.getenv("PIPECAT_LLM_MAX_SENTENCES", "3")),
+        reply_max_sentences=int(os.getenv("PIPECAT_LLM_MAX_SENTENCES", "0")),
         hedge_model=os.getenv("PIPECAT_LLM_HEDGE_MODEL", "").strip(),
         hedge_delay_sec=float(os.getenv("PIPECAT_LLM_HEDGE_DELAY_SEC", "0.75")),
         hedge_deadline_sec=float(os.getenv("PIPECAT_LLM_TIMEOUT_SEC", "8.0")),

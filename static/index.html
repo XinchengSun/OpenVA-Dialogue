@@ -156,7 +156,7 @@
     <summary>对话设置</summary>
     <div class="settingsBody">
       <label for="instruction">回答风格</label>
-      <input id="instruction" value="请用自然口语直接回答，默认一到三句；只有我明确要求时才详细展开。" />
+      <input id="instruction" value="简洁完整地回答；讲故事、解释和步骤等任务要给出完整内容，不要只说开场白。" />
     </div>
   </details>
   <details class="debugPanel">
@@ -212,16 +212,6 @@ const START_BUFFER_SEC = 2.00;
 const HANDOFF_BUFFER_SEC = 0.16;
 // Keep two complete GOPs behind the live edge. Startup already waits for
 // 0.60 s, so this retains the reserve instead of seeking most of it away.
-const TARGET_LATENCY_SEC = 1.90;
-const ASSISTANT_PREROLL_SEC = 0.32;
-const HANDOFF_TARGET_LATENCY_SEC = 0.08;
-const LOW_BUFFER_ENTER_SEC = 0.32;
-const LOW_BUFFER_EXIT_SEC = 0.48;
-const LOW_BUFFER_PLAYBACK_RATE = 0.96;
-const SOFT_CATCHUP_SEC = 2.60;
-const FAST_CATCHUP_SEC = 3.20;
-const HARD_CATCHUP_SEC = 4.50;
-const LIVE_TAIL_SEEK_INTERVAL_MS = 5000;
 const BUFFER_RETENTION_SEC = 12;
 const BUFFER_TRIM_INTERVAL_MS = 5000;
 // Qwen Audio Realtime recommends continuous 20-40 ms PCM chunks. Forty
@@ -363,10 +353,6 @@ function cacheDeferredAssistantBoundary(boundary) {
 }
 
 function resetAssistantAudioGate(reason = '') {
-  for (const slot of slotByVideo.values()) {
-    slot.assistantPreroll = null;
-    slot.assistantPrerollKey = null;
-  }
   holdLiveAudio(reason);
   setLiveVisible(false, reason || 'assistant gate reset');
   ensureIdlePlaying();
@@ -428,10 +414,6 @@ function armAssistantTurn(streamEpoch, generation, turnId) {
     return;
   }
   highestAssistantTurnId = Math.max(highestAssistantTurnId, turnId);
-  for (const slot of slotByVideo.values()) {
-    slot.assistantPreroll = null;
-    slot.assistantPrerollKey = null;
-  }
   expectedStreamGeneration = Math.max(
     expectedStreamGeneration,
     generation,
@@ -479,18 +461,6 @@ function releaseLiveAudio(turn, reason = '') {
   if (changed && reason) log(`live audio released: ${reason}`);
 }
 
-function prepareAssistantPreroll(slot, safeTime, key) {
-  if (slot.assistantPrerollKey === key || !slot.video.muted) return;
-  const target = safeTime - ASSISTANT_PREROLL_SEC;
-  if (target <= slot.video.currentTime + 0.05) return;
-  // This boundary identifies the first frame of this reply. Discard only the
-  // preceding muted lead-in; retain eight native frames before speech begins.
-  slot.assistantPrerollKey = key;
-  slot.assistantPreroll = { target, positioned: false };
-  slot.video.pause();
-  maybePlay(slot);
-}
-
 function maybeReleaseLiveAudioAtBoundary() {
   const boundary = pendingAssistantBoundary;
   const slot = activeSlot;
@@ -514,10 +484,6 @@ function maybeReleaseLiveAudioAtBoundary() {
     && boundary.generation < expectedStreamGeneration
   ) return;
   const safeTime = slot.timelineOrigin + boundary.safeMediaTimeSec;
-  prepareAssistantPreroll(slot, safeTime, assistantTurnKey(
-    boundary.streamEpoch, boundary.generation, boundary.turnId,
-  ));
-  if (slot.assistantPreroll) return;
   if (slot.video.currentTime + 0.005 < safeTime) return;
   const overshootMs = Math.max(0, (slot.video.currentTime - safeTime) * 1000);
   const releasedKey = assistantTurnKey(
@@ -650,26 +616,6 @@ function maybePlay(slot) {
   if (!isCurrentSlot(slot)) return;
   const sourceBuffer = slot.sourceBuffer;
   if (!sourceBuffer || sourceBuffer.buffered.length === 0) return;
-  if (slot.assistantPreroll) {
-    const preroll = slot.assistantPreroll;
-    if (!preroll.positioned) {
-      let available = false;
-      for (let i = 0; i < sourceBuffer.buffered.length; i++) {
-        if (sourceBuffer.buffered.start(i) <= preroll.target
-            && sourceBuffer.buffered.end(i) > preroll.target) available = true;
-      }
-      if (!available) return;
-      slot.video.currentTime = preroll.target;
-      preroll.positioned = true;
-      log(`assistant preroll target=${preroll.target.toFixed(3)}s`);
-    }
-    if (bufferedAhead(slot) < START_BUFFER_SEC) return;
-    slot.assistantPreroll = null;
-    if (!slot.playbackStarted) {
-      slot.playbackStarted = true;
-      armSlotActivation(slot);
-    }
-  }
   const ahead = bufferedAhead(slot);
   const startBufferSec = slot.replacing ? HANDOFF_BUFFER_SEC : START_BUFFER_SEC;
   if (!slot.playbackStarted && ahead < startBufferSec) {
@@ -682,14 +628,7 @@ function maybePlay(slot) {
   }
   if (!slot.playbackStarted) {
     slot.playbackStarted = true;
-    const targetLatencySec = slot.replacing
-      ? HANDOFF_TARGET_LATENCY_SEC
-      : TARGET_LATENCY_SEC;
-    const end = bufferedEnd(slot);
-    if (end > targetLatencySec) {
-      slot.video.currentTime = Math.max(0, end - targetLatencySec);
-    }
-    log(`playback start generation=${slot.generation} buffered=${ahead.toFixed(2)}s targetLatency=${targetLatencySec.toFixed(2)}s`);
+    log(`playback start generation=${slot.generation} buffered=${ahead.toFixed(2)}s`);
     armSlotActivation(slot);
   }
   slot.video.play().catch(e => log('video play blocked: ' + e));
@@ -704,37 +643,9 @@ function liveTail(slot) {
   const latency = end - video.currentTime;
   const now = Date.now();
 
-  if (slot.playbackStarted) {
-    let desiredRate = 1.0;
-    // Preserve speech cadence and every word. Catch up only during idle video;
-    // draining the speech buffer also removes its protection against jitter.
-    const preserveSpeech = assistantResponseArmed || visibleAssistantTurn !== null;
-    if (preserveSpeech) {
-      slot.lowBufferRecovery = false;
-    } else {
-      if (latency < LOW_BUFFER_ENTER_SEC) slot.lowBufferRecovery = true;
-      else if (latency >= LOW_BUFFER_EXIT_SEC) slot.lowBufferRecovery = false;
-      if (slot.lowBufferRecovery) desiredRate = LOW_BUFFER_PLAYBACK_RATE;
-      if (latency > FAST_CATCHUP_SEC) {
-        slot.lowBufferRecovery = false;
-        desiredRate = 1.10;
-      } else if (latency > SOFT_CATCHUP_SEC) {
-        slot.lowBufferRecovery = false;
-        desiredRate = 1.06;
-      }
-    }
-
-    if (!preserveSpeech && latency > HARD_CATCHUP_SEC && now - slot.lastTailSeekAt > LIVE_TAIL_SEEK_INTERVAL_MS) {
-      video.currentTime = Math.max(0, end - TARGET_LATENCY_SEC);
-      video.playbackRate = 1.0;
-      slot.lowBufferRecovery = false;
-      slot.lastTailSeekAt = now;
-      log(`live-tail hard catch-up latency=${latency.toFixed(2)}s target=${video.currentTime.toFixed(2)}`);
-    } else if (Math.abs(video.playbackRate - desiredRate) > 0.001) {
-      video.playbackRate = desiredRate;
-      log(`live-tail playbackRate=${desiredRate.toFixed(2)} latency=${latency.toFixed(2)}s`);
-    }
-  }
+  // Keep Listener, thinking and speech on the same native A/V clock.
+  // Playback must not speed up, seek away buffered speech, or pause at a turn.
+  if (video.playbackRate !== 1.0) video.playbackRate = 1.0;
 
   if (
     !sourceBuffer.updating
@@ -806,16 +717,12 @@ function buildMSE(mime, replacing) {
     replacing: !!(replacing && oldActive),
     playbackStarted: false,
     lastPrebufferLogAt: 0,
-    lastTailSeekAt: 0,
     lastBufferTrimAt: 0,
-    lowBufferRecovery: false,
     mediaChunkCount: 0,
     activationArmed: false,
     activationTimer: null,
     activated: false,
     assistantMediaReady: false,
-    assistantPreroll: null,
-    assistantPrerollKey: null,
     streamEpoch: currentStreamEpoch,
     timelineOrigin: null,
     disposed: false,

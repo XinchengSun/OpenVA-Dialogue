@@ -193,14 +193,11 @@ class RealtimeCoreTests(unittest.TestCase):
 
         self.assertIn('PIPE_GOP="${PIPE_GOP:-3}"', launcher)
         self.assertIn("const START_BUFFER_SEC = 2.00;", frontend)
-        self.assertIn("const TARGET_LATENCY_SEC = 1.90;", frontend)
-        self.assertIn("const HANDOFF_TARGET_LATENCY_SEC = 0.08;", frontend)
-        self.assertIn("const LOW_BUFFER_ENTER_SEC = 0.32;", frontend)
-        self.assertIn("const LOW_BUFFER_EXIT_SEC = 0.48;", frontend)
-        self.assertIn("const LOW_BUFFER_PLAYBACK_RATE = 0.96;", frontend)
-        self.assertIn("slot.lowBufferRecovery = true;", frontend)
-        self.assertIn("slot.lowBufferRecovery = false;", frontend)
-        self.assertIn("const HARD_CATCHUP_SEC = 4.50;", frontend)
+        live_tail = frontend.split("function liveTail(slot)", 1)[1].split("function teardownMSE", 1)[0]
+        self.assertNotIn("video.currentTime =", live_tail)
+        self.assertNotIn(".pause()", live_tail)
+        self.assertIn("video.playbackRate = 1.0", live_tail)
+        self.assertNotIn("prepareAssistantPreroll", frontend)
         self.assertNotIn("jumpNearLiveTail('assistant-active')", frontend)
         self.assertNotIn("jumpNearLiveTail('tts-start')", frontend)
 

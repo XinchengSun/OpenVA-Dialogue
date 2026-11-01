@@ -180,8 +180,8 @@ class RecoveringOpenAILLMService(OpenAILLMService):
         self._timeout_fallback_text = timeout_fallback_text
         self._history_max_messages = max(0, int(history_max_messages))
         self._reply_max_sentences = int(reply_max_sentences)
-        if self._reply_max_sentences <= 0:
-            raise ValueError("reply_max_sentences must be positive")
+        if self._reply_max_sentences < 0:
+            raise ValueError("reply_max_sentences must be nonnegative (0 disables the limit)")
         self._hedge_model = hedge_model.strip()
         self._hedge_delay_sec = max(0.0, float(hedge_delay_sec))
         self._hedge_deadline_sec = max(
@@ -245,13 +245,13 @@ class RecoveringOpenAILLMService(OpenAILLMService):
             final=final,
         )
         for sentence in sentences:
-            if state.sentences_emitted >= self._reply_max_sentences:
+            if self._reply_max_sentences and state.sentences_emitted >= self._reply_max_sentences:
                 state.buffer = ""
                 state.limit_reached = True
                 return True
             await self._emit_visible_text(state, sentence)
             state.sentences_emitted += 1
-            if state.sentences_emitted >= self._reply_max_sentences:
+            if self._reply_max_sentences and state.sentences_emitted >= self._reply_max_sentences:
                 state.buffer = ""
                 state.limit_reached = True
                 return True

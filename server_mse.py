@@ -2975,11 +2975,16 @@ class RealtimeMSEEngine:
                             "motion_submit",
                         )
 
+                    if queued:
+                        trace("engine_feed", generation=stream_generation,
+                              turn=turn_id, mode=mode, samples=hop_samples,
+                              deadline_lag_ms=max(0.0, now - next_feed_time) * 1000)
+
                     next_feed_time += self.args.hop_ms / 1000.0
                     if next_feed_time < now - 0.2:
                         next_feed_time = now
-                else:
-                    next_feed_time = now + 0.005
+                # A retry does not advance the media clock. Resetting this
+                # deadline on backpressure accumulates a deficit on every hop.
 
             got_frames = []
             while True:
