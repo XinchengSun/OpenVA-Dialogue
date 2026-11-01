@@ -27,6 +27,7 @@ from scipy.signal import resample_poly
 import websockets
 
 from customization_runtime import register_customization_routes
+from latency_trace import trace, media_fields
 from pipecat_dystream.public_access import (
     ACCESS_COOKIE_NAME,
     is_loopback_host,
@@ -1059,6 +1060,8 @@ class MediaPipeClient:
             if epoch != self._stream_epoch:
                 continue
             self.stdout_chunks += 1
+            trace("media_encoded", client=self.client_id, epoch=epoch,
+                  chunk=self.stdout_chunks, **media_fields(data))
             if self.stdout_chunks <= 5 or self.stdout_chunks % 20 == 0:
                 self.engine.log(f"[PIPE-OUT] client={self.client_id} stdout chunk={self.stdout_chunks} bytes={len(data)}")
             self._put_bytes(data, epoch)
@@ -3176,6 +3179,8 @@ async def _send_websocket_item(ws, item, timeout):
         await asyncio.wait_for(sending, timeout=timeout)
     else:
         await sending
+    if isinstance(item, bytes):
+        trace("media_sent", **media_fields(item))
 
 
 async def _forward_websocket_queue(

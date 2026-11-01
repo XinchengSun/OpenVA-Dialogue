@@ -192,15 +192,15 @@ class RealtimeCoreTests(unittest.TestCase):
         frontend = (root / "static" / "index.html").read_text(encoding="utf-8")
 
         self.assertIn('PIPE_GOP="${PIPE_GOP:-3}"', launcher)
-        self.assertIn("const START_BUFFER_SEC = 0.60;", frontend)
-        self.assertIn("const TARGET_LATENCY_SEC = 0.48;", frontend)
+        self.assertIn("const START_BUFFER_SEC = 1.20;", frontend)
+        self.assertIn("const TARGET_LATENCY_SEC = 1.10;", frontend)
         self.assertIn("const HANDOFF_TARGET_LATENCY_SEC = 0.08;", frontend)
         self.assertIn("const LOW_BUFFER_ENTER_SEC = 0.32;", frontend)
         self.assertIn("const LOW_BUFFER_EXIT_SEC = 0.48;", frontend)
         self.assertIn("const LOW_BUFFER_PLAYBACK_RATE = 0.96;", frontend)
         self.assertIn("slot.lowBufferRecovery = true;", frontend)
         self.assertIn("slot.lowBufferRecovery = false;", frontend)
-        self.assertIn("const HARD_CATCHUP_SEC = 2.50;", frontend)
+        self.assertIn("const HARD_CATCHUP_SEC = 3.50;", frontend)
         self.assertNotIn("jumpNearLiveTail('assistant-active')", frontend)
         self.assertNotIn("jumpNearLiveTail('tts-start')", frontend)
 

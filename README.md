@@ -221,6 +221,7 @@ For the consolidated model architecture, inference flow, optimization status, ev
 | [Reply latency audit](docs/reply_latency_audit_20261030.md) | pinned upstream design comparison and controlled turn/text/browser gate replays; no full-service latency claim (Chinese) |
 | [Stage timestamps](docs/latency_trace_20261101.md) | opt-in ASR/LLM/TTS traces; separate sentence buffering from whole-response waits (Chinese) |
 | [Server A/B and memory results](docs/server_ab_20261101.md) | nine measured stages, dynamic allocator replay, trained-output equality, long-sentence and browser waits (Chinese) |
+| [Speech playback investigation](docs/playback_stutter_20261101.md) | measured GPU scheduling improvement, transport jitter, speech-preserving playback, and remaining stalls |
 | [Server bootstrap and proxy fixes](docs/server_bootstrap_20261101.md) | live baseline dialogue, small-sample Qwen selection, browser checks and remaining GPU ownership limits (Chinese) |
 | [Architecture](docs/architecture.md) | Listener/Speaker state, interruption, media boundaries, GPU placement |
 | [Customization](README_CUSTOMIZATION.md) | portrait and zero-shot voice-cloning workflow |

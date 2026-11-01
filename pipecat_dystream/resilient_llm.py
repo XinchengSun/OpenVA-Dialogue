@@ -269,6 +269,10 @@ class RecoveringOpenAILLMService(OpenAILLMService):
             state.first_content_seen = True
             trace("llm_first_content", request=state.trace_id)
         state.buffer += text
+        trace("llm_content", request=state.trace_id,
+              buffered_characters=len(state.buffer),
+              terminal_punctuation=bool(text and text[-1] in _SENTENCE_TERMINATORS),
+              **text_fields(text))
         if await self._emit_complete_sentences(state, final=False):
             raise _ReplyLimitReached
 
@@ -324,6 +328,8 @@ class RecoveringOpenAILLMService(OpenAILLMService):
                         finish_reason = getattr(choice, "finish_reason", None)
                         if finish_reason is not None:
                             state.finish_reason = str(finish_reason)
+                            trace("llm_finish", request=state.trace_id,
+                                  finish_reason=state.finish_reason)
                 yield chunk
         except asyncio.CancelledError:
             raise

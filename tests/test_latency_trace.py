@@ -6,7 +6,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from latency_trace import trace, text_fields
+from latency_trace import trace, text_fields, media_fields
 
 
 class LatencyTraceTests(unittest.TestCase):
@@ -14,7 +14,19 @@ class LatencyTraceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"OPENVA_LATENCY_TRACE_DIR": ""}):
             trace("disabled")
             self.assertEqual(text_fields("private text"), {})
+            self.assertEqual(media_fields(b"private media"), {})
             self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_media_fingerprint_can_match_transport_without_recording_payload(self):
+        import hashlib
+        payload = b"private media"
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"OPENVA_LATENCY_TRACE_DIR": directory}):
+            fields = media_fields(payload)
+            trace("media_sent", **fields)
+            record = json.loads(next(Path(directory).glob("*.jsonl")).read_text())
+            self.assertEqual(record["bytes"], len(payload))
+            self.assertEqual(record["media_sha256"], hashlib.sha256(payload).hexdigest())
+            self.assertNotIn("private media", json.dumps(record))
 
     def test_threaded_records_are_complete_and_exclude_text(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"OPENVA_LATENCY_TRACE_DIR": directory}):

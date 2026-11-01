@@ -204,18 +204,18 @@ const slotByVideo = new Map();
 // The encoder emits a fragment every ~240 ms (PIPE_GOP=3 at 12.5 fps).
 // Keep more than two complete fragments buffered so one late packet does not
 // immediately starve playback.
-const START_BUFFER_SEC = 0.60;
+const START_BUFFER_SEC = 1.20;
 const HANDOFF_BUFFER_SEC = 0.16;
 // Keep two complete GOPs behind the live edge. Startup already waits for
 // 0.60 s, so this retains the reserve instead of seeking most of it away.
-const TARGET_LATENCY_SEC = 0.48;
+const TARGET_LATENCY_SEC = 1.10;
 const HANDOFF_TARGET_LATENCY_SEC = 0.08;
 const LOW_BUFFER_ENTER_SEC = 0.32;
 const LOW_BUFFER_EXIT_SEC = 0.48;
 const LOW_BUFFER_PLAYBACK_RATE = 0.96;
-const SOFT_CATCHUP_SEC = 0.80;
-const FAST_CATCHUP_SEC = 1.30;
-const HARD_CATCHUP_SEC = 2.50;
+const SOFT_CATCHUP_SEC = 1.60;
+const FAST_CATCHUP_SEC = 2.10;
+const HARD_CATCHUP_SEC = 3.50;
 const LIVE_TAIL_SEEK_INTERVAL_MS = 5000;
 const BUFFER_RETENTION_SEC = 12;
 const BUFFER_TRIM_INTERVAL_MS = 5000;
@@ -639,19 +639,25 @@ function liveTail(slot) {
 
   if (slot.playbackStarted) {
     let desiredRate = 1.0;
-    if (latency < LOW_BUFFER_ENTER_SEC) slot.lowBufferRecovery = true;
-    else if (latency >= LOW_BUFFER_EXIT_SEC) slot.lowBufferRecovery = false;
-
-    if (slot.lowBufferRecovery) desiredRate = LOW_BUFFER_PLAYBACK_RATE;
-    if (latency > FAST_CATCHUP_SEC) {
+    // Preserve speech cadence and every word. Catch up only during idle video;
+    // draining the speech buffer also removes its protection against jitter.
+    const preserveSpeech = assistantResponseArmed || visibleAssistantTurn !== null;
+    if (preserveSpeech) {
       slot.lowBufferRecovery = false;
-      desiredRate = 1.10;
-    } else if (latency > SOFT_CATCHUP_SEC) {
-      slot.lowBufferRecovery = false;
-      desiredRate = 1.06;
+    } else {
+      if (latency < LOW_BUFFER_ENTER_SEC) slot.lowBufferRecovery = true;
+      else if (latency >= LOW_BUFFER_EXIT_SEC) slot.lowBufferRecovery = false;
+      if (slot.lowBufferRecovery) desiredRate = LOW_BUFFER_PLAYBACK_RATE;
+      if (latency > FAST_CATCHUP_SEC) {
+        slot.lowBufferRecovery = false;
+        desiredRate = 1.10;
+      } else if (latency > SOFT_CATCHUP_SEC) {
+        slot.lowBufferRecovery = false;
+        desiredRate = 1.06;
+      }
     }
 
-    if (latency > HARD_CATCHUP_SEC && now - slot.lastTailSeekAt > LIVE_TAIL_SEEK_INTERVAL_MS) {
+    if (!preserveSpeech && latency > HARD_CATCHUP_SEC && now - slot.lastTailSeekAt > LIVE_TAIL_SEEK_INTERVAL_MS) {
       video.currentTime = Math.max(0, end - TARGET_LATENCY_SEC);
       video.playbackRate = 1.0;
       slot.lowBufferRecovery = false;

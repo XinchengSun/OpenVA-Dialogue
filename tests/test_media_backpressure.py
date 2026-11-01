@@ -14,12 +14,13 @@ import unittest
 from unittest.mock import patch
 
 import aiohttp
+from latency_trace import trace, media_fields
 
 
 SOURCE = Path(__file__).resolve().parents[1] / "server_mse.py"
 TREE = ast.parse(SOURCE.read_text(encoding="utf-8"))
 NAMESPACE = dict(asyncio=asyncio, threading=threading, queue=queue, os=os,
-                 json=json, aiohttp=aiohttp, math=math)
+                 json=json, aiohttp=aiohttp, math=math, trace=trace, media_fields=media_fields)
 NAMES = {"_BoundedLoopQueueWriter", "MediaPipeClient", "_forward_websocket_queue",
          "_websocket_send_timeout", "_send_websocket_item", "media_ws", "logs_ws"}
 exec(compile(ast.Module(body=[node for node in TREE.body

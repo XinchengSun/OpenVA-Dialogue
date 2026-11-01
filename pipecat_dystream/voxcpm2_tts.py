@@ -231,6 +231,7 @@ class LocalPCMTTSService(TTSService):
                             raise RuntimeError("TTS bridge returned invalid PCM16 audio")
                         if not audio_received:
                             trace("tts_first_pcm", context=context_id, request=request_id, bytes=len(message))
+                        trace("tts_pcm", context=context_id, request=request_id, bytes=len(message))
                         audio_received = True
                         yield TTSAudioRawFrame(
                             audio=message,

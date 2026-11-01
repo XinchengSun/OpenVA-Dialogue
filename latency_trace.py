@@ -31,3 +31,10 @@ def text_fields(text: str) -> dict:
     if not os.getenv("OPENVA_LATENCY_TRACE_DIR", "").strip():
         return {}
     return {"characters": len(text), "text_sha256": hashlib.sha256(text.encode()).hexdigest()}
+
+
+def media_fields(data: bytes) -> dict:
+    """Match encoded chunks across transport boundaries without retaining media."""
+    if not os.getenv("OPENVA_LATENCY_TRACE_DIR", "").strip():
+        return {}
+    return {"bytes": len(data), "media_sha256": hashlib.sha256(data).hexdigest()}
