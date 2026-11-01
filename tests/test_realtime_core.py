@@ -1,4 +1,5 @@
 import asyncio
+import ast
 import json
 import os
 import queue
@@ -443,7 +444,10 @@ class RealtimeCoreTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn('"type": "compact"', server)
-        self.assertIn("def compact_stream_history():", worker)
+        self.assertTrue(any(
+            isinstance(node, ast.FunctionDef) and node.name == "compact_stream_history"
+            for node in ast.walk(ast.parse(worker))
+        ))
         self.assertIn("past_motion_preserved=1", worker)
         self.assertNotIn("[ENGINE IDLE] model state reset", server)
 
