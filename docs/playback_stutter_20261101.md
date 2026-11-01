@@ -51,18 +51,53 @@ and four recurrent motion outputs; four rendered frames and 116 intermediate
 records. All compared outputs were bitwise equal to the existing references.
 This checks fixed numerical examples, not perceptual naturalness for every input.
 
-The browser now retains 1.2 s at initial startup with a 1.1 s target, and reserves
+An initial browser trial retained 1.2 s with a 1.1 s target, and reserved
 catch-up playback for idle video. During armed/visible replies it plays at 1×
-and never seeks forward to discard spoken words. Initial buffering increases by
-0.6 s in configuration; this is not a claim about the net response latency.
+and never seeks forward to discard spoken words.
 Two preliminary MPS + buffer trials had respectively zero and one audible wait
 (the latter about 647 ms). Buffering alone has not eliminated every stall.
 
-One remaining gap occurred after sentence two completed and before sentence
+A production replay then had a 765 ms audible wait despite a maximum server
+encoded-chunk interval of 234 ms. Matched client/server chunks showed up to
+1.57 s of additional transport variation. The final startup reserve is therefore
+2.0 s with a 1.9 s target. Three short production replies and one longer reply
+(about 26 s between server media boundaries) had zero unmuted waiting events.
+This is finite-sample evidence, not a guarantee under arbitrary network stalls.
+The three short runs took 4.74–5.42 s from the last outgoing voiced microphone
+block to video unmute. Configured buffering alone increased by 1.4 s versus the
+old 0.6 s setting; a smoother stream is not a claim of lower first-response time.
+
+The final browser also uses the validated first-speech boundary to skip muted
+lead-in while retaining 320 ms (eight native frames) before the first speech
+frame. It pauses until the jitter reserve is available, and keeps the original
+turn/generation/epoch audio gate. It never skips within visible speech. Two
+preliminary short runs with this change had no audible waits and unmuted at
+4.48 / 4.28 s; this small sample is not a stable latency-gain estimate. Node.js
+checks cover headroom, first-frame retention, duplicate/stale boundaries and
+preserving audible speech; real browser checks supplement them.
+The subsequent approximately 26 s long-reply run also had zero audible waits,
+and unmuted 4.57 s after the last outgoing voiced block. All sampled audible
+playback remained at 1×. This measures unmute, not physical speaker output.
+The final whole-device sampler observed 9,505 MiB over 360 half-second samples;
+it is a separate warm-production sample, not a replacement for cold-start or
+actual 12 GiB hardware acceptance.
+
+The transport/realtime/LLM/TTS CPU suite passed 108 tests with one skip after
+using the deployment's existing NLTK data path (107 passed). The first attempt
+failed on missing NLTK data, not an inference regression. Another 21 local
+transport, tracing and executable browser-policy checks passed. The source
+tests' expected buffer constants were updated; frozen trained-output judges
+and numerical references were not changed.
+
+One earlier gap occurred after sentence two completed and before sentence
 three was released at LLM EOF, around 1.6 s. This has not yet established whether
 the provider delayed content or the local sentence buffer delayed release.
 Additional per-content, finish-reason and PCM-chunk timestamps distinguish those
-cases; changing sentence boundaries without that evidence is avoided.
+cases. In the subsequent production run all three text sentences were released
+within 916 ms, and received PCM chunk gaps within that reply stayed below 205 ms;
+its remaining stall was in transport. Three separate fixed API probes completed
+in 0.80 / 0.82 / 1.85 s, with last-content-to-EOF gaps of about 45 / 1 / 73 ms.
+No sentence-parser behavior was changed based on the earlier ambiguous gap.
 
 The supplied deployment reference voice is a private, user-selected audio clip.
 No reference media, transcript, credentials or deployment addresses are included
