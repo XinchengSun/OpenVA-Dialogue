@@ -210,13 +210,11 @@ let highestAssistantTurnId = -1;
 let lastBoundaryEventSeq = -1;
 const slotByVideo = new Map();
 
-// The encoder emits a fragment every ~240 ms (PIPE_GOP=3 at 12.5 fps).
-// Keep more than two complete fragments buffered so one late packet does not
-// immediately starve playback.
+// Retain two seconds of media so a late fragment does not immediately starve
+// playback. Fragment duration depends on the configured frame rate and GOP.
 const START_BUFFER_SEC = 2.00;
 const HANDOFF_BUFFER_SEC = 0.16;
-// Keep two complete GOPs behind the live edge. Startup already waits for
-// 0.60 s, so this retains the reserve instead of seeking most of it away.
+// Retain recently played data for safe MSE cleanup without growing indefinitely.
 const BUFFER_RETENTION_SEC = 12;
 const BUFFER_TRIM_INTERVAL_MS = 5000;
 // Qwen Audio Realtime recommends continuous 20-40 ms PCM chunks. Forty
@@ -226,19 +224,29 @@ const MIC_SEND_SAMPLES = 640;
 const LOG_MAX_LINES = 800;
 const LOG_TRIM_TO_LINES = 400;
 let logLineCount = 0;
+const queuedLogLines = [];
 
 function log(line) {
   const t = new Date().toLocaleTimeString();
-  logEl.append(document.createTextNode(`[${t}] ${line}\n`));
-  logLineCount += 1;
+  queuedLogLines.push(`[${t}] ${line}\n`);
+  if (queuedLogLines.length > LOG_MAX_LINES) queuedLogLines.shift();
+}
+
+function flushLog() {
+  if (!queuedLogLines.length) return;
+  logLineCount += queuedLogLines.length;
+  logEl.append(document.createTextNode(queuedLogLines.join('')));
+  queuedLogLines.length = 0;
   if (logLineCount > LOG_MAX_LINES) {
     const lines = logEl.textContent.split('\n');
     const kept = lines.slice(-LOG_TRIM_TO_LINES - 1);
     logEl.textContent = kept.join('\n');
     logLineCount = Math.max(0, kept.length - 1);
   }
-  logEl.scrollTop = logEl.scrollHeight;
+  // A closed diagnostics panel must not force layout for every server log line.
+  if (document.querySelector('.debugPanel')?.open) logEl.scrollTop = logEl.scrollHeight;
 }
+setInterval(flushLog, 250);
 
 function setStatus(s) {
   s = String(s || '');
@@ -489,6 +497,8 @@ function maybeReleaseLiveAudioAtBoundary() {
     && boundary.generation < expectedStreamGeneration
   ) return;
   const safeTime = slot.timelineOrigin + boundary.safeMediaTimeSec;
+  recoverSilentPrefix(slot, boundary, safeTime);
+  if (slot.video.seeking) return;
   if (slot.video.currentTime + 0.005 < safeTime) return;
   const overshootMs = Math.max(0, (slot.video.currentTime - safeTime) * 1000);
   const releasedKey = assistantTurnKey(
@@ -505,6 +515,30 @@ function maybeReleaseLiveAudioAtBoundary() {
     `media boundary generation=${boundary.generation} turn=${boundary.turnId} ` +
     `overshoot_ms=${overshootMs.toFixed(1)}`
   );
+}
+
+function recoverSilentPrefix(slot, boundary, safeTime) {
+  // The server boundary identifies the FIRST sample of this reply. Only skip
+  // the muted prefix before it; never jump through an already visible reply.
+  const video = slot.video;
+  if (!liveAudioHeld || !video.muted || visibleAssistantTurn || video.seeking) return;
+  if (!Number.isFinite(safeTime) || safeTime - video.currentTime < 1.2) return;
+  const key = assistantTurnKey(boundary.streamEpoch, boundary.generation, boundary.turnId);
+  if (slot.silentPrefixRecoveredKey === key) return;
+  const target = safeTime - 0.16;
+  const ranges = slot.sourceBuffer?.buffered;
+  if (!ranges) return;
+  for (let i = 0; i < ranges.length; i++) {
+    // Retain the same two-second reserve as ordinary startup. Recovering a
+    // silent backlog must not leave speech with only a fragment of headroom.
+    if (target >= ranges.start(i) && safeTime + START_BUFFER_SEC <= ranges.end(i)) {
+      const skipped = target - video.currentTime;
+      slot.silentPrefixRecoveredKey = key;
+      video.currentTime = target;
+      log(`silent prefix recovered turn=${boundary.turnId} skipped=${skipped.toFixed(3)}s before_reply=${safeTime.toFixed(3)}s`);
+      return;
+    }
+  }
 }
 
 function maybeReturnToListenerAtBoundary() {
@@ -1456,6 +1490,23 @@ setInterval(() => {
   maybeReleaseLiveAudioAtBoundary();
   maybeReturnToListenerAtBoundary();
 }, 20);
+// Numeric playback diagnostics make the actual user's browser measurable.
+// No microphone content, transcript, device name or credentials are sent here.
+setInterval(() => {
+  if (!appStarted || !activeSlot) return;
+  const v = activeSlot.video;
+  const q = v.getVideoPlaybackQuality?.();
+  const metrics = {
+    t: Math.round(v.currentTime * 1000),
+    ahead: Math.round(bufferedAhead(activeSlot) * 1000),
+    ready: v.readyState, paused: v.paused, muted: v.muted,
+    frames: q?.totalVideoFrames || 0, dropped: q?.droppedVideoFrames || 0,
+    turn: activeAssistantTurn?.turnId ?? visibleAssistantTurn?.turnId ?? -1,
+  };
+  const url = new URL('health', new URL('.', location.href));
+  url.searchParams.set('playback', JSON.stringify(metrics));
+  fetch(url, {cache: 'no-store'}).catch(() => {});
+}, 5000);
 ensureIdlePlaying();
 setStatus('等待开始');
 log('client boot: startup diagnostics 20261102');
