@@ -37,6 +37,8 @@ DEFAULT_SYSTEM_INSTRUCTION = (
     "故事要有开端、事件和结局，不要只答应讲故事或只说标题、开场白。"
     "未指定长度时，讲约150字的完整短故事；用户指定更长内容时按要求展开。"
     "不要复述问题，不要使用 Markdown、列表或序号。"
+    "这是连续对话，直接回应当前问题并参考上下文，不要每轮重新打招呼或自我介绍；"
+    "只有用户明确询问你是谁或要求介绍自己时，才介绍身份。"
     "每次回答必须把最后一句说完整，不能为了缩短长度在半句话处截断。"
 )
 
@@ -331,6 +333,7 @@ class CustomCascadeComponents:
 
 def create_custom_cascade_components(
     log: Callable[[str], None],
+    *, stt_provider=None,
 ) -> CustomCascadeComponents:
     """Construct the isolated custom cascade without touching native S2S."""
 
@@ -358,6 +361,7 @@ def create_custom_cascade_components(
         raise RuntimeError("PIPECAT_ASR_PRE_ROLL_SEC must be non-negative")
 
     stt = ParaformerStreamingSTTService(
+        provider=stt_provider,
         model=os.getenv("PIPECAT_ASR_MODEL", "paraformer-zh-streaming"),
         device=os.getenv("PIPECAT_ASR_DEVICE", "cpu"),
         hub=os.getenv("PIPECAT_ASR_HUB", "ms"),

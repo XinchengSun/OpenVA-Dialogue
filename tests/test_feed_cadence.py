@@ -1,5 +1,6 @@
 """Exercise the production clock branch under alternating pipeline backpressure."""
 import ast
+import math
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -19,6 +20,20 @@ def production_clock():
 
 
 class FeedCadenceTests(unittest.TestCase):
+    def test_idle_budget_covers_lookahead_and_segment_remainder(self):
+        tree = ast.parse((Path(__file__).resolve().parents[1]/'server_mse.py').read_text(encoding='utf-8'))
+        assignment = next(n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                          and any(isinstance(t, ast.Name) and t.id == 'idle_high_water_floor' for t in n.targets))
+        floor = eval(compile(ast.Expression(assignment.value), '<production budget>', 'eval'),
+                     dict(math=math, args=SimpleNamespace(feature_lag_frames=3),
+                          hop_samples_hint=3200, seg_samples_hint=2560)) // 640
+        fed = published = 0
+        for _ in range(100):
+            self.assertLessEqual(fed - published + 5, floor,
+                                 'listener deadlocked waiting for its own lookahead')
+            fed += 5
+            published = max(0, fed - 4) // 4 * 4
+
     def test_backpressure_jitter_does_not_reduce_sustained_media_rate(self):
         tick=production_clock();engine=SimpleNamespace(args=SimpleNamespace(hop_ms=200))
         deadline=0.;ready=0.;submitted=[]

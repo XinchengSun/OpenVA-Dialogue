@@ -95,6 +95,26 @@ def run_worker(messages, max_sec=None, hop_ms=200):
 
 
 class AudioHistoryTests(unittest.TestCase):
+    def test_hidden_warmup_does_not_pair_old_frames_with_new_visible_audio(self):
+        hidden = audio_message(np.zeros(200, dtype=np.float32))
+        hidden.update(visible=False, mode="IDLE_NO_USER", turn_id=0)
+        visible = audio_message(np.ones(200, dtype=np.float32))
+        _, items, _ = run_worker([hidden, visible])
+        # Five new input frames need one future model frame plus two lag
+        # frames. The second output batch starts with three OLD hidden frames.
+        second = items[1]
+        self.assertEqual(second["produced_start"], 2)
+        self.assertEqual([m["visible"] for m in second["frame_metadata"]],
+                         [False, False, False, True, True])
+        self.assertEqual([m["turn_id"] for m in second["frame_metadata"]], [0, 0, 0, 1, 1])
+
+    def test_reset_preserves_labels_for_unconsumed_old_generation_frames(self):
+        old = audio_message(np.zeros(200, dtype=np.float32), generation=1)
+        new = audio_message(np.ones(200, dtype=np.float32), generation=2)
+        _, items, _ = run_worker([old, {"type": "reset", "generation": 2}, new])
+        second = [item for item in items if "motion_np" in item][1]
+        self.assertEqual([m["generation"] for m in second["frame_metadata"]], [1, 1, 1, 2, 2])
+
     def frames(self, items):
         return np.concatenate([item["motion_np"] for item in items if "motion_np" in item], axis=1)
 

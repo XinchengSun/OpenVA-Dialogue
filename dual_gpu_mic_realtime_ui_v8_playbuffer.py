@@ -48,6 +48,7 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
     import queue
     import numpy as np
     import torch
+    from collections import deque
     from contextlib import nullcontext
 
     # The launcher exposes the selected physical GPUs through
@@ -286,6 +287,11 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
     current_visible = False
     current_mode = "IDLE_NO_USER"
     current_turn_id = 0
+    # Output k describes input audio frame k, even though lookahead makes it
+    # arrive in a later hop. Keep this across reset/compaction: the retained
+    # audio history still contains those not-yet-generated frames.
+    output_metadata = deque()
+    metadata_samples = 0
 
     generated_idx = 0  # original global start_idx already generated
     step = 0
@@ -404,6 +410,13 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
                 # Accumulate real audio after prefix silence.
                 real_audio = np.concatenate([real_audio, hop.astype(np.float32)], axis=0)
                 real_audio_other = np.concatenate([real_audio_other, hop_other.astype(np.float32)], axis=0)
+                metadata_samples += hop_samples
+                complete_metadata_frames, metadata_samples = divmod(metadata_samples, samples_per_frame)
+                output_metadata.extend(
+                    {"generation": current_generation, "visible": current_visible,
+                     "mode": current_mode, "turn_id": current_turn_id}
+                    for _ in range(complete_metadata_frames)
+                )
 
                 # Original app does:
                 # audio_self = zeros(prefix) + full_speaker_audio
@@ -531,6 +544,7 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
                     "produced_end": generated_idx,
                     "generation": current_generation,
                     "visible": current_visible,
+                    "frame_metadata": [output_metadata.popleft() for _ in out_frames],
                 }
 
                 motion_q.put(item)
@@ -1154,14 +1168,16 @@ def render_worker(args, anchor_q, motion_q, frame_q):
         # Keep turn metadata all the way to the MSE engine so stale idle/answer
         # frames can be discarded without guessing from queue order.
         for frame_offset, f in enumerate(video_np):
+            frame_metadata = item.get("frame_metadata")
+            meta = frame_metadata[frame_offset] if frame_metadata is not None else item
             put_drop_old(
                 frame_q,
                 {
                     "frame": f,
-                    "generation": generation,
-                    "visible": bool(item.get("visible", False)),
-                    "mode": mode,
-                    "turn_id": turn_id,
+                    "generation": int(meta.get("generation", generation)),
+                    "visible": bool(meta.get("visible", False)),
+                    "mode": str(meta.get("mode", mode)),
+                    "turn_id": int(meta.get("turn_id", turn_id)),
                     "frame_idx": produced_start + frame_offset,
                 },
             )

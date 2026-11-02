@@ -1704,7 +1704,7 @@ class RealtimeMSEEngine:
         seg_samples_hint = seg_frames_hint * 640
         idle_high_water_floor = hop_samples_hint + (
             seg_samples_hint - math.gcd(hop_samples_hint, seg_samples_hint)
-        )
+        ) + (1 + max(0, int(args.feature_lag_frames))) * 640
         requested_idle_high_water = int(
             float(os.getenv("ENGINE_IDLE_INFLIGHT_HIGH_WATER_SEC", "0.32")) * 16000
         )
@@ -2631,6 +2631,7 @@ class RealtimeMSEEngine:
         audio_buf = np.zeros(0, dtype=np.float32)
         audio_frame_meta_buf = []
         frames_buf = []
+        frames_meta_buf = []
         next_feed_time = time.time()
         seg_idx = 0
         idle_segments_sent = 0
@@ -2667,6 +2668,7 @@ class RealtimeMSEEngine:
 
             if self._tts_reset_requested.is_set():
                 self._tts_reset_requested.clear()
+                frames_meta_buf.clear()
                 (
                     audio_buf,
                     audio_frame_meta_buf,
@@ -3011,6 +3013,8 @@ class RealtimeMSEEngine:
                         self.latest_visible_frame_seq += 1
                         self.latest_visible_frame_at = time.monotonic()
                         got_frames.append(frame)
+                        frames_meta_buf.append({"generation": frame_generation,
+                                                "turn_id": frame_turn_id, "mode": frame_mode})
                         if frame_mode.startswith("ASSISTANT"):
                             self._capture_assistant_frame(
                                 frame_generation,
@@ -3036,6 +3040,7 @@ class RealtimeMSEEngine:
                 dropped_frames = len(frames_buf)
                 dropped_audio = len(audio_buf)
                 frames_buf.clear()
+                frames_meta_buf.clear()
                 audio_buf = np.zeros(0, dtype=np.float32)
                 audio_frame_meta_buf.clear()
                 for client in list(self.media_clients):
@@ -3051,7 +3056,14 @@ class RealtimeMSEEngine:
                 seg_f = np.stack(frames_buf[:seg_frames], axis=0).astype(np.uint8, copy=False)
                 seg_a = audio_buf[:seg_samples].astype(np.float32, copy=False)
                 seg_meta = list(audio_frame_meta_buf[:seg_frames])
+                video_meta = frames_meta_buf[:seg_frames]
+                mismatches = sum(a != v for a, v in zip(seg_meta, video_meta))
+                trace("av_pair", frames=seg_frames, mismatches=mismatches,
+                      turn=seg_meta[0]["turn_id"] if seg_meta else -1)
+                if mismatches:
+                    self.log(f"[AV ALIGN ERROR] segment={seg_idx} mismatched_frames={mismatches}")
                 del frames_buf[:seg_frames]
+                del frames_meta_buf[:seg_frames]
                 audio_buf = audio_buf[seg_samples:]
                 del audio_frame_meta_buf[:seg_frames]
 
@@ -3285,6 +3297,7 @@ async def mic_ws(request: web.Request):
 
     instruction = "请用自然口语直接回答，默认一到三句；只有我明确要求时才详细展开。"
     live: Any = shared_live
+    conversation_configured = False
 
     async def ensure_live_session():
         nonlocal live
@@ -3354,7 +3367,19 @@ async def mic_ws(request: web.Request):
                 typ = obj.get("type")
                 if typ == "config":
                     instruction = obj.get("instruction") or instruction
-                    await ensure_live_session()
+                    async with input_lock:
+                        if request.app.get("active_mic_ws") is not ws:
+                            break
+                        await ensure_live_session()
+                        if backend_name == "pipecat" and not conversation_configured:
+                            conversation_id = str(obj.get("conversation_id") or uuid.uuid4())[:128]
+                            previous_id = request.app.get("conversation_id")
+                            if previous_id is not None and previous_id != conversation_id:
+                                live = await live.fresh_conversation()
+                                request.app["dialog_session"] = live
+                                engine.log("[MIC] new conversation; old pipeline state cleared")
+                            request.app["conversation_id"] = conversation_id
+                            conversation_configured = True
                     await ws.send_str(json.dumps({
                         "type": "ok",
                         "message": f"{backend_name} session running",
@@ -3376,6 +3401,8 @@ async def mic_ws(request: web.Request):
                 async with input_lock:
                     if request.app.get("active_mic_ws") is not ws:
                         break
+                    if backend_name == "pipecat" and not conversation_configured:
+                        raise RuntimeError("Microphone config required before audio")
                     engine.enqueue_user_audio(msg.data)
                     live = await ensure_live_session()
                     sent = await live.send_audio(msg.data)

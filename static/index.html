@@ -1185,6 +1185,15 @@ function connectMedia() {
   return ws;
 }
 
+// One tab owns one conversation across network reconnects and reloads.
+const conversationId = (() => {
+  try {
+    let id = sessionStorage.getItem('openva-conversation-id');
+    if (!id) { id = crypto.randomUUID(); sessionStorage.setItem('openva-conversation-id', id); }
+    return id;
+  } catch { return crypto.randomUUID(); }
+})();
+
 function connectMicWS(generation) {
   if (micWs && (micWs.readyState === WebSocket.OPEN || micWs.readyState === WebSocket.CONNECTING)) return micWs;
   const ws = new WebSocket(wsUrl('/ws/mic'));
@@ -1193,7 +1202,7 @@ function connectMicWS(generation) {
   ws.onopen = () => {
     if (micWs !== ws || generation !== micLifecycleGeneration) return;
     log('mic ws connected');
-    ws.send(JSON.stringify({ type: 'config', instruction: instructionEl.value || '' }));
+    ws.send(JSON.stringify({ type: 'config', conversation_id: conversationId, instruction: instructionEl.value || '' }));
   };
   ws.onclose = () => {
     if (micWs !== ws) return;
