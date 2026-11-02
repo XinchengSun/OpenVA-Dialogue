@@ -151,6 +151,10 @@
     <button id="interruptBtn" class="danger">打断回复</button>
   </div>
   <p id="startupError" class="startupError" role="alert" hidden></p>
+  <p id="micInfo" class="subtitle" hidden>
+    <meter id="micLevel" min="0" max="1" value="0" aria-label="麦克风输入音量"></meter>
+    <span id="micLevelText">麦克风未连接</span>
+  </p>
   <noscript><p class="startupError">浏览器未启用 JavaScript，无法启动对话。请在 Edge 或 Chrome 中打开测试链接。</p></noscript>
   <details>
     <summary>对话设置</summary>
@@ -180,6 +184,7 @@ const startupErrorEl = document.getElementById('startupError');
 
 let mediaWs = null, logWs = null, micWs = null, currentMime = null;
 let audioCtx = null, processor = null, micStream = null, zeroGain = null;
+let micLevelUpdatedAt = 0;
 let appStarted = false, startInProgress = false, liveVisible = false;
 let micPending16 = new Float32Array(0);
 let micResampleSourceRate = 0;
@@ -1294,7 +1299,7 @@ async function startMic(generation) {
     await waitForMicOpen(ws, generation);
     setStatus('请允许浏览器使用麦克风…');
     nextStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       video: false,
     });
     await resumed;
@@ -1302,21 +1307,41 @@ async function startMic(generation) {
       throw new Error('mic start cancelled');
     }
     const src = nextAudioCtx.createMediaStreamSource(nextStream);
-    nextProcessor = nextAudioCtx.createScriptProcessor(2048, 1, 1);
+    await nextAudioCtx.audioWorklet.addModule(new URL('static/mic-capture.js?v=20261102', document.baseURI));
+    if (generation !== micLifecycleGeneration || micWs !== ws) {
+      throw new Error('mic start cancelled');
+    }
+    nextProcessor = new AudioWorkletNode(nextAudioCtx, 'openva-mic-capture');
     src.connect(nextProcessor);
     nextZeroGain = nextAudioCtx.createGain();
     nextZeroGain.gain.value = 0;
     nextProcessor.connect(nextZeroGain);
     nextZeroGain.connect(nextAudioCtx.destination);
-    nextProcessor.onaudioprocess = e => {
+    const trackName = nextStream.getAudioTracks()[0]?.label || '麦克风';
+    document.getElementById('micInfo').hidden = false;
+    nextProcessor.port.onmessage = e => {
       if (
         generation !== micLifecycleGeneration
         || micWs !== ws
         || ws.readyState !== WebSocket.OPEN
       ) return;
-      const input = e.inputBuffer.getChannelData(0);
+      const input = new Float32Array(e.data);
       const x16 = downsampleTo16k(input, nextAudioCtx.sampleRate);
       sendMic16k(x16);
+      const now = performance.now();
+      if (now - micLevelUpdatedAt >= 100) {
+        micLevelUpdatedAt = now;
+        let energy = 0;
+        for (const sample of input) energy += sample * sample;
+        const db = 20 * Math.log10(Math.max(1e-6, Math.sqrt(energy / input.length)));
+        document.getElementById('micLevel').value = Math.max(0, Math.min(1, (db + 60) / 60));
+        document.getElementById('micLevelText').textContent = `${trackName} · 输入 ${db.toFixed(0)} dB`;
+      }
+    };
+    nextProcessor.onprocessorerror = () => {
+      log('microphone audio processor failed');
+      stopMic();
+      showStartupError(new Error('麦克风采集已停止，请重新开始对话。'));
     };
     audioCtx = nextAudioCtx;
     micStream = nextStream;
@@ -1324,7 +1349,7 @@ async function startMic(generation) {
     zeroGain = nextZeroGain;
     setStatus('running: speak directly');
     ensureIdlePlaying();
-    log(`mic started continuous browser_sr=${audioCtx.sampleRate}`);
+    log(`mic started continuous browser_sr=${audioCtx.sampleRate} capture=AudioWorklet device=${trackName}`);
   } catch (e) {
     if (nextProcessor) nextProcessor.disconnect();
     if (nextZeroGain) nextZeroGain.disconnect();
@@ -1341,7 +1366,9 @@ function stopMic() {
   micLifecycleGeneration += 1;
   startInProgress = false;
   if (processor) {
-    processor.onaudioprocess = null;
+    processor.port.onmessage = null;
+    processor.port.close();
+    processor.onprocessorerror = null;
     processor.disconnect();
     processor = null;
   }
@@ -1356,6 +1383,8 @@ function stopMic() {
     oldAudioCtx.close().catch(() => {});
   }
   resetMicPending16();
+  document.getElementById('micLevel').value = 0;
+  document.getElementById('micLevelText').textContent = '麦克风未连接';
   const oldMicWs = micWs;
   micWs = null;
   if (oldMicWs && oldMicWs.readyState < WebSocket.CLOSING) oldMicWs.close();

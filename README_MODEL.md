@@ -1,3 +1,5 @@
+> 最新验证：[2026-11-02 多轮和麦克风修复验收](docs/microphone_20261102.md)；FUME已停止，同一145秒多轮样本未记录到播放缓冲。以下旧验收按其日期和条件解读。
+
 # OpenVA-Dialogue：模型、推理与优化说明
 
 <!-- OPENVA_RESTORED_FUNCTIONAL_20261102 -->

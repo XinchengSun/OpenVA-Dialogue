@@ -30,19 +30,25 @@ function harness() {
     close() { this.readyState = 3; this.onclose?.(); }
   }
   class AudioContext {
-    constructor() { this.state = "running"; this.sampleRate = 48000; }
+    constructor() { this.state = "running"; this.sampleRate = 48000; this.audioWorklet = {addModule: async () => {}}; }
+    resume() { return Promise.resolve(); }
     createMediaStreamSource() { return {connect() {}}; }
     createScriptProcessor() { return {connect() {}, disconnect() {}}; }
     createGain() { return {gain: {value: 1}, connect() {}, disconnect() {}}; }
     close() { this.state = "closed"; return Promise.resolve(); }
   }
   const context = vm.createContext({
-    document: {getElementById: element, createTextNode: value => value},
-    WebSocket: Socket, window: {AudioContext},
+    document: {getElementById: element, createTextNode: value => value,
+      baseURI: 'http://localhost/', querySelector: () => ({open: false})},
+    WebSocket: Socket, window: {AudioContext, MediaSource: class {}},
+    AudioWorkletNode: class {
+      constructor() { this.port = {onmessage: null, close() {}}; }
+      connect() {} disconnect() {}
+    },
     navigator: {mediaDevices: {getUserMedia: async () => {
       const track = {stopped: false, stop() { this.stopped = true; }};
       tracks.push(track);
-      return {getTracks: () => [track]};
+      return {getTracks: () => [track], getAudioTracks: () => [track]};
     }}},
     location: {protocol: "http:", host: "localhost", href: "http://localhost/"},
     URL: class extends URL { static revokeObjectURL() {} }, setInterval() {}, setTimeout, clearTimeout,
