@@ -304,7 +304,14 @@ function ensureIdlePlaying() {
   // liveActive DyStream slot remains visible through listen/speak transitions.
 }
 
+function requireServicePage() {
+  if (location.protocol !== 'http:' && location.protocol !== 'https:') {
+    throw new Error('当前打开的是本地页面文件，无法连接对话服务。请通过 OpenVA 的 http:// 或 https:// 服务网址打开，不要直接双击 HTML 文件。');
+  }
+}
+
 function wsUrl(path) {
+  requireServicePage();
   const url = new URL(path.replace(/^\/+/, ''), new URL('.', location.href));
   url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   return url.href;
@@ -1457,6 +1464,7 @@ startBtn.onclick = async () => {
   startupErrorEl.hidden = true;
   setStatus('正在连接画面…');
   try {
+    requireServicePage();
     if (!window.MediaSource) throw new Error('当前浏览器不支持视频流，请在系统 Edge 或 Chrome 中打开。');
     if (!navigator.mediaDevices?.getUserMedia) throw new Error('当前页面无法使用麦克风，请在系统 Edge 或 Chrome 中打开 HTTPS 测试链接。');
     ensureIdlePlaying();
@@ -1519,6 +1527,13 @@ setInterval(() => {
 ensureIdlePlaying();
 setStatus('等待开始');
 log('client boot: startup diagnostics 20261102');
+try {
+  requireServicePage();
+} catch (error) {
+  showStartupError(error);
+  startBtn.disabled = true;
+  startBtn.textContent = '请从服务网址打开';
+}
 </script>
 </body>
 </html>
