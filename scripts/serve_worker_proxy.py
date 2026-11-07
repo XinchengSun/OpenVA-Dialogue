@@ -61,7 +61,9 @@ def create_app(upstream, availability_file=None):
                 worker = await session.ws_connect(url, max_msg_size=0, heartbeat=30)
             except (ClientError, OSError, asyncio.TimeoutError, ValueError):
                 return unavailable(request, 'worker_unreachable', '无法连接 GPU 后端，尚未建立媒体连接。')
-            client = web.WebSocketResponse(max_msg_size=0, heartbeat=30)
+            # /ws/media carries H.264/AAC fragments already encoded by FFmpeg.
+            client = web.WebSocketResponse(max_msg_size=0, heartbeat=30,
+                                           compress=request.path != '/ws/media')
             await client.prepare(request)
 
             async def pump(source, target):

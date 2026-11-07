@@ -28,10 +28,15 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
+assigned_gpu_mask="${CUDA_VISIBLE_DEVICES:-}"
 set -a
 # shellcheck disable=SC1090
 . "$ENV_FILE"
 set +a
+if [[ "$assigned_gpu_mask" == GPU-* && "$assigned_gpu_mask" != *,* && "${CUDA_VISIBLE_DEVICES:-}" != "$assigned_gpu_mask" ]]; then
+  echo "environment file overrides the assigned GPU UUID" >&2
+  exit 1
+fi
 
 if [[ -z "${PIPECAT_S2S_API_KEY:-${DASHSCOPE_API_KEY:-${PIPECAT_LLM_API_KEY:-${OPENAI_API_KEY:-}}}}" ]]; then
   echo "missing PIPECAT_S2S_API_KEY (or reusable DashScope/LLM key) in $ENV_FILE" >&2
@@ -49,8 +54,9 @@ if [[ "$ALLOW_SHARED_DYSTREAM_GPU" != "0" && "$ALLOW_SHARED_DYSTREAM_GPU" != "1"
   exit 1
 fi
 if [[ -n "$SINGLE_GPU" ]]; then
-  if [[ ! "$SINGLE_GPU" =~ ^(0|[1-9][0-9]*)$ || "$VISIBLE_GPUS" != "$SINGLE_GPU" ]]; then
-    echo "DYSTREAM_SINGLE_GPU requires exactly its one physical numeric GPU in CUDA_VISIBLE_DEVICES" >&2
+  uuid_pattern='^GPU-[[:xdigit:]]{8}(-[[:xdigit:]]{4}){3}-[[:xdigit:]]{12}$'
+  if [[ "$VISIBLE_GPUS" != "$SINGLE_GPU" || ( ! "$SINGLE_GPU" =~ ^(0|[1-9][0-9]*)$ && ! "$SINGLE_GPU" =~ $uuid_pattern ) ]]; then
+    echo "DYSTREAM_SINGLE_GPU requires the same physical index or full GPU UUID in CUDA_VISIBLE_DEVICES" >&2
     exit 1
   fi
   if [[ "$MOTION_LOGICAL_GPU,$RENDER_LOGICAL_GPU,$ALLOW_SHARED_DYSTREAM_GPU" != "0,0,1" ]]; then
