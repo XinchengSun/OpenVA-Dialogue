@@ -142,9 +142,25 @@ class ReplySentenceLimitTests(unittest.IsolatedAsyncioTestCase):
     def test_first_clause_keeps_an_already_complete_sentence_together(self):
         self.assertEqual(_first_clause_end("每天傍晚我都会独自沿着河堤散步，听流水讲故事。", 12), 0)
 
+    async def test_comma_and_semicolon_in_successive_streamed_sentences(self):
+        first = "每天傍晚我都会独自沿着河堤散步"
+        second = "山上最后一层薄雾已经慢慢散去"
+        for comma, semicolon, space in (("，", "；", ""), (",", ";", " ")):
+            pieces = [first, comma + space, "听流水", "讲故事。", second, semicolon + space,
+                      "我们就", "会看到小屋"]
+            stream = FakeStream([*(completion_chunk(piece) for piece in pieces),
+                                 completion_chunk(finish_reason="stop")])
+            service, _ = make_service(streams=[stream], max_sentences=2, first_clause_min_chars=12)
+            await service._process_context(LLMContext())
+            self.assertEqual(emitted_texts(service), [
+                first + comma, space + "听流水讲故事。",
+                second + semicolon, space + "我们就会看到小屋",
+            ])
+
     def test_first_clause_ignores_short_phrases_numbers_and_non_chinese(self):
         for text in ("好呀，我来讲个故事。", "今天天气晴朗适合带着孩子出去玩，好。",
                      "今年报名的总人数已经超过12,345人",
+                     "“等到山上最后一层薄雾慢慢散去；我们就能看见",
                      "a long sentence in English, with another clause"):
             self.assertEqual(_first_clause_end(text, 12), 0)
 

@@ -44,6 +44,7 @@ class _ReplyStreamState:
     sentences_emitted: int = 0
     finish_reason: str | None = None
     visible_text_emitted: bool = False
+    clause_sent_in_sentence: bool = False
     limit_reached: bool = False
     trace_id: int = 0
     first_content_seen: bool = False
@@ -107,6 +108,9 @@ def _split_complete_sentences(text: str, *, final: bool) -> tuple[list[str], str
 
 def _first_clause_end(text: str, minimum: int) -> int:
     """Find a Mandarin phrase break only when both sides have enough speech."""
+    # Keep dependent openings with their main clause so TTS has its context.
+    if text.lstrip(" \t\n“‘「『").startswith(("等到", "如果", "假如", "虽然", "因为", "只要", "只有", "除非", "即使")):
+        return 0
     han = 0
     for index, char in enumerate(text):
         if "一" <= char <= "鿿":
@@ -116,7 +120,7 @@ def _first_clause_end(text: str, minimum: int) -> int:
         elif char in "，；,;" and han >= minimum:
             if text[index - 1].isdigit() and text[index + 1:index + 2].isdigit():
                 continue
-            following = text[index + 1:]
+            following = text[index + 1:].lstrip(" \t")
             # Wait for three more Han characters. Keep short suffixes and
             # punctuation/quotation runs with the original sentence.
             if any(_terminator_width(following, i) for i in range(len(following))):
@@ -277,6 +281,7 @@ class RecoveringOpenAILLMService(OpenAILLMService):
                 return True
             await self._emit_visible_text(state, sentence)
             state.sentences_emitted += 1
+            state.clause_sent_in_sentence = False
             if self._reply_max_sentences and state.sentences_emitted >= self._reply_max_sentences:
                 state.buffer = ""
                 state.limit_reached = True
@@ -301,12 +306,13 @@ class RecoveringOpenAILLMService(OpenAILLMService):
               **text_fields(text))
         if await self._emit_complete_sentences(state, final=False):
             raise _ReplyLimitReached
-        if self._first_clause_min_chars and not state.visible_text_emitted:
+        if self._first_clause_min_chars and not state.clause_sent_in_sentence:
             end = _first_clause_end(state.buffer, self._first_clause_min_chars)
             if end:
                 first, state.buffer = state.buffer[:end], state.buffer[end:]
                 # Only a completed sentence consumes the reply sentence budget.
                 await self._emit_visible_text(state, first, first_clause=True)
+                state.clause_sent_in_sentence = True
 
     async def _finalize_reply(self, state: _ReplyStreamState) -> None:
         reached_limit = await self._emit_complete_sentences(state, final=True)
