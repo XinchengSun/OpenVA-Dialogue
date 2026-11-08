@@ -194,6 +194,7 @@ let mseGeneration = 0;
 let mediaWsGeneration = 0;
 let logWsGeneration = 0;
 let micLifecycleGeneration = 0;
+let recoveringGeneration = null;
 let activeSlot = null;
 let ingestSlot = null;
 let liveAudioHeld = true;
@@ -1140,16 +1141,19 @@ function connectMedia() {
   ws.onclose = () => {
     if (mediaWs !== ws || generation !== mediaWsGeneration) return;
     mediaWs = null;
-    stopMic();
     resetAssistantAudioGate('media websocket closed');
     log('media ws closed');
-    setStatus('media closed');
     teardownMSE();
+    if (appStarted) restoreConversationConnection();
+    else {
+      stopMic();
+      setStatus('media closed');
+    }
   };
   ws.onerror = () => {
     if (mediaWs !== ws || generation !== mediaWsGeneration) return;
     log('media ws error');
-    showStartupError(new Error('画面连接失败，请重新打开测试链接后重试。'));
+    if (!appStarted) showStartupError(new Error('画面连接失败，请重新打开测试链接后重试。'));
   };
   ws.onmessage = ev => {
     if (mediaWs !== ws || generation !== mediaWsGeneration) return;
@@ -1211,12 +1215,28 @@ function connectMicWS(generation) {
     log('mic ws connected');
     ws.send(JSON.stringify({ type: 'config', conversation_id: conversationId, instruction: instructionEl.value || '' }));
   };
-  ws.onclose = () => {
+  ws.onclose = event => {
     if (micWs !== ws) return;
     micWs = null;
     resetMicPending16();
     if (generation !== micLifecycleGeneration) return;
     log('mic ws closed');
+    if (!appStarted) return;
+    if (event.code === 4001) {
+      stopMic();
+      setStatus('另一页面已接管麦克风');
+    } else if (event.code !== 1000 || !mediaWs || recoveringGeneration === generation) {
+      restoreConversationConnection();
+    } else {
+      // A gateway can normalize an ownership close to 1000. Reclaim the
+      // microphone only when a simultaneous media disconnect confirms the outage.
+      setTimeout(() => {
+        if (generation === micLifecycleGeneration && appStarted && !micWs && recoveringGeneration !== generation) {
+          stopMic();
+          setStatus('麦克风连接已结束，可重新开始对话');
+        }
+      }, 1200);
+    }
   };
   ws.onerror = () => {
     if (micWs !== ws || generation !== micLifecycleGeneration) return;
@@ -1227,6 +1247,32 @@ function connectMicWS(generation) {
     log('mic ws: ' + ev.data);
   };
   return ws;
+}
+
+async function restoreConversationConnection() {
+  const generation = micLifecycleGeneration;
+  if (!appStarted || recoveringGeneration === generation) return;
+  recoveringGeneration = generation;
+  setStatus('连接中断，正在恢复…');
+  try {
+    for (let attempt = 0; attempt < 12; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, Math.min(250 * (attempt + 1), 1500)));
+      if (!appStarted || generation !== micLifecycleGeneration) return;
+      connectLogs();
+      const media = connectMedia();
+      if (media.readyState !== WebSocket.OPEN) continue;
+      const mic = connectMicWS(generation);
+      if (mic.readyState === WebSocket.OPEN && activeSlot?.activated) {
+        log('conversation reconnected');
+        if (!visibleAssistantTurn) setStatus('listening');
+        return;
+      }
+    }
+    stopMic();
+    showStartupError(new Error('连接恢复超时，请点击开始对话重试。'));
+  } finally {
+    if (recoveringGeneration === generation) recoveringGeneration = null;
+  }
 }
 
 function floatToPcm16LE(x) {
@@ -1372,8 +1418,7 @@ async function startMic(generation) {
     nextProcessor.port.onmessage = e => {
       if (
         generation !== micLifecycleGeneration
-        || micWs !== ws
-        || ws.readyState !== WebSocket.OPEN
+        || micWs?.readyState !== WebSocket.OPEN
       ) return;
       const input = new Float32Array(e.data);
       const x16 = downsampleTo16k(input, nextAudioCtx.sampleRate);
@@ -1439,6 +1484,13 @@ function stopMic() {
   micWs = null;
   if (oldMicWs && oldMicWs.readyState < WebSocket.CLOSING) oldMicWs.close();
   appStarted = false;
+  const oldMedia = mediaWs, oldLogs = logWs;
+  mediaWs = null;
+  logWs = null;
+  for (const socket of [oldMedia, oldLogs]) {
+    if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
+  }
+  teardownMSE();
   holdLiveAudio('mic stopped');
   startBtn.disabled = false;
   startBtn.textContent = '开始对话';

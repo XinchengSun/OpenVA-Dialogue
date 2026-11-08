@@ -27,7 +27,7 @@ function harness() {
     static OPEN = 1; static CONNECTING = 0; static CLOSING = 2; static CLOSED = 3;
     constructor(url) { this.url = url; this.readyState = 1; sockets.push(this); }
     send() {}
-    close() { this.readyState = 3; this.onclose?.(); }
+    close(code = 1000) { this.readyState = 3; this.onclose?.({code}); }
   }
   class AudioContext {
     constructor() { this.state = "running"; this.sampleRate = 48000; this.audioWorklet = {addModule: async () => {}}; }
@@ -52,7 +52,7 @@ function harness() {
     }}},
     location: {protocol: "http:", host: "localhost", href: "http://localhost/"},
     URL: class extends URL { static revokeObjectURL() {} }, setInterval() {}, setTimeout, clearTimeout,
-    performance, console,
+    performance, console, crypto: require("node:crypto").webcrypto,
   });
   vm.runInContext(script, context);
   const run = source => vm.runInContext(source, context);
@@ -150,19 +150,42 @@ async function main() {
     assert.equal(h.tracks[0].stopped, true);
     assert.equal(h.elements.get("startBtn").disabled, false);
   }
-  // Server-initiated closure must not leave an invisible live microphone.
+  // A broken transport can recover using the current microphone capture.
   {
     const h = harness();
     await h.run("startBtn.onclick()");
-    h.run("mediaWs.close()");
-    assert.equal(h.run("appStarted"), false);
-    assert.equal(h.run("micWs"), null);
-    assert.equal(h.run("liveAudioHeld"), true);
-    assert.equal(h.tracks[0].stopped, true);
-    assert.equal(h.elements.get("startBtn").disabled, false);
-    await h.run("startBtn.onclick()");
+    const oldMic = h.run("micWs");
+    h.run("mediaWs.close(4100); micWs.close(4100)");
+    const replacement = h.setSlot(null);
+    replacement.activated = true;
+    await new Promise(resolve => setTimeout(resolve, 400));
+    assert.equal(h.run("recoveringGeneration"), null);
     assert.equal(h.run("appStarted"), true);
+    assert.notEqual(h.run("micWs"), oldMic);
+    assert.equal(h.tracks.length, 1);
+    assert.equal(h.tracks[0].stopped, false);
+    h.run("stopBtn.onclick()");
   }
-  console.log("media stream state: 6 full-script scenarios passed");
+  // Ending the call takes precedence over an outstanding reconnect.
+  {
+    const h = harness();
+    await h.run("startBtn.onclick()");
+    h.run("mediaWs.close(4100); stopBtn.onclick()");
+    const count = h.sockets.length;
+    await new Promise(resolve => setTimeout(resolve, 400));
+    assert.equal(h.sockets.length, count);
+    assert.equal(h.run("appStarted"), false);
+    assert.equal(h.tracks[0].stopped, true);
+  }
+  // A different tab taking ownership must not start a reconnect race.
+  {
+    const h = harness();
+    await h.run("startBtn.onclick()");
+    h.run("micWs.close(4001)");
+    assert.equal(h.run("appStarted"), false);
+    assert.equal(h.run("recoveringGeneration"), null);
+    assert.equal(h.tracks[0].stopped, true);
+  }
+  console.log("media buffers, transport recovery, explicit end and ownership checks passed");
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
