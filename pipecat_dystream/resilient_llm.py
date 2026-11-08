@@ -105,6 +105,27 @@ def _split_complete_sentences(text: str, *, final: bool) -> tuple[list[str], str
     return sentences, text[start:]
 
 
+def _first_clause_end(text: str, minimum: int) -> int:
+    """Find a Mandarin phrase break only when both sides have enough speech."""
+    han = 0
+    for index, char in enumerate(text):
+        if "一" <= char <= "鿿":
+            han += 1
+        elif _terminator_width(text, index):
+            break
+        elif char in "，；,;" and han >= minimum:
+            if text[index - 1].isdigit() and text[index + 1:index + 2].isdigit():
+                continue
+            following = text[index + 1:]
+            # Wait for three more Han characters. Keep short suffixes and
+            # punctuation/quotation runs with the original sentence.
+            if any(_terminator_width(following, i) for i in range(len(following))):
+                return 0
+            if len(following) >= 3 and all("一" <= c <= "鿿" for c in following[:3]):
+                return index + 1
+    return 0
+
+
 def _message_role(message: Any) -> str:
     if isinstance(message, dict):
         return str(message.get("role", ""))
@@ -168,6 +189,7 @@ class RecoveringOpenAILLMService(OpenAILLMService):
         timeout_fallback_text: str,
         history_max_messages: int = 12,
         reply_max_sentences: int = 3,
+        first_clause_min_chars: int = 0,
         hedge_model: str = "",
         hedge_delay_sec: float = 0.75,
         hedge_deadline_sec: float = 3.0,
@@ -179,6 +201,7 @@ class RecoveringOpenAILLMService(OpenAILLMService):
         super().__init__(*args, **kwargs)
         self._timeout_fallback_text = timeout_fallback_text
         self._history_max_messages = max(0, int(history_max_messages))
+        self._first_clause_min_chars = max(0, int(first_clause_min_chars))
         self._reply_max_sentences = int(reply_max_sentences)
         if self._reply_max_sentences < 0:
             raise ValueError("reply_max_sentences must be nonnegative (0 disables the limit)")
@@ -227,10 +250,13 @@ class RecoveringOpenAILLMService(OpenAILLMService):
             "last_first_content_ms": self._realtime_search_last_first_content_ms,
         }
 
-    async def _emit_visible_text(self, state: _ReplyStreamState, text: str) -> None:
+    async def _emit_visible_text(
+        self, state: _ReplyStreamState, text: str, *, first_clause: bool = False
+    ) -> None:
         if not text:
             return
-        trace("llm_sentence_released", request=state.trace_id, sentence=state.sentences_emitted, **text_fields(text))
+        stage = "llm_first_clause_released" if first_clause else "llm_sentence_released"
+        trace(stage, request=state.trace_id, sentence=state.sentences_emitted, **text_fields(text))
         await super()._push_llm_text(text)
         state.visible_text_emitted = True
 
@@ -275,6 +301,12 @@ class RecoveringOpenAILLMService(OpenAILLMService):
               **text_fields(text))
         if await self._emit_complete_sentences(state, final=False):
             raise _ReplyLimitReached
+        if self._first_clause_min_chars and not state.visible_text_emitted:
+            end = _first_clause_end(state.buffer, self._first_clause_min_chars)
+            if end:
+                first, state.buffer = state.buffer[:end], state.buffer[end:]
+                # Only a completed sentence consumes the reply sentence budget.
+                await self._emit_visible_text(state, first, first_clause=True)
 
     async def _finalize_reply(self, state: _ReplyStreamState) -> None:
         reached_limit = await self._emit_complete_sentences(state, final=True)

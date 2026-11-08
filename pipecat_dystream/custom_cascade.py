@@ -390,6 +390,7 @@ def create_custom_cascade_components(
         ),
         history_max_messages=int(os.getenv("PIPECAT_LLM_HISTORY_MAX_MESSAGES", "12")),
         reply_max_sentences=int(os.getenv("PIPECAT_LLM_MAX_SENTENCES", "0")),
+        first_clause_min_chars=int(os.getenv("PIPECAT_TTS_FIRST_CLAUSE_MIN_CHARS", "0")),
         hedge_model=os.getenv("PIPECAT_LLM_HEDGE_MODEL", "").strip(),
         hedge_delay_sec=float(os.getenv("PIPECAT_LLM_HEDGE_DELAY_SEC", "0.75")),
         hedge_deadline_sec=float(os.getenv("PIPECAT_LLM_TIMEOUT_SEC", "8.0")),

@@ -53,8 +53,8 @@ class LocalPCMTTSService(TTSService):
         self._model = model or os.getenv("PIPECAT_TTS_MODEL", "").strip() or default_model
         self._voice = voice or os.getenv("PIPECAT_TTS_VOICE", "").strip() or default_voice
         super().__init__(
-            # RecoveringOpenAILLMService already emits one complete sentence
-            # per TextFrame. Re-aggregating here makes Pipecat 1.6 wait for the
+            # RecoveringOpenAILLMService already selects each synthesis boundary
+            # (a sentence, or an optional leading clause). Re-aggregating here makes Pipecat 1.6 wait for the
             # first character of the next sentence before it confirms the
             # current boundary, adding up to hundreds of milliseconds.
             text_aggregation_mode=TextAggregationMode.TOKEN,
