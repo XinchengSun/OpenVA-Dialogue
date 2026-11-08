@@ -854,15 +854,14 @@ function handoffMSE() {
 function failMediaStream(slot, reason) {
   if (!isCurrentSlot(slot)) return;
   log(`media playback stopped: ${reason}; press Start to reconnect`);
-  stopMic();
-  resetAssistantAudioGate('media playback stopped');
-  teardownMSE();
   const failedWs = mediaWs;
   mediaWs = null;
   mediaWsGeneration += 1;
   if (failedWs && failedWs.readyState < WebSocket.CLOSING) {
     failedWs.close(4001, 'playback buffer unavailable');
   }
+  resetAssistantAudioGate('media playback stopped');
+  stopMic();
   setStatus('media stopped; press Start to reconnect');
 }
 
@@ -1131,6 +1130,7 @@ function connectMedia() {
   ws.onopen = () => {
     if (mediaWs !== ws || generation !== mediaWsGeneration) return;
     currentStreamEpoch = 0;
+    expectedStreamGeneration = -1;
     highestAssistantTurnId = -1;
     lastBoundaryEventSeq = -1;
     resetAssistantAudioGate('new media websocket');
@@ -1143,9 +1143,10 @@ function connectMedia() {
     mediaWs = null;
     resetAssistantAudioGate('media websocket closed');
     log('media ws closed');
-    teardownMSE();
-    if (appStarted) restoreConversationConnection();
-    else {
+    if (appStarted) {
+      teardownMSE();
+      restoreConversationConnection();
+    } else {
       stopMic();
       setStatus('media closed');
     }
