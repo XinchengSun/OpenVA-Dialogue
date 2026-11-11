@@ -138,7 +138,16 @@ def load_dystream_model():
     else:
         print(f"[DyStream] WARNING: Checkpoint not found at {ckpt_path}")
 
-    _dystream_model.eval().to(DEVICE)
+    _dystream_model.eval()
+    from inference_memory import MemoryRecorder, place_motion_for_inference
+    memory = MemoryRecorder("motion-load", torch, DEVICE)
+    if os.getenv("DYSTREAM_SINGLE_GPU", "").strip() and DEVICE.startswith("cuda") and _dystream_ema is None:
+        placement = place_motion_for_inference(torch, _dystream_model, DEVICE)
+        print(f"[MOTION_MEMORY] selective inference placement: {placement}", flush=True)
+    else:
+        _dystream_model.to(DEVICE)
+    if memory.enabled:
+        memory.record("model_loaded", {"motion": _dystream_model})
 
     # Noise scheduler
     _noise_scheduler = FlowMatchEulerDiscreteScheduler(
@@ -178,6 +187,11 @@ def load_visualization_model():
     checkpoint = torch.load(vis_ckpt, map_location="cpu")
     model.load_state_dict(checkpoint["state_dict"], strict=False)
     model.eval().to(DEVICE)
+    if os.getenv("DYSTREAM_CACHE_SPECTRAL_NORM", "1") == "1":
+        from inference_memory import cache_renderer_spectral_norm
+        cached = cache_renderer_spectral_norm(torch, model.face_generator)
+        print(f"[RENDER_MEMORY] spectral norm cache: {cached}", flush=True)
+    model.face_generator._release_render_intermediates = os.getenv("DYSTREAM_RELEASE_RENDER_INTERMEDIATES", "1") == "1"
 
     transform = T.Compose([
         T.Resize((512, 512)),

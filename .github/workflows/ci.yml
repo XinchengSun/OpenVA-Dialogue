@@ -33,6 +33,10 @@ jobs:
         run: python -m unittest tests.test_configure_custom_runtime tests.test_s2s_launcher_contract -v
       - name: Validate single-GPU algebra, preprocessing, and measurements
         run: python -m unittest tests.test_cfg_pruning tests.test_single_gpu_face_detector tests.test_benchmark_single_gpu -v
+      - name: Validate benchmark provenance and LLM backpressure
+        run: |
+          python -m pip install 'openai==2.35.1' 'httpx==0.28.1'
+          python -m unittest tests.test_benchmark_provenance tests.test_llm_backpressure tests.test_latency_trace -v
       - name: Validate single-GPU launch and bridge ownership
         timeout-minutes: 5
         run: |
@@ -46,6 +50,19 @@ jobs:
           python -m pip install 'aiohttp==3.13.2' 'Pillow==12.0.0'
       - name: Validate Fish portrait and voice customization
         run: python -m unittest tests.test_customization_runtime -v
+      - name: Validate media queues and disconnected clients
+        run: python -m unittest tests.test_media_backpressure tests.test_media_socket_integration -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Validate browser media buffering and microphone resampling
+        run: |
+          node tests/test_media_buffer_bounds.js
+          node tests/test_mic_resampler.js
+          node tests/test_ws_proxy_path.js
+          node tests/test_listener_playout_clock.js
+      - name: Validate browser startup and native playback cadence
+        run: python -m unittest tests.test_browser_startup tests.test_browser_speech_playback tests.test_feed_cadence tests.test_conversation_ownership -v
       - name: Validate Fish lifecycle ownership
         run: bash tests/test_fish_s2pro_lifecycle.sh
       - name: Validate release CLI
@@ -77,7 +94,22 @@ jobs:
           python-version: "3.11"
       - name: Install CPU-only inference test dependencies
         run: |
-          python -m pip install 'torch==2.8.0' --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install 'numpy==1.26.4' 'torch_ema==0.3'
+          python -m pip install 'torch==2.8.0' 'torchvision==0.23.0' --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install 'numpy==1.26.4' 'torch_ema==0.3' 'timm==1.0.24' 'diffusers==0.36.0'
+          python -m pip install 'pipecat-ai==1.6.0' 'openai==2.35.1' 'httpx==0.28.1'
       - name: Validate EMA folding and bounded audio history
         run: python -m unittest tests.test_inference_ema tests.test_motion_audio_history -v
+      - name: Validate streaming TTS backpressure and resource ownership
+        run: python -m unittest tests.test_official_voxcpm2_backend tests.test_voxcpm2_infra tests.test_voxcpm2_tts tests.test_custom_e2e_probe -v
+      - name: Validate clause streaming and streaming ASR
+        run: python -m unittest tests.test_resilient_llm tests.test_funasr_streaming -v
+      - name: Validate inference reuse and byte-preserving media packing
+        run: python -m unittest tests.test_render_constant_cache tests.test_diffusion_condition_reuse tests.test_motion_timestep_batch tests.test_media_copy_performance tests.test_render_stride_and_d2h -v
+      - name: Validate startup-only reference encoder offload
+        run: python -m unittest tests.test_reference_encoder_offload -v
+      - name: Validate inference memory ownership and unchanged arithmetic
+        run: python -m unittest tests.test_motion_memory tests.test_spade_memory tests.test_tts_memory -v
+      - name: Validate renderer reuse and strict judge negative controls
+        run: python -m unittest tests.test_spectral_norm_cache tests.test_renderer_memory_integration tests.test_renderer_reuse_judge -v
+      - name: Validate CPU text lookup and suspended-generator memory accounting
+        run: python -m unittest tests.test_text_embedding_offload tests.test_text_embedding_judge tests.test_generator_memory_inventory -v

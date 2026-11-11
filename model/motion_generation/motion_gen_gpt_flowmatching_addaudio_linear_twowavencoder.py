@@ -141,18 +141,21 @@ class CUDAGraphGPTRunner:
 class CUDAGraphDiffusionHeadSingleStep:
     """
     CUDA Graph runner for one DiffusionHead forward step.
-    It only captures diffusion_head(noisy, gpt, temb).
+    Optionally project the frame's fixed GPT condition once before step replay.
     Scheduler step is intentionally kept outside the graph.
     """
-    def __init__(self, diffusion_head, batch_size=5, face_dim=512, hidden_size=768, device="cuda", time_embedding_batch_size=1):
+    def __init__(self, diffusion_head, batch_size=5, face_dim=512, hidden_size=768, device="cuda", time_embedding_batch_size=1, precompute_condition=False):
         self.diffusion_head = diffusion_head
         self.batch_size = batch_size
         self.face_dim = face_dim
         self.hidden_size = hidden_size
         self.device = device
         self.time_embedding_batch_size = time_embedding_batch_size
+        self.precompute_condition = precompute_condition
 
         self.graph = None
+        self.condition_graph = None
+        self.static_condition = None
         self.static_noisy = None
         self.static_gpt = None
         self.static_temb = None
@@ -169,7 +172,18 @@ class CUDAGraphDiffusionHeadSingleStep:
 
         for _ in range(3):
             _ = self.diffusion_head(self.static_noisy, self.static_gpt, temb=self.static_temb)
+            if self.precompute_condition:
+                condition = self.diffusion_head.prepare_gpt_condition(self.static_gpt)
+                _ = self.diffusion_head(
+                    self.static_noisy, None, temb=self.static_temb,
+                    gpt_condition=condition,
+                )
         torch.cuda.synchronize()
+
+        if self.precompute_condition:
+            self.condition_graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(self.condition_graph):
+                self.static_condition = self.diffusion_head.prepare_gpt_condition(self.static_gpt)
 
         self.graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self.graph):
@@ -177,13 +191,23 @@ class CUDAGraphDiffusionHeadSingleStep:
                 self.static_noisy,
                 self.static_gpt,
                 temb=self.static_temb,
+                gpt_condition=self.static_condition,
             )
 
         print("[CUDA Graph] DiffusionHead single-step graph captured")
 
-    def forward(self, noisy_input, gpt_output, temb):
-        self.static_noisy.copy_(noisy_input)
+    def prepare_gpt_condition(self, gpt_output):
+        """Refresh for every frame; no condition is reused across frames."""
         self.static_gpt.copy_(gpt_output)
+        self.condition_graph.replay()
+
+    def forward(self, noisy_input, gpt_output, temb, reuse_gpt_condition=False):
+        self.static_noisy.copy_(noisy_input)
+        if self.precompute_condition:
+            if not reuse_gpt_condition:
+                self.prepare_gpt_condition(gpt_output)
+        else:
+            self.static_gpt.copy_(gpt_output)
         self.static_temb.copy_(temb)
 
         self.graph.replay()
@@ -453,9 +477,11 @@ class DiffusionBlock(nn.Module):
             nn.Linear(hidden_size, 3 * hidden_size, bias=True),
         )
 
-    def forward(self, hidden_states, gpt_hidden, temb=None):
+    def forward(self, hidden_states, gpt_hidden, temb=None, gpt_modulation=None):
         shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation1(temb).chunk(3, dim=-1)
-        shift_mlp2, scale_mlp2, gate_mlp2 = self.adaLN_modulation2(gpt_hidden).chunk(3, dim=-1)
+        if gpt_modulation is None:
+            gpt_modulation = self.adaLN_modulation2(gpt_hidden)
+        shift_mlp2, scale_mlp2, gate_mlp2 = gpt_modulation.chunk(3, dim=-1)
 
         norm_hidden_states = (self.norm1(hidden_states.float()) * (1 + scale_mlp) + shift_mlp).type_as(hidden_states)
         ff_output = self.mlp1(norm_hidden_states)
@@ -501,14 +527,21 @@ class DiffusionHead(nn.Module):
         self.output_norm = nn.LayerNorm(hidden_size)
         self.output_proj = nn.Linear(hidden_size, face_dim)
 
-    def forward(self, noisy_face_latent, gpt_output, temb=None):
+    def prepare_gpt_condition(self, gpt_output):
+        # These projections depend only on the current frame's GPT output,
+        # never on the evolving noisy latent or the Euler timestep.
+        gpt_hidden = self.gpt_proj(gpt_output)
+        return tuple(block.adaLN_modulation2(gpt_hidden) for block in self.blocks)
+
+    def forward(self, noisy_face_latent, gpt_output, temb=None, gpt_condition=None):
         bs = noisy_face_latent.shape[0]
         device = noisy_face_latent.device
         noisy_hidden = self.noisy_proj(noisy_face_latent)
-        gpt_hidden = self.gpt_proj(gpt_output)
+        gpt_hidden = self.gpt_proj(gpt_output) if gpt_condition is None else None
         x = noisy_hidden
-        for block in self.blocks:
-            x = block(x, gpt_hidden, temb)
+        for index, block in enumerate(self.blocks):
+            x = block(x, gpt_hidden, temb,
+                      gpt_modulation=None if gpt_condition is None else gpt_condition[index])
         x = self.output_norm(x)
         denoised = self.output_proj(x)
         return denoised
@@ -755,7 +788,9 @@ class Audio2FaceGPT(nn.Module):
             if noise_scheduler is not None:
                 latent_t = torch.randn_like(gpt_output_t[:bs])
                 for i, timestep in enumerate(timesteps):
-                    t_batch = torch.full((bs,), timestep, device=device, dtype=torch.long)
+                    # Keep a device timestep on-device: torch.full converts a
+                    # scalar tensor fill value to a Python scalar via item().
+                    t_batch = timestep.to(device=device, dtype=torch.long).expand(bs)
                     latent_model_input = latent_t
                     time_embedding = self.time_embed(t_batch).unsqueeze(1)
                     output_batch = self.diffusion_head(
@@ -793,11 +828,12 @@ class Audio2FaceGPT(nn.Module):
         Minimal CUDA Graph setup. This does not add trainable parameters.
         """
         prune = os.getenv("DYSTREAM_PRUNE_CFG", "0") == "1"
+        precompute_condition = os.getenv("DYSTREAM_PRECOMPUTE_DIFFUSION_CONDITION", "0") == "1"
         weights = (self.cfg_audio, self.cfg_audio_other, self.cfg_anchor, self.cfg_all)
         branch_indices = _cfg_branch_plan(*weights, prune=prune)
         parameter = next(self.parameters())
         device = parameter.device
-        signature = (weights, prune, batch_size, str(device), str(parameter.dtype))
+        signature = (weights, prune, precompute_condition, batch_size, str(device), str(parameter.dtype))
         if (getattr(self, "cuda_graph_enabled", False)
                 and getattr(self, "_cuda_graph_signature", None) == signature):
             return
@@ -829,6 +865,7 @@ class Audio2FaceGPT(nn.Module):
             hidden_size=self.hidden_size,
             device=device,
             time_embedding_batch_size=1 if batch_size == 1 else graph_batch_size,
+            precompute_condition=precompute_condition,
         )
         self.cuda_graph_diffusion.warmup_and_capture()
 
@@ -930,8 +967,11 @@ class Audio2FaceGPT(nn.Module):
 
                 latent_t = torch.randn_like(gpt_output_t[:bs])
 
+                if self.cuda_graph_diffusion.precompute_condition:
+                    self.cuda_graph_diffusion.prepare_gpt_condition(gpt_output_t)
+
                 for i, timestep in enumerate(timesteps):
-                    t_batch = torch.full((bs,), timestep, device=device, dtype=torch.long)
+                    t_batch = timestep.to(device=device, dtype=torch.long).expand(bs)
                     time_embedding = self.time_embed(t_batch).unsqueeze(1)
 
                     if bs == 1:
@@ -943,6 +983,7 @@ class Audio2FaceGPT(nn.Module):
                         latent_batch,
                         gpt_output_t,
                         temb=time_embedding,
+                        reuse_gpt_condition=self.cuda_graph_diffusion.precompute_condition,
                     )
 
                     noise_pred = _combine_cfg_predictions(

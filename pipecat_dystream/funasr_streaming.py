@@ -9,11 +9,13 @@ the FunASR cache for the duration of one user utterance.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncGenerator
 from typing import Any, Protocol
 
 import numpy as np
 from loguru import logger
+from latency_trace import trace
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
@@ -176,6 +178,7 @@ class ParaformerStreamingSTTService(STTService):
             isinstance(frame, VADUserStartedSpeakingFrame)
             and direction is FrameDirection.UPSTREAM
         ):
+            trace("vad_start", generation=self._generation)
             await self._activate_utterance()
         elif isinstance(frame, InterruptionFrame):
             # Pipecat emits this after VAD confirms a barge-in. By then the first
@@ -188,6 +191,7 @@ class ParaformerStreamingSTTService(STTService):
         ):
             # Let Pipecat start its speech-end latency clock before the final
             # transcript is pushed; the finalized frame then stops that clock.
+            trace("vad_stop", generation=self._generation)
             await super().process_frame(frame, direction)
             await self.process_generator(self._finalize_utterance())
             return
@@ -251,6 +255,7 @@ class ParaformerStreamingSTTService(STTService):
             self._transcript_parts.append(text)
 
         transcript = "".join(self._transcript_parts).strip()
+        trace("asr_final_ready", generation=self._generation, characters=len(transcript))
         user_id = self._user_id
         self._reset_utterance()
         if transcript:
@@ -291,6 +296,8 @@ class ParaformerStreamingSTTService(STTService):
     ) -> tuple[str | None, ErrorFrame | None]:
         generation = self._generation
         cache = self._cache
+        started_ns = time.monotonic_ns()
+        trace("asr_infer_start", generation=generation, final=is_final, samples=len(audio) // 2)
         samples = np.frombuffer(audio, dtype="<i2").astype(np.float32) / 32768.0
 
         await self.start_processing_metrics()
@@ -310,6 +317,8 @@ class ParaformerStreamingSTTService(STTService):
                 self._reset_utterance()
             return None, ErrorFrame(f"FunASR streaming transcription error: {exc}")
         finally:
+            trace("asr_infer_end", generation=generation, final=is_final,
+                  elapsed_ms=(time.monotonic_ns() - started_ns) / 1e6)
             await self.stop_processing_metrics()
 
         if generation != self._generation:

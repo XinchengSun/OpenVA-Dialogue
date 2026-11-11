@@ -276,7 +276,7 @@ class DyStreamMSEAudioSink(FrameProcessor):
 class PipecatMSESession:
     """One process-lifetime Pipecat dialog session feeding the stable MSE host."""
 
-    def __init__(self, engine: Any, log: Callable[[str], None]):
+    def __init__(self, engine: Any, log: Callable[[str], None], *, stt_provider=None):
         self._engine = engine
         self._log = log
         self.closed = asyncio.Event()
@@ -304,7 +304,7 @@ class PipecatMSESession:
             # when custom packages, credentials or the local bridge are absent.
             from .custom_cascade import create_custom_cascade_components
 
-            self._custom = create_custom_cascade_components(log)
+            self._custom = create_custom_cascade_components(log, stt_provider=stt_provider)
             processors = [
                 self._custom.stt,
                 self._custom.user_aggregator,
@@ -386,6 +386,24 @@ class PipecatMSESession:
             )
         )
         return True
+
+    async def fresh_conversation(self):
+        """Cancel all old turn state; reuse only the stateless ASR model weights.
+
+        Called once when a different browser conversation takes ownership,
+        never per utterance or when the same conversation reconnects.
+        """
+        provider = self._custom.stt._provider if self._custom is not None else None
+        await self.interrupt()
+        await self.close()
+        replacement = type(self)(self._engine, self._log, stt_provider=provider)
+        replacement.start()
+        try:
+            await replacement.wait_ready()
+        except BaseException:
+            await replacement.close()
+            raise
+        return replacement
 
     async def interrupt(self):
         self._adapter.mark_external_interrupt()

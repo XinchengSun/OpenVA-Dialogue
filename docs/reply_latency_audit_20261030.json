@@ -1,0 +1,254 @@
+{
+  "date": "2026-10-30",
+  "production_baseline": "9bae6c04de8786216dd39c6a7395bcbf01e508c2",
+  "scope": "Source audit and controlled policy replay; not measured model or service latency",
+  "production_behavior_changed": false,
+  "current_service_configuration_verified": false,
+  "current_service_stage_timings_available": false,
+  "environment": {
+    "python": "3.12.3",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "gpu_used": false
+  },
+  "template_settings": {
+    "dialog_mode": "custom_cascade",
+    "asr": "paraformer-zh-streaming",
+    "asr_chunk_ms": 600,
+    "vad_stop_ms": 200,
+    "post_vad_policy_wait_ms": 450,
+    "browser_initial_media_threshold_ms": 600,
+    "browser_handoff_media_threshold_ms": 160
+  },
+  "text_policy_replays": {
+    "long_first_sentence": {
+      "openva": {
+        "first_release_ms": 850,
+        "requests": 2,
+        "released_characters": 55,
+        "text_sha256": "fd322eaa14c40ab01b6b0932ca2e27b4c4eb08024b47c42c32a37669ce44236e"
+      },
+      "injected_eof_ms": 900,
+      "livetalking": {
+        "first_release_ms": 0,
+        "requests": 4,
+        "released_characters": 55,
+        "text_sha256": "fd322eaa14c40ab01b6b0932ca2e27b4c4eb08024b47c42c32a37669ce44236e"
+      }
+    },
+    "complete_sentence_then_delayed_eof": {
+      "openva": {
+        "first_release_ms": 400,
+        "requests": 1,
+        "released_characters": 14,
+        "text_sha256": "fe298aac80b6f28ddf887ff7dd9dd79396c19134d3b9750a4e799e0a164730db"
+      },
+      "injected_eof_ms": 400,
+      "livetalking": {
+        "first_release_ms": 0,
+        "requests": 1,
+        "released_characters": 14,
+        "text_sha256": "fe298aac80b6f28ddf887ff7dd9dd79396c19134d3b9750a4e799e0a164730db"
+      }
+    },
+    "no_punctuation": {
+      "openva": {
+        "first_release_ms": 700,
+        "requests": 1,
+        "released_characters": 13,
+        "text_sha256": "f81142b467a3f00917fec327debe2d72ec33abccd4e543c0510b435b71a1a69b"
+      },
+      "injected_eof_ms": 700,
+      "livetalking": {
+        "first_release_ms": 700,
+        "requests": 1,
+        "released_characters": 13,
+        "text_sha256": "f81142b467a3f00917fec327debe2d72ec33abccd4e543c0510b435b71a1a69b"
+      }
+    },
+    "closing_quote": {
+      "openva": {
+        "first_release_ms": 80,
+        "requests": 2,
+        "released_characters": 13,
+        "text_sha256": "3ebe488ff338dbeda7237b67db4df90101030852fb800427e62b4b0252bcdbcf"
+      },
+      "injected_eof_ms": 200,
+      "livetalking": {
+        "first_release_ms": 80,
+        "requests": 1,
+        "released_characters": 13,
+        "text_sha256": "3ebe488ff338dbeda7237b67db4df90101030852fb800427e62b4b0252bcdbcf"
+      }
+    }
+  },
+  "injected_300ms_eof_pause_actual_release_ms": 303.2325999956811,
+  "upstream_actual_timer_replays": [
+    {
+      "injected_final_delay_ms": 50.0,
+      "vad_stop_to_final_ms": 57.42320000717882,
+      "vad_stop_to_turn_stop_ms": 446.416799997678,
+      "final_to_turn_stop_ms": 388.9935999904992
+    },
+    {
+      "injected_final_delay_ms": 700.0,
+      "vad_stop_to_final_ms": 720.6968999962555,
+      "vad_stop_to_turn_stop_ms": 720.7574999920325,
+      "final_to_turn_stop_ms": 0.06059999577701092
+    }
+  ],
+  "browser_gate_replays": [
+    {
+      "ahead_seconds": 0.59,
+      "replacing": false,
+      "already_started": false,
+      "playback_started": false,
+      "retained_media_seconds": 0.59,
+      "play_calls": 0
+    },
+    {
+      "ahead_seconds": 0.6,
+      "replacing": false,
+      "already_started": false,
+      "playback_started": true,
+      "retained_media_seconds": 0.48,
+      "play_calls": 1
+    },
+    {
+      "ahead_seconds": 0.15,
+      "replacing": true,
+      "already_started": false,
+      "playback_started": false,
+      "retained_media_seconds": 0.15,
+      "play_calls": 0
+    },
+    {
+      "ahead_seconds": 0.16,
+      "replacing": true,
+      "already_started": false,
+      "playback_started": true,
+      "retained_media_seconds": 0.08,
+      "play_calls": 1
+    },
+    {
+      "ahead_seconds": 0.1,
+      "replacing": false,
+      "already_started": true,
+      "playback_started": true,
+      "retained_media_seconds": 0.1,
+      "play_calls": 1
+    }
+  ],
+  "validation": {
+    "text_trajectories_preserved": 4,
+    "upstream_timer_cases": 2,
+    "browser_gate_cases": 5,
+    "existing_media_state_scenarios_passed": 6,
+    "existing_microphone_rates_passed": [
+      44100,
+      48000
+    ]
+  },
+  "upstream_sources": [
+    {
+      "name": "livetalking_llm.py",
+      "url": "https://raw.githubusercontent.com/lipku/LiveTalking/c7269433a2b6ecebcd9342445d2ecc882c98b0da/llm.py",
+      "sha256": "8101c6ff68921ab46ca5556b2bb70d9e59600e51a43393cda92016c9a31384f7",
+      "bytes": 3397
+    },
+    {
+      "name": "pipecat_speech_timeout.py",
+      "url": "https://raw.githubusercontent.com/pipecat-ai/pipecat/08e871599904080cedad7ce5683676ab8481fa59/src/pipecat/turns/user_stop/speech_timeout_user_turn_stop_strategy.py",
+      "sha256": "be548a012dae84804f1923c445488eab76054524b2f0ce11c1470e61b9f2d01e",
+      "bytes": 14439
+    },
+    {
+      "name": "pipecat_stt_service.py",
+      "url": "https://raw.githubusercontent.com/pipecat-ai/pipecat/08e871599904080cedad7ce5683676ab8481fa59/src/pipecat/services/stt_service.py",
+      "sha256": "98f32db5b88b29ee6ff73d391e6b9e18fb79888222ef05866f9e24b8dd4c7e57",
+      "bytes": 39298
+    },
+    {
+      "name": "pipecat_tts_service.py",
+      "url": "https://raw.githubusercontent.com/pipecat-ai/pipecat/08e871599904080cedad7ce5683676ab8481fa59/src/pipecat/services/tts_service.py",
+      "error": "URLError: <urlopen error [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)>",
+      "available": false
+    },
+    {
+      "name": "oac_llm_handler.py",
+      "url": "https://raw.githubusercontent.com/HumanAIGC-Engineering/OpenAvatarChat/8b7b3b45bca28ae9ab5fa72ee31bc03c5a99b08b/src/handlers/llm/openai_compatible/llm_handler_openai_compatible.py",
+      "sha256": "d6043fafb682aeec8632af99dd9e36e361b4b3b8b32ba71791eff0a539131322",
+      "bytes": 10204
+    },
+    {
+      "name": "oac_tts_handler.py",
+      "url": "https://raw.githubusercontent.com/HumanAIGC-Engineering/OpenAvatarChat/8b7b3b45bca28ae9ab5fa72ee31bc03c5a99b08b/src/handlers/tts/cosyvoice/tts_handler_cosyvoice.py",
+      "sha256": "ca49c2d3d59638fea68ec9e61618fd1ffef2a35624c065abd32a1f23c188956f",
+      "bytes": 10946
+    },
+    {
+      "name": "oac_bailian_tts.py",
+      "url": "https://raw.githubusercontent.com/HumanAIGC-Engineering/OpenAvatarChat/8b7b3b45bca28ae9ab5fa72ee31bc03c5a99b08b/src/handlers/tts/bailian_tts/tts_handler_cosyvoice_bailian.py",
+      "sha256": "4ab8ea47ab0e27446e298bccf4f9023102ec8dc1d23bf479232c1d6758036f12",
+      "bytes": 12509
+    }
+  ],
+  "local_sources": [
+    {
+      "file": "pipecat_dystream/resilient_llm.py",
+      "sha256_raw": "d687e4f024b245fb35d529c12e9c9d8980d66c73666219cde3433427058857e6",
+      "sha256_lf": "5d641d8db3ba97a4aa164f60718fa4634783b2a042fb69ad50a1e49bc34440c4"
+    },
+    {
+      "file": "pipecat_dystream/custom_cascade.py",
+      "sha256_raw": "ea7189947406c50830c5b8d22cf34f30fe8c77805a2756aa502a839194383cf0",
+      "sha256_lf": "353e2a7bfee976318cd0601cd6fa981785971d1d2ff4da64b336b992815f09f9"
+    },
+    {
+      "file": "pipecat_dystream/funasr_streaming.py",
+      "sha256_raw": "169323ff9ef455d929796dad545186f17df30392cad77db1a29699291445db65",
+      "sha256_lf": "68d71063e24231c96892472987e028ed494ef2aaceacd8a853ef74939535e45a"
+    },
+    {
+      "file": "pipecat_dystream/voxcpm2_tts.py",
+      "sha256_raw": "b5dcf1e97080cbc75863d4bc87d52074c6e362f24f1b6e07c15342e429324f46",
+      "sha256_lf": "f0138adcabd9c1e0375d3e785054988e944ea56abb2a2d0719ab6ed603deb4bf"
+    },
+    {
+      "file": "pipecat_dystream/mse_session.py",
+      "sha256_raw": "fe4a21fee9d01d6cdf8d4f424c16463a1995a68be84a0ff2ac5af103a32ddb83",
+      "sha256_lf": "eb8f61e9ff2303adf906678f1f2ce08ff691a0841ce2df709305bc9259b3c700"
+    },
+    {
+      "file": "static/index.html",
+      "sha256_raw": "9acb18a2cddf66ff69fab0d7afd8518eb1a647845d2c0327d0ceb84088864990",
+      "sha256_lf": "b6d8196b2d31099cfe2b7430ac220a121a3993f2220d3fa788ae027650cf6444"
+    },
+    {
+      "file": "server_mse.py",
+      "sha256_raw": "62b3f2a62ca6830e79d9896f43d4ff8c1eabe88b07b1b125874c774c6b0c6b47",
+      "sha256_lf": "0b5599aa5350d8aff7253857a271c3aa90cd47b540bbf3d01f88273c2bc12588"
+    },
+    {
+      "file": ".env.example",
+      "sha256_raw": "58a45579f30343fc24be48a83815ebc0e658906af8c244bdd1036850356cfef9",
+      "sha256_lf": "5789e3bdcd191a9f36d969203c03b02fdc6446ec81d48598de688f0c790771df"
+    },
+    {
+      "file": "scripts/audit_reply_release.py",
+      "sha256_raw": "ab6c5e59947925f54e77c3ecf04412173d8a5ee25cf83e4741343d3be300e397",
+      "sha256_lf": "ab6c5e59947925f54e77c3ecf04412173d8a5ee25cf83e4741343d3be300e397"
+    },
+    {
+      "file": "scripts/audit_browser_startup.js",
+      "sha256_raw": "b08d7d8cdcf0f3fa5c93be833884b4c5fd00f7a7d80d343e5c11d38a59289715",
+      "sha256_lf": "b08d7d8cdcf0f3fa5c93be833884b4c5fd00f7a7d80d343e5c11d38a59289715"
+    }
+  ],
+  "limits": [
+    "Provider timing was injected, not measured from a live LLM",
+    "Text equality does not establish speech-quality equality after re-chunking",
+    "No live ASR, LLM, TTS, GPU, browser decoder, or perceptual quality acceptance",
+    "Current runtime route/configuration unavailable; defaults are audited only",
+    "No total-latency reduction or attribution percentage claimed"
+  ]
+}

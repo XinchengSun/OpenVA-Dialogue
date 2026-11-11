@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
+import math
 import os
 import sys
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
@@ -213,6 +216,7 @@ class OfficialPromptCacheBackend:
         self._local_files_only = local_files_only
         self._model_factory = model_factory
         self._trim_config = _LeadingTrimConfig.from_env()
+        self._cpu_text_embedding = _bool_env("VOXCPM2_CPU_TEXT_EMBEDDING")
 
         self._model: Any | None = None
         self._base_cache: Mapping[str, Any] | None = None
@@ -227,8 +231,33 @@ class OfficialPromptCacheBackend:
         )
         if self._released_context_limit <= 0:
             raise ValueError("VOXCPM2_CONTEXT_TOMBSTONE_LIMIT must be positive")
+        # Queue sizing changes producer scheduling and needs a deployment
+        # profile. Zero preserves the existing unbounded production behavior.
+        self._pcm_queue_chunks = int(os.getenv("VOXCPM2_PCM_QUEUE_CHUNKS", "0"))
+        if self._pcm_queue_chunks < 0:
+            raise ValueError("VOXCPM2_PCM_QUEUE_CHUNKS must be non-negative")
+        self._pcm_stall_timeout = float(os.getenv("VOXCPM2_PCM_STALL_TIMEOUT_SEC", "5"))
+        if not math.isfinite(self._pcm_stall_timeout) or self._pcm_stall_timeout < 0:
+            raise ValueError("VOXCPM2_PCM_STALL_TIMEOUT_SEC must be non-negative and finite")
+        if self._pcm_queue_chunks and self._pcm_stall_timeout == 0:
+            raise ValueError("bounded PCM queue requires a positive stall timeout")
         self._active_tasks: set[asyncio.Task[None]] = set()
         self._model_lock = threading.Lock()
+        self._memory_recorder = None
+        self._memory_requests = 0
+
+    def _record_memory(self, stage, tts_model, cache=None, generator=None):
+        recorder = self._memory_recorder
+        if recorder is None or not recorder.enabled:
+            return
+        runtime = {"prompt": cache}
+        if generator is not None:
+            from inference_memory import suspended_generator_cuda_tensors
+            runtime["suspended_generation"] = suspended_generator_cuda_tensors(recorder.torch, generator)
+        for name in ("base_lm", "residual_lm"):
+            kv_cache = getattr(getattr(tts_model, name, None), "kv_cache", None)
+            runtime[name] = vars(kv_cache) if hasattr(kv_cache, "__dict__") else {}
+        recorder.record(stage, {"tts": tts_model}, runtime)
 
     async def start(self) -> None:
         async with self._lifecycle_lock:
@@ -253,6 +282,8 @@ class OfficialPromptCacheBackend:
                     factory = VoxCPM.from_pretrained
 
                 def load() -> tuple[Any, Mapping[str, Any], int]:
+                    self._memory_recorder = None
+                    self._memory_requests = 0
                     model = factory(
                         self._model_path,
                         load_denoiser=False,
@@ -262,9 +293,15 @@ class OfficialPromptCacheBackend:
                     )
                     try:
                         tts_model = model.tts_model
+                        if os.getenv("OPENVA_MEMORY_PROFILE_DIR", "").strip():
+                            import torch
+                            from inference_memory import MemoryRecorder
+                            self._memory_recorder = MemoryRecorder("tts", torch, next(tts_model.parameters()).device)
+                            self._record_memory("model_loaded", tts_model)
                         base_cache = tts_model.build_prompt_cache(
                             reference_wav_path=str(self._reference_wav)
                         )
+                        self._record_memory("prompt_ready", tts_model, base_cache)
                         sample_rate = int(tts_model.sample_rate)
                         if sample_rate <= 0:
                             raise RuntimeError(
@@ -272,12 +309,49 @@ class OfficialPromptCacheBackend:
                             )
                         if not isinstance(base_cache, Mapping):
                             raise RuntimeError("VoxCPM2 returned an invalid prompt cache")
+                        if self._cpu_text_embedding:
+                            from voice_service.text_embedding_offload import offload_text_embedding
+                            embedding_memory = offload_text_embedding(tts_model)
+                            logging.getLogger(__name__).info("VoxCPM2 text table memory: %s", embedding_memory)
+                            self._record_memory("text_embedding_ready", tts_model, base_cache)
+                        if getattr(tts_model, "audio_vae", None) is not None:
+                            import torch
+                            from inference_memory import (
+                                enable_prompt_encoder_offload, cache_decoder_weight_norm,
+                            )
+                            encoder_memory = enable_prompt_encoder_offload(torch, tts_model)
+                            decoder_memory = cache_decoder_weight_norm(torch, tts_model)
+                            logging.getLogger(__name__).info(
+                                "VoxCPM2 inference memory: encoder=%s decoder=%s",
+                                encoder_memory, decoder_memory,
+                            )
+                            self._record_memory("vae_memory_ready", tts_model, base_cache)
                         return model, base_cache, sample_rate
                     except BaseException:
                         self._close_model_sync(model)
                         raise
 
-                model, base_cache, sample_rate = await asyncio.to_thread(load)
+                load_task = asyncio.create_task(asyncio.to_thread(load))
+                try:
+                    model, base_cache, sample_rate = await asyncio.shield(load_task)
+                except asyncio.CancelledError:
+                    # Cancelling to_thread cannot stop model allocation. Keep
+                    # ownership until loading ends, then dispose the result.
+                    async def close_after_load() -> None:
+                        try:
+                            loaded_model, _, _ = await load_task
+                        except Exception:
+                            return  # load() already closes a partially built model.
+                        await self._close_model(loaded_model)
+
+                    cleanup = asyncio.create_task(close_after_load())
+                    while not cleanup.done():
+                        try:
+                            await asyncio.shield(cleanup)
+                        except asyncio.CancelledError:
+                            pass
+                    cleanup.result()
+                    raise
             except BaseException:
                 self._remove_inserted_source_path()
                 raise
@@ -311,7 +385,13 @@ class OfficialPromptCacheBackend:
                 raise RuntimeError("VoxCPM2 backend is not started")
 
             loop = asyncio.get_running_loop()
-            queue: asyncio.Queue[_WorkerMessage] = asyncio.Queue()
+            # Reserve one additional slot for terminal control messages. PCM
+            # credits include callbacks scheduled but not yet run by the loop.
+            queue: asyncio.Queue[_WorkerMessage] = asyncio.Queue(
+                maxsize=self._pcm_queue_chunks + 1 if self._pcm_queue_chunks else 0
+            )
+            pcm_slots = (threading.Semaphore(self._pcm_queue_chunks)
+                         if self._pcm_queue_chunks else None)
             stop_requested = threading.Event()
             state.active_stops.add(stop_requested)
             worker_task = asyncio.create_task(
@@ -323,6 +403,7 @@ class OfficialPromptCacheBackend:
                     state,
                     text,
                     stop_requested,
+                    pcm_slots,
                 )
             )
             self._active_tasks.add(worker_task)
@@ -331,6 +412,8 @@ class OfficialPromptCacheBackend:
                 while True:
                     message = await queue.get()
                     if message.kind == "pcm":
+                        if pcm_slots is not None:
+                            pcm_slots.release()
                         if not stop_requested.is_set() and not state.invalidated.is_set():
                             yield message.value
                     elif message.kind == "done":
@@ -411,6 +494,8 @@ class OfficialPromptCacheBackend:
             self._model = None
             self._base_cache = None
             self.sample_rate = 0
+            self._memory_recorder = None
+            self._memory_requests = 0
             self._released_contexts.clear()
             try:
                 if model is not None:
@@ -451,6 +536,7 @@ class OfficialPromptCacheBackend:
         state: _ContextState,
         text: str,
         stop_requested: threading.Event,
+        pcm_slots: threading.Semaphore | None,
     ) -> None:
         generator: Any | None = None
         acquired = False
@@ -467,6 +553,7 @@ class OfficialPromptCacheBackend:
             trimmer = _LeadingPCMFilter(self.sample_rate, self._trim_config)
             generated_features: list[Any] = []
             waveform_seen = False
+            memory_chunks = 0
             generator = tts_model.generate_with_prompt_cache_streaming(
                 target_text=text,
                 prompt_cache=state.cache,
@@ -479,11 +566,18 @@ class OfficialPromptCacheBackend:
                 if self._cancelled(state, stop_requested):
                     self._post(loop, queue, _WorkerMessage("cancelled"))
                     return
+                memory_chunks += 1
+                if self._memory_recorder is not None and memory_chunks & (memory_chunks - 1) == 0:
+                    self._record_memory(f"stream_chunks_{memory_chunks}", tts_model, state.cache, generator)
                 chunks = trimmer.push(waveform)
                 if chunks:
                     waveform_seen = True
                     for chunk in chunks:
-                        self._post(loop, queue, _WorkerMessage("pcm", chunk))
+                        if not self._post_pcm(
+                            loop, queue, chunk, pcm_slots, state, stop_requested
+                        ):
+                            self._post(loop, queue, _WorkerMessage("cancelled"))
+                            return
                 if not feature_sequence:
                     raise RuntimeError("official VoxCPM2 returned no generated feature")
                 generated_features.append(self._detach_cpu(feature_sequence[-1]))
@@ -495,7 +589,11 @@ class OfficialPromptCacheBackend:
             if tail:
                 waveform_seen = True
                 for chunk in tail:
-                    self._post(loop, queue, _WorkerMessage("pcm", chunk))
+                    if not self._post_pcm(
+                        loop, queue, chunk, pcm_slots, state, stop_requested
+                    ):
+                        self._post(loop, queue, _WorkerMessage("cancelled"))
+                        return
             if not waveform_seen or not generated_features:
                 raise RuntimeError("official VoxCPM2 returned an incomplete stream")
 
@@ -505,6 +603,9 @@ class OfficialPromptCacheBackend:
                 text,
                 new_audio_feature,
             )
+            self._memory_requests += 1
+            if self._memory_requests & (self._memory_requests - 1) == 0:
+                self._record_memory(f"requests_{self._memory_requests}", tts_model, merged_cache)
             if self._cancelled(state, stop_requested):
                 self._post(loop, queue, _WorkerMessage("cancelled"))
                 return
@@ -523,6 +624,36 @@ class OfficialPromptCacheBackend:
     @staticmethod
     def _cancelled(state: _ContextState, stop_requested: threading.Event) -> bool:
         return state.invalidated.is_set() or stop_requested.is_set()
+
+    def _post_pcm(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        queue: asyncio.Queue[_WorkerMessage],
+        chunk: bytes,
+        slots: threading.Semaphore | None,
+        state: _ContextState,
+        stop_requested: threading.Event,
+    ) -> bool:
+        if slots is None:
+            if self._cancelled(state, stop_requested):
+                return False
+            self._post(loop, queue, _WorkerMessage("pcm", chunk))
+            return True
+        # Wait in the producer thread, never on the event loop. Polling the
+        # cancellation flag also releases a producer whose consumer has closed.
+        # A connected but abandoned consumer must not monopolize the model lock.
+        deadline = time.monotonic() + self._pcm_stall_timeout
+        while not self._cancelled(state, stop_requested):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("VoxCPM2 PCM consumer stalled; synthesis aborted")
+            if slots.acquire(timeout=min(0.05, remaining)):
+                if not self._cancelled(state, stop_requested):
+                    self._post(loop, queue, _WorkerMessage("pcm", chunk))
+                    return True
+                slots.release()
+                break
+        return False
 
     @staticmethod
     def _post(

@@ -1,0 +1,82 @@
+{
+  "date": "2026-11-11",
+  "scope": "CPU tests, real local WebSockets, browser JavaScript and WSL Linux shell fixtures",
+  "python": "3.12.3",
+  "unittest_total": 449,
+  "unittest_passed": 416,
+  "unittest_skipped": [
+    "test_interpreter_paths_preserve_virtualenv_symlinks (tests.test_configure_custom_runtime.ConfigureCustomRuntimeTests.test_interpreter_paths_preserve_virtualenv_symlinks) ... skipped 'Linux venv interpreter symlink regression'",
+    "test_cuda_graph_updates_condition_for_every_frame (tests.test_diffusion_condition_reuse.DiffusionConditionReuseTests.test_cuda_graph_updates_condition_for_every_frame) ... skipped 'CUDA graph requires actual CUDA device'",
+    "test_actual_suspended_cuda_storage_is_counted_once_without_text (tests.test_generator_memory_inventory.GeneratorMemoryInventoryTests.test_actual_suspended_cuda_storage_is_counted_once_without_text) ... skipped 'requires CUDA'",
+    "test_single_gpu_selective_loading_preserves_folded_ema_weights (tests.test_inference_ema.InferenceEMATests.test_single_gpu_selective_loading_preserves_folded_ema_weights) ... skipped 'requires CUDA'",
+    "test_different_position_tables_are_not_merged (tests.test_motion_memory.MotionMemoryTests.test_different_position_tables_are_not_merged) ... skipped 'requires CUDA'",
+    "test_outputs_and_checkpoint_keys_preserved_and_unused_modules_never_called (tests.test_motion_memory.MotionMemoryTests.test_outputs_and_checkpoint_keys_preserved_and_unused_modules_never_called) ... skipped 'requires CUDA'",
+    "test_profiler_counts_aliases_and_unregistered_caches_once (tests.test_motion_memory.MotionMemoryTests.test_profiler_counts_aliases_and_unregistered_caches_once) ... skipped 'requires CUDA'",
+    "test_selective_loading_keeps_values_and_buffer_aliases (tests.test_motion_memory.MotionMemoryTests.test_selective_loading_keeps_values_and_buffer_aliases) ... skipped 'requires CUDA'",
+    "test_cuda_values_and_actual_time_embedding_match (tests.test_motion_timestep_batch.MotionTimestepBatchTests.test_cuda_values_and_actual_time_embedding_match) ... skipped 'CUDA device required'",
+    "test_real_cuda_storage_freed_and_cached_outputs_unchanged (tests.test_reference_encoder_offload.ReferenceEncoderOffloadTests.test_real_cuda_storage_freed_and_cached_outputs_unchanged) ... skipped 'requires actual CUDA allocator'",
+    "test_gpu_direction_and_grid_are_exact_across_device_moves (tests.test_render_constant_cache.IdentityGridCacheTests.test_gpu_direction_and_grid_are_exact_across_device_moves) ... skipped 'CUDA not available; no GPU equivalence claim'",
+    "test_cuda_convolution_and_cpu_offload (tests.test_render_constant_cache.StandardizedConvolutionCacheTests.test_cuda_convolution_and_cpu_offload) ... skipped 'CUDA not available; no GPU convolution equivalence claim'",
+    "test_full_renderer_lifetimes_with_and_without_occlusion (tests.test_renderer_memory_integration.RendererMemoryIntegrationTests.test_full_renderer_lifetimes_with_and_without_occlusion) ... skipped 'requires CUDA'",
+    "test_loader_flags_apply_only_after_loading_original_checkpoint (tests.test_renderer_memory_integration.RendererMemoryIntegrationTests.test_loader_flags_apply_only_after_loading_original_checkpoint) ... skipped 'requires CUDA'",
+    "test_production_preflight_enforces_single_and_dual_gpu_budget (tests.test_s2s_launcher_contract.S2SLauncherContractTests.test_production_preflight_enforces_single_and_dual_gpu_budget) ... skipped 'GPU preflight behavior is validated by Bash on Linux'",
+    "test_shell_launchers_are_syntax_valid (tests.test_s2s_launcher_contract.S2SLauncherContractTests.test_shell_launchers_are_syntax_valid) ... skipped 'Windows bash launchers do not preserve this workspace path; CI validates shell syntax'",
+    "test_single_gpu_setup_checks_official_prerequisites_without_fish (tests.test_s2s_launcher_contract.S2SLauncherContractTests.test_single_gpu_setup_checks_official_prerequisites_without_fish) ... skipped 'Read-only setup behavior is validated by Bash on Linux'",
+    "test_cuda_inference_exact_and_inputs_unchanged (tests.test_spade_memory.SpadeMemoryTests.test_cuda_inference_exact_and_inputs_unchanged) ... skipped 'requires CUDA'",
+    "test_device_and_dtype_roundtrip_refreshes_weight (tests.test_spectral_norm_cache.SpectralNormCacheTests.test_device_and_dtype_roundtrip_refreshes_weight) ... skipped 'requires CUDA'",
+    "test_exact_reuse_checkpoint_and_parameter_buffer_invalidation (tests.test_spectral_norm_cache.SpectralNormCacheTests.test_exact_reuse_checkpoint_and_parameter_buffer_invalidation) ... skipped 'requires CUDA'",
+    "test_shared_or_unversioned_state_is_rejected_before_mutation (tests.test_spectral_norm_cache.SpectralNormCacheTests.test_shared_or_unversioned_state_is_rejected_before_mutation) ... skipped 'requires CUDA'",
+    "test_training_and_grad_eval_preserve_outputs_gradients_and_power_iteration (tests.test_spectral_norm_cache.SpectralNormCacheTests.test_training_and_grad_eval_preserve_outputs_gradients_and_power_iteration) ... skipped 'requires CUDA'",
+    "test_backend_opt_in_after_prompt_cache_and_during_generation (tests.test_text_embedding_offload.TextEmbeddingOffloadTests.test_backend_opt_in_after_prompt_cache_and_during_generation) ... skipped 'requires CUDA'",
+    "test_cpu_indices_keep_original_success_or_error_behavior (tests.test_text_embedding_offload.TextEmbeddingOffloadTests.test_cpu_indices_keep_original_success_or_error_behavior) ... skipped 'requires CUDA'",
+    "test_grad_enabled_and_training_preserve_original_gradients (tests.test_text_embedding_offload.TextEmbeddingOffloadTests.test_grad_enabled_and_training_preserve_original_gradients) ... skipped 'requires CUDA'",
+    "test_lookup_state_reload_mutation_and_dtype_device_transitions (tests.test_text_embedding_offload.TextEmbeddingOffloadTests.test_lookup_state_reload_mutation_and_dtype_device_transitions) ... skipped 'requires CUDA'",
+    "test_tied_weights_are_rejected_before_mutation (tests.test_text_embedding_offload.TextEmbeddingOffloadTests.test_tied_weights_are_rejected_before_mutation) ... skipped 'requires CUDA'",
+    "test_backend_applies_memory_policy_after_prompt_build (tests.test_tts_memory.TTSMemoryTests.test_backend_applies_memory_policy_after_prompt_build) ... skipped 'requires CUDA'",
+    "test_decoder_dtype_and_device_roundtrip_invalidate_cache (tests.test_tts_memory.TTSMemoryTests.test_decoder_dtype_and_device_roundtrip_invalidate_cache) ... skipped 'requires CUDA'",
+    "test_decoder_exact_reuse_and_checkpoint_reload (tests.test_tts_memory.TTSMemoryTests.test_decoder_exact_reuse_and_checkpoint_reload) ... skipped 'requires CUDA'",
+    "test_decoder_training_and_grad_eval_use_original_weight_norm (tests.test_tts_memory.TTSMemoryTests.test_decoder_training_and_grad_eval_use_original_weight_norm) ... skipped 'requires CUDA'",
+    "test_inference_parameters_without_version_counters_are_not_cached (tests.test_tts_memory.TTSMemoryTests.test_inference_parameters_without_version_counters_are_not_cached) ... skipped 'requires CUDA'",
+    "test_prompt_encoder_offload_moves_plain_weights_and_reloads_exactly (tests.test_tts_memory.TTSMemoryTests.test_prompt_encoder_offload_moves_plain_weights_and_reloads_exactly) ... skipped 'requires CUDA'"
+  ],
+  "excluded_modules": {
+    "tests.test_realtime_core": "Requires the complete legacy Gradio/librosa/DyStream runtime; focused media/state tests run separately.",
+    "tests.test_pipecat_bridge": "Requires the complete FunASR runtime. Streaming ASR adapter tests run separately."
+  },
+  "unittest_seconds": 52.463,
+  "javascript": [
+    {
+      "name": "test_media_buffer_bounds.js",
+      "exit_code": 0
+    },
+    {
+      "name": "test_mic_resampler.js",
+      "exit_code": 0
+    },
+    {
+      "name": "test_ws_proxy_path.js",
+      "exit_code": 0
+    },
+    {
+      "name": "test_customize_frontend_contract.js",
+      "exit_code": 0
+    },
+    {
+      "name": "test_listener_playout_clock.js",
+      "exit_code": 0
+    }
+  ],
+  "shell": {
+    "platform": "Ubuntu 22.04 under WSL",
+    "suites": 4,
+    "exit_code": 0
+  },
+  "source_sha256": {
+    "server_mse.py": "9bd0dc1b52a018b54c558d4504c89fd5616f69dd56fd272ecc5ec012e3e337be",
+    "dual_gpu_mic_realtime_ui_v8_playbuffer.py": "e3ff4ae35f1f229fa725bfa90d9ec67ad0a241523d4d680308402227cdc9307f",
+    "static/index.html": "bd06f8835095633fffc6c69f1f58d5ffb14e0fb0a12a7480b9ccf9e65429041f",
+    "pipecat_dystream/voxcpm2_tts.py": "b29aabcef03544609286c01533fe8a698e071efd5651de759b6cf9a0e156e26b",
+    "configs/infra_20786.env.example": "1079c850df99bd3fe6c104afbe42009ffcd233b25beb122423f9e6de0ebb128d"
+  },
+  "historical_gpu_run": "2026-11-08 20786; see infra_release_20261111.md"
+}

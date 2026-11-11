@@ -14,6 +14,7 @@ from loguru import logger
 from openai import APITimeoutError
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.settings import assert_given
+from latency_trace import trace, text_fields
 
 from .realtime_search import (
     RealtimeSearchPolicy,
@@ -24,6 +25,10 @@ from .realtime_search import (
 
 
 TIMEOUT_EXCEPTIONS = (APITimeoutError, httpx.TimeoutException, TimeoutError)
+
+# Bound this hedge iterator's queue when its consumer pauses. Pipecat normally
+# queues downstream frames independently; this is not end-to-end TTS backpressure.
+_HEDGE_QUEUE_MAX_CHUNKS = 16
 
 _SENTENCE_TERMINATORS = frozenset("。！？!?")
 _SENTENCE_CLOSERS = frozenset("\"”’'」』】》〉）)]}")
@@ -39,7 +44,10 @@ class _ReplyStreamState:
     sentences_emitted: int = 0
     finish_reason: str | None = None
     visible_text_emitted: bool = False
+    clause_sent_in_sentence: bool = False
     limit_reached: bool = False
+    trace_id: int = 0
+    first_content_seen: bool = False
 
 
 def _terminator_width(text: str, index: int) -> int:
@@ -98,6 +106,30 @@ def _split_complete_sentences(text: str, *, final: bool) -> tuple[list[str], str
     return sentences, text[start:]
 
 
+def _first_clause_end(text: str, minimum: int) -> int:
+    """Find a Mandarin phrase break only when both sides have enough speech."""
+    # Keep dependent openings with their main clause so TTS has its context.
+    if text.lstrip(" \t\n“‘「『").startswith(("等到", "如果", "假如", "虽然", "因为", "只要", "只有", "除非", "即使")):
+        return 0
+    han = 0
+    for index, char in enumerate(text):
+        if "一" <= char <= "鿿":
+            han += 1
+        elif _terminator_width(text, index):
+            break
+        elif char in "，；,;" and han >= minimum:
+            if text[index - 1].isdigit() and text[index + 1:index + 2].isdigit():
+                continue
+            following = text[index + 1:].lstrip(" \t")
+            # Wait for three more Han characters. Keep short suffixes and
+            # punctuation/quotation runs with the original sentence.
+            if any(_terminator_width(following, i) for i in range(len(following))):
+                return 0
+            if len(following) >= 3 and all("一" <= c <= "鿿" for c in following[:3]):
+                return index + 1
+    return 0
+
+
 def _message_role(message: Any) -> str:
     if isinstance(message, dict):
         return str(message.get("role", ""))
@@ -134,7 +166,22 @@ async def _close_stream(stream) -> None:
     if close is None:
         close = getattr(stream, "aclose", None)
     if close is not None:
-        await close()
+        # Some SDKs mark a response closed before transport cleanup finishes;
+        # cancelling that await can make a later close() a no-op. Keep ownership
+        # through repeated caller cancellation, then propagate cancellation.
+        # Cleanup depends on the SDK/transport and has no hard time bound.
+        close_task = asyncio.ensure_future(close())
+        cancelled = False
+        try:
+            while not close_task.done():
+                try:
+                    await asyncio.shield(close_task)
+                except asyncio.CancelledError:
+                    cancelled = True
+            close_task.result()
+        finally:
+            if cancelled:
+                raise asyncio.CancelledError
 
 
 class RecoveringOpenAILLMService(OpenAILLMService):
@@ -146,6 +193,7 @@ class RecoveringOpenAILLMService(OpenAILLMService):
         timeout_fallback_text: str,
         history_max_messages: int = 12,
         reply_max_sentences: int = 3,
+        first_clause_min_chars: int = 0,
         hedge_model: str = "",
         hedge_delay_sec: float = 0.75,
         hedge_deadline_sec: float = 3.0,
@@ -157,9 +205,10 @@ class RecoveringOpenAILLMService(OpenAILLMService):
         super().__init__(*args, **kwargs)
         self._timeout_fallback_text = timeout_fallback_text
         self._history_max_messages = max(0, int(history_max_messages))
+        self._first_clause_min_chars = max(0, int(first_clause_min_chars))
         self._reply_max_sentences = int(reply_max_sentences)
-        if self._reply_max_sentences <= 0:
-            raise ValueError("reply_max_sentences must be positive")
+        if self._reply_max_sentences < 0:
+            raise ValueError("reply_max_sentences must be nonnegative (0 disables the limit)")
         self._hedge_model = hedge_model.strip()
         self._hedge_delay_sec = max(0.0, float(hedge_delay_sec))
         self._hedge_deadline_sec = max(
@@ -205,9 +254,13 @@ class RecoveringOpenAILLMService(OpenAILLMService):
             "last_first_content_ms": self._realtime_search_last_first_content_ms,
         }
 
-    async def _emit_visible_text(self, state: _ReplyStreamState, text: str) -> None:
+    async def _emit_visible_text(
+        self, state: _ReplyStreamState, text: str, *, first_clause: bool = False
+    ) -> None:
         if not text:
             return
+        stage = "llm_first_clause_released" if first_clause else "llm_sentence_released"
+        trace(stage, request=state.trace_id, sentence=state.sentences_emitted, **text_fields(text))
         await super()._push_llm_text(text)
         state.visible_text_emitted = True
 
@@ -222,13 +275,14 @@ class RecoveringOpenAILLMService(OpenAILLMService):
             final=final,
         )
         for sentence in sentences:
-            if state.sentences_emitted >= self._reply_max_sentences:
+            if self._reply_max_sentences and state.sentences_emitted >= self._reply_max_sentences:
                 state.buffer = ""
                 state.limit_reached = True
                 return True
             await self._emit_visible_text(state, sentence)
             state.sentences_emitted += 1
-            if state.sentences_emitted >= self._reply_max_sentences:
+            state.clause_sent_in_sentence = False
+            if self._reply_max_sentences and state.sentences_emitted >= self._reply_max_sentences:
                 state.buffer = ""
                 state.limit_reached = True
                 return True
@@ -242,9 +296,23 @@ class RecoveringOpenAILLMService(OpenAILLMService):
         if not text or state.limit_reached:
             return
 
+        if not state.first_content_seen:
+            state.first_content_seen = True
+            trace("llm_first_content", request=state.trace_id)
         state.buffer += text
+        trace("llm_content", request=state.trace_id,
+              buffered_characters=len(state.buffer),
+              terminal_punctuation=bool(text and text[-1] in _SENTENCE_TERMINATORS),
+              **text_fields(text))
         if await self._emit_complete_sentences(state, final=False):
             raise _ReplyLimitReached
+        if self._first_clause_min_chars and not state.clause_sent_in_sentence:
+            end = _first_clause_end(state.buffer, self._first_clause_min_chars)
+            if end:
+                first, state.buffer = state.buffer[:end], state.buffer[end:]
+                # Only a completed sentence consumes the reply sentence budget.
+                await self._emit_visible_text(state, first, first_clause=True)
+                state.clause_sent_in_sentence = True
 
     async def _finalize_reply(self, state: _ReplyStreamState) -> None:
         reached_limit = await self._emit_complete_sentences(state, final=True)
@@ -298,6 +366,8 @@ class RecoveringOpenAILLMService(OpenAILLMService):
                         finish_reason = getattr(choice, "finish_reason", None)
                         if finish_reason is not None:
                             state.finish_reason = str(finish_reason)
+                            trace("llm_finish", request=state.trace_id,
+                                  finish_reason=state.finish_reason)
                 yield chunk
         except asyncio.CancelledError:
             raise
@@ -306,6 +376,9 @@ class RecoveringOpenAILLMService(OpenAILLMService):
                 self._realtime_search_failures += 1
             raise
         finally:
+            state = self._reply_state.get()
+            trace("llm_stream_closed", request=state.trace_id if state else None,
+                  finish_reason=state.finish_reason if state else None)
             with suppress(Exception):
                 await _close_stream(stream)
 
@@ -376,12 +449,15 @@ class RecoveringOpenAILLMService(OpenAILLMService):
 
     async def _stream_first_answer_chunk(self, params):
         """Yield the model whose stream produces meaningful answer text first."""
-        queue: asyncio.Queue = asyncio.Queue()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=_HEDGE_QUEUE_MAX_CHUNKS)
         streams = {
             "primary": str(params["model"]),
             "hedge": self._hedge_model,
         }
         tasks = {}
+        # Preserve pre-answer metadata until a winner is selected. The existing
+        # first-answer deadline bounds waiting time, not buffered bytes; an
+        # arbitrary chunk-count failure would reject otherwise valid responses.
         buffers = {"primary": [], "hedge": []}
         started_at = time.monotonic()
 
@@ -397,6 +473,10 @@ class RecoveringOpenAILLMService(OpenAILLMService):
                 )
                 async for chunk in stream:
                     await queue.put((label, "chunk", chunk))
+                    # Buffered SDK chunks can be available without an I/O await.
+                    # Yield so this producer cannot repeatedly take the next free
+                    # slot before an already-ready competing stream gets one.
+                    await asyncio.sleep(0)
                 await queue.put((label, "done", None))
             except asyncio.CancelledError:
                 raise
@@ -449,6 +529,10 @@ class RecoveringOpenAILLMService(OpenAILLMService):
 
             loser = "hedge" if winner == "primary" else "primary"
             tasks[loser].cancel()
+            # Cancellation starts cleanup immediately, but a slow provider close
+            # must not delay the winning first token. Finalization joins both
+            # producers and waits for their actual SDK cleanup to complete.
+            buffers[loser].clear()
             logger.info(
                 f"[LLM HEDGE] winner={winner} model={streams[winner]} "
                 f"first_content_ms={(time.monotonic() - started_at) * 1000.0:.1f}"
@@ -482,7 +566,8 @@ class RecoveringOpenAILLMService(OpenAILLMService):
                 f"remaining={len(context.get_messages())}"
             )
 
-        state = _ReplyStreamState()
+        state = _ReplyStreamState(trace_id=time.monotonic_ns())
+        trace("llm_request", request=state.trace_id, messages=len(context.get_messages()))
         state_token = self._reply_state.set(state)
 
         try:

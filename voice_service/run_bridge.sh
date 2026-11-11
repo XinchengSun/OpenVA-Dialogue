@@ -33,6 +33,7 @@ fail() {
 }
 
 load_env() {
+  local assigned_gpu_mask="${CUDA_VISIBLE_DEVICES:-}"
   # Route any inherited or env-file-enabled xtrace to /dev/null. Environment
   # values (including API keys) are never printed by this manager.
   exec 9>/dev/null
@@ -56,6 +57,9 @@ load_env() {
   unset BASH_XTRACEFD
   exec 9>&-
 
+  if [[ "$ACTION" =~ ^(start|restart)$ && "$assigned_gpu_mask" == GPU-* && "$assigned_gpu_mask" != *,* && "${CUDA_VISIBLE_DEVICES:-}" != "$assigned_gpu_mask" ]]; then
+    fail "bridge environment file overrides the assigned GPU UUID"
+  fi
   : "${VOXCPM2_BRIDGE_HOST:=127.0.0.1}"
   : "${VOXCPM2_BRIDGE_PORT:=8770}"
   : "${VOXCPM2_DEVICES:=0}"

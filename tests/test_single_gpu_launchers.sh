@@ -81,7 +81,13 @@ expect_failure() {
 run_preflight() (
   # Supply a synthetic host inventory and codec list; retain the real launcher
   # mapping checks. Source function definitions only, never lifecycle dispatch.
-  nvidia-smi() { seq 0 "$((FAKE_GPU_COUNT - 1))"; }
+  nvidia-smi() {
+    if [[ "$1" == '-i' ]]; then
+      [[ "$2" == "${FAKE_GPU_UUID:-}" ]] && printf '%s\n' "$2"
+    else
+      seq 0 "$((FAKE_GPU_COUNT - 1))"
+    fi
+  }
   ffmpeg() { printf '%s\n' ' V libx264' ' A aac'; }
   ffprobe() { return 0; }
   curl() { return 0; }
@@ -101,6 +107,14 @@ FAKE_GPU_COUNT=1 expect_failure 'selected GPU id 6 does not exist' run_preflight
 
 write_config 0
 FAKE_GPU_COUNT=1 expect_success run_preflight
+
+uuid=GPU-12345678-1234-1234-abcd-123456789abc
+write_config "$uuid"
+CUDA_VISIBLE_DEVICES="$uuid" FAKE_GPU_COUNT=2 FAKE_GPU_UUID="$uuid" expect_success run_preflight
+FAKE_GPU_COUNT=2 FAKE_GPU_UUID='' expect_failure 'assigned GPU UUID .* does not exist' run_preflight
+write_config 1
+CUDA_VISIBLE_DEVICES="$uuid" expect_failure 'overrides the assigned GPU UUID' bash "$START_SCRIPT" --check-gpu-config
+CUDA_VISIBLE_DEVICES="$uuid" expect_failure 'overrides the assigned GPU UUID' run_preflight
 
 for invalid in \
   'CUDA_VISIBLE_DEVICES=0,1' \

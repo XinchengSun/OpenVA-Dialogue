@@ -164,11 +164,28 @@ ASR 在 CPU 上运行，LLM 使用远程 API。延迟在服务端回环客户端
 
 ## 文档
 
+[2026-11-11 infra 更新](docs/infra_release_20261111.md)包含已保存的实时对话版本、
+对应配置、延迟与显存实测，以及打断停声和播放抖动仍有的限制。
+
+模型组成、推理流程、优化状态、实测依据与 TODO 集中见 [模型与优化 README](README_MODEL.md)。
+
 | 文档 | 内容 |
 | --- | --- |
 | [部署](docs/deployment_zh-CN.md) | 已测试主机、Fish 运行时、端口、生命周期、替代后端 |
 | [单卡部署](docs/single_gpu_4090.md) | 4090 配置、优化开关、验证命令 |
 | [单卡实测](docs/single_gpu_validation_20260921.md) | 延迟/显存/帧率、测量方法、未验证范围 |
+| [基础设施正确性审查](docs/infra_correctness_review_20261026.md) | 反例复现、接口契约、已撤回策略、实验边界与验证依据 |
+| [推理热路径优化](docs/inference_performance_20261026.md) | 渲染固定计算缓存、时间步设备处理、可选条件投影复用、CPU 对照与 GPU 验收边界 |
+| [头像编码器用后卸载](docs/reference_encoder_offload_20261028.md) | 保留头像特征、释放初始化编码器显存，包含组件测量与 12 GiB 目标边界 |
+| [推理显存核查](docs/inference_memory_audit_20261028.md) | 动作选择性加载、SPADE 临时存储复用、AudioVAE 卸载、CUDA 组件实测及待完成的整机 12 GiB 验收 |
+| [按 RBA 方法优化渲染器](docs/rba_renderer_optimization_20261028.md) | 可开关的谱归一化缓存与临时张量释放、真实训练权重数值对照、显存收益及未确认的耗时收益 |
+| [第四轮显存优化](docs/memory_round4_20261028.md) | 已默认启用渲染优化、词表 CPU 卸载实验、权重/KV 清点及流式显存诊断 |
+| [回复首声等待审计](docs/reply_latency_audit_20261030.md) | 对照开源设计，重放结束判断、文本释放与浏览器门限，区分配置等待和线上实测 |
+| [ASR/LLM/TTS 分段计时](docs/latency_trace_20261101.md) | 可选运行时事件，辨别首句积攒、整段等待与实际首 PCM |
+| [服务器逐项实测与显存结果](docs/server_ab_20261101.md) | 九组完整服务对照、动态分配器、真实权重数值检查、长首句与浏览器等待 |
+| [回复卡顿排查](docs/playback_stutter_20261101.md) | GPU 调度对照、网络抖动、保留完整语音的播放策略，以及尚存停顿 |
+| [Listener 连续性与完整回复](docs/listener_story_20261102.md) | 撤除思考时暂停与自动变速、取消三句硬截断，并验证完整故事音频 |
+| [服务启动与代理修复](docs/server_bootstrap_20261101.md) | 旧基线真实对话、千问小样本选型、浏览器检查与未完成的 GPU 归属核验 |
 | [架构](docs/architecture.md) | Listener/Speaker 状态、打断、媒体边界、GPU 拓扑 |
 | [定制](README_CUSTOMIZATION.md) | 形象定制与零样本音色克隆流程 |
 | [模型权重](docs/weights.md) | 固定上游资产与运行路径 |

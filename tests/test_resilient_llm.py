@@ -12,6 +12,7 @@ from pipecat.services.openai.llm import OpenAILLMService
 from pipecat_dystream.resilient_llm import (
     RecoveringOpenAILLMService,
     _split_complete_sentences,
+    _first_clause_end,
 )
 
 
@@ -72,6 +73,7 @@ def make_service(
     *,
     streams=(),
     max_sentences=3,
+    first_clause_min_chars=0,
     realtime_search_mode="off",
     realtime_search_model="",
     hedge_model="",
@@ -88,6 +90,7 @@ def make_service(
         timeout_fallback_text="网络有点慢，请重试。",
         history_max_messages=12,
         reply_max_sentences=max_sentences,
+        first_clause_min_chars=first_clause_min_chars,
         realtime_search_mode=realtime_search_mode,
         realtime_search_model=realtime_search_model,
         hedge_model=hedge_model,
@@ -126,6 +129,41 @@ class SentenceParserTests(unittest.TestCase):
 
 
 class ReplySentenceLimitTests(unittest.IsolatedAsyncioTestCase):
+    async def test_first_clause_preserves_text_and_sentence_budget(self):
+        first = "每天傍晚我都会独自沿着河堤散步，"
+        tail = "听桥下的流水慢慢讲完一天的故事。"
+        stream = FakeStream([completion_chunk(first), completion_chunk(tail[:3]),
+                             completion_chunk(tail[3:]), completion_chunk("第二句。"),
+                             completion_chunk(finish_reason="stop")])
+        service, _ = make_service(streams=[stream], max_sentences=1, first_clause_min_chars=12)
+        await service._process_context(LLMContext())
+        self.assertEqual(emitted_texts(service), [first, tail])
+
+    def test_first_clause_keeps_an_already_complete_sentence_together(self):
+        self.assertEqual(_first_clause_end("每天傍晚我都会独自沿着河堤散步，听流水讲故事。", 12), 0)
+
+    async def test_comma_and_semicolon_in_successive_streamed_sentences(self):
+        first = "每天傍晚我都会独自沿着河堤散步"
+        second = "山上最后一层薄雾已经慢慢散去"
+        for comma, semicolon, space in (("，", "；", ""), (",", ";", " ")):
+            pieces = [first, comma + space, "听流水", "讲故事。", second, semicolon + space,
+                      "我们就", "会看到小屋"]
+            stream = FakeStream([*(completion_chunk(piece) for piece in pieces),
+                                 completion_chunk(finish_reason="stop")])
+            service, _ = make_service(streams=[stream], max_sentences=2, first_clause_min_chars=12)
+            await service._process_context(LLMContext())
+            self.assertEqual(emitted_texts(service), [
+                first + comma, space + "听流水讲故事。",
+                second + semicolon, space + "我们就会看到小屋",
+            ])
+
+    def test_first_clause_ignores_short_phrases_numbers_and_non_chinese(self):
+        for text in ("好呀，我来讲个故事。", "今天天气晴朗适合带着孩子出去玩，好。",
+                     "今年报名的总人数已经超过12,345人",
+                     "“等到山上最后一层薄雾慢慢散去；我们就能看见",
+                     "a long sentence in English, with another clause"):
+            self.assertEqual(_first_clause_end(text, 12), 0)
+
     async def test_streams_only_three_complete_sentences_and_closes_early(self):
         stream = FakeStream(
             [
@@ -231,11 +269,21 @@ class ReplySentenceLimitTests(unittest.IsolatedAsyncioTestCase):
         self.assertCountEqual(emitted_texts(service), ["甲句。", "乙句。"])
         self.assertEqual([stream.close_count for stream in streams], [1, 1])
 
-    async def test_default_limit_is_three_and_non_positive_limit_is_rejected(self):
+    async def test_explicit_default_remains_three_and_negative_limit_is_rejected(self):
         service, _ = make_service()
         self.assertEqual(service.reply_max_sentences, 3)
-        with self.assertRaisesRegex(ValueError, "must be positive"):
-            make_service(max_sentences=0)
+        with self.assertRaisesRegex(ValueError, "must be nonnegative"):
+            make_service(max_sentences=-1)
+
+    async def test_unlimited_story_retains_all_sentences_and_ending(self):
+        story = ["小镇有一盏旧台灯。", "店主想把它扔掉。", "孩子把断线接好了。",
+                 "那晚停电，台灯照亮了楼道。", "邻居们围在灯下讲故事。", "店主从此把它留在窗前。"]
+        stream = FakeStream([completion_chunk(s) for s in story] + [completion_chunk(finish_reason="stop")])
+        service, _ = make_service(streams=[stream], max_sentences=0)
+        await service._process_context(LLMContext([{"role":"user", "content":"你讲一个故事"}]))
+        self.assertEqual("".join(emitted_texts(service)), "".join(story))
+        self.assertEqual(len(emitted_texts(service)), 6)
+        self.assertEqual(stream.close_count, 1)
 
 
 class RealtimeSearchIntegrationTests(unittest.IsolatedAsyncioTestCase):

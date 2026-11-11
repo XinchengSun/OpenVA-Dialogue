@@ -2,6 +2,7 @@ import audioop
 import asyncio
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import numpy as np
 
@@ -120,6 +121,30 @@ class DyStreamEngineAudioAdapterTests(unittest.TestCase):
 
 
 class PipecatMSEHealthTests(unittest.TestCase):
+    def test_new_conversation_cancels_old_state_but_reuses_asr_weights(self):
+        provider = object()
+        replacement = SimpleNamespace(start=Mock(), wait_ready=AsyncMock(), close=AsyncMock())
+        class Session(PipecatMSESession):
+            def __new__(cls, *args, **kwargs):
+                if args:
+                    self.assert_provider = kwargs["stt_provider"]
+                    return replacement
+                return object.__new__(cls)
+        self.assert_provider = None
+        session = object.__new__(Session)
+        session._custom = SimpleNamespace(stt=SimpleNamespace(_provider=provider))
+        session._engine = object()
+        session._log = Mock()
+        session.interrupt = AsyncMock()
+        session.close = AsyncMock()
+        result = asyncio.run(session.fresh_conversation())
+        self.assertIs(self.assert_provider, provider)
+        self.assertIs(result, replacement)
+        session.interrupt.assert_awaited_once()
+        session.close.assert_awaited_once()
+        replacement.start.assert_called_once()
+        replacement.wait_ready.assert_awaited_once()
+
     def test_pipeline_is_not_healthy_until_native_s2s_is_ready(self):
         session = object.__new__(PipecatMSESession)
         session.connected = asyncio.Event()

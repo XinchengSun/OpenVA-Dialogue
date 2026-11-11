@@ -133,3 +133,31 @@ python scripts/probe_voxcpm2_bridge.py \
 `{"type":"cancel","request_id":"..."}`。桥接服务立即取消正在消费的
 Nano async generator，Nano 自身的 `finally` 会把对应 `seq_id` 取消，旧音频
 不会进入下一轮。
+
+## 流式队列与退出回收
+
+官方 `official_prompt_cache` 后端的 `VOXCPM2_PCM_QUEUE_CHUNKS` 默认 `0`，保留原有
+无上限队列。设为正整数才启用待消费 PCM 的背压实验；`8` 仅是待实测的候选值，没有证据表明
+它适合所有部署。启用时，信用额度覆盖队列及待执行回调，另有一个生产中的块和一个消费中的块。
+此限制只在 bridge 内部成立：Pipecat 会继续把音频送入 MSE 的 `_speaker_chunks`，后者没有
+等待或容量限制，因此不能将本地队列有界称为端到端积压或总内存有界。
+
+`VOXCPM2_PCM_STALL_TIMEOUT_SEC` 默认 `5` 秒，仅在有界队列启用时生效。启用队列时必须
+提供有限正数，防止停止读取的消费者一直占用模型锁；停滞超时会终止该句且不提交部分缓存。
+`VOXCPM2_SEND_TIMEOUT_SEC` 默认 `0`（禁用），设为有限正数才限制每次 WebSocket 发送。
+超时会关闭该连接，关闭握手还受 WebSocket 自身的 `close_timeout` 控制；该策略尚未经过真实
+传输和 GPU 负载验收。`0` 默认值保留原有调度与超时行为，不能据此声称解决所有慢客户端问题。
+
+桥接层在发送失败、请求取消时显式关闭后端生成器；Nano 包装层也同步关闭底层生成器，
+避免依赖垃圾回收才取消推理。单句发送或后端失败只清理该请求；Pipecat 在一轮内复用上下文，
+不能因此作废整轮。显式 `cancel` 或 `release_context` 才使上下文失效，防止旧轮次重新进入。
+回归覆盖同一上下文中首句发送失败、第二句继续成功，以及显式取消后不能恢复旧上下文。
+官方模型加载期间收到停止信号时，Python 线程不能强制中止 CUDA/模型加载，因此先等待线程
+结束并调用可用的模型 `close()` 钩子，再完成退出。假模型测试验证生命周期所有权，不证明
+实际官方模型、CUDA 缓存或显存已经释放；这些仍需真实部署验证。
+
+CPU 回归（使用假模型和合成 PCM，不代表 GPU 性能验证）：
+
+```bash
+python -m unittest tests.test_voxcpm2_infra tests.test_official_voxcpm2_backend tests.test_voxcpm2_tts -v
+```

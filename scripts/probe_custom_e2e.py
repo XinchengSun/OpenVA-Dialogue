@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import time
 import wave
 from pathlib import Path
@@ -13,6 +14,11 @@ from typing import Any
 
 import numpy as np
 from websockets.asyncio.client import connect
+
+try:
+    from scripts.benchmark_single_gpu import AssistantTurnLifecycle
+except ModuleNotFoundError:
+    from benchmark_single_gpu import AssistantTurnLifecycle
 
 
 TARGET_RATE = 16_000
@@ -123,10 +129,12 @@ async def _run(args: argparse.Namespace) -> list[dict[str, Any]]:
                     await mic.send(silence)
                     await asyncio.sleep(CHUNK_SAMPLES / TARGET_RATE)
 
+                lifecycle = AssistantTurnLifecycle(voice_stop_at)
                 marks: dict[str, float] = {}
                 provider_logs: list[str] = []
+                provider_audio: list[tuple[float, str]] = []
                 deadline = time.monotonic() + args.timeout
-                while "assistant_media_ended" not in marks:
+                while True:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise TimeoutError(f"turn {turn_index} did not reach media end")
@@ -135,13 +143,28 @@ async def _run(args: argparse.Namespace) -> list[dict[str, Any]]:
                     )
                     if kind == "provider_error":
                         raise RuntimeError(str(payload))
-                    marks.setdefault(kind, received_at)
                     if kind.startswith("provider_"):
-                        provider_logs.append(str(payload))
+                        if received_at >= voice_stop_at:
+                            provider_logs.append(str(payload))
+                            if kind == "provider_first_audio":
+                                provider_audio.append((received_at, str(payload)))
+                    elif lifecycle.observe(received_at, payload):
+                        marks.update(lifecycle.marks)
+                        break
+
+                for received_at, line in provider_audio:
+                    if re.search(rf"\bengine_turn={lifecycle.key[0]}\b", line):
+                        marks["provider_first_audio"] = received_at
+                        break
+                if "provider_first_audio" not in marks:
+                    raise RuntimeError("matched reply has no provider first-audio timestamp")
 
                 results.append(
                     {
                         "turn": turn_index,
+                        "engine_turn_id": lifecycle.key[0],
+                        "generation": lifecycle.key[1],
+                        "lifecycle_complete": True,
                         "input_seconds": round(pcm16.size / TARGET_RATE, 3),
                         "voice_stop_to_provider_first_audio_ms": _milliseconds(
                             marks.get("provider_first_audio"), voice_stop_at

@@ -1,0 +1,103 @@
+{
+  "scope": "Real production reference encoders, random FP32 weights; no trained checkpoint or full dialogue pipeline",
+  "python": "3.12.3",
+  "torch": "2.8.0+cu126",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "device": "cuda",
+  "seed": 20261028,
+  "image_shape": [
+    1,
+    3,
+    512,
+    512
+  ],
+  "inventory": {
+    "face_encoder": {
+      "parameters": 2148480,
+      "parameter_bytes": 8593920,
+      "buffer_bytes": 10880,
+      "total_tensor_bytes": 8604800
+    },
+    "motion_encoder": {
+      "parameters": 21665312,
+      "parameter_bytes": 86661248,
+      "buffer_bytes": 896,
+      "total_tensor_bytes": 86662144
+    }
+  },
+  "full_pipeline_vram_after_bytes": null,
+  "full_pipeline_peak_reduction_bytes": null,
+  "fits_12gib": null,
+  "face_extraction_peak_allocated_bytes": {
+    "original_grad_enabled": 979369984,
+    "candidate_no_grad_and_motion_offloaded": 347329536,
+    "reduction": 632040448,
+    "scope": "Encoder-only process with same image, anchor and weights; excludes all other models"
+  },
+  "offload_by_stage": {
+    "motion_encoder": {
+      "encoder_cuda_tensor_bytes": {
+        "motion_encoder": 86662144
+      },
+      "allocated_freed_bytes": 86669824,
+      "reserved_released_bytes": 83886080
+    },
+    "face_encoder": {
+      "encoder_cuda_tensor_bytes": {
+        "face_encoder": 8604800
+      },
+      "allocated_freed_bytes": 8637440,
+      "reserved_released_bytes": 427819008
+    }
+  },
+  "encoder_allocated_freed_bytes": 95307264,
+  "cuda_gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+  "cuda_runtime": "12.6",
+  "source_image_cuda_bytes_released_separately": 3145728,
+  "cached_face_bytes": 8388608,
+  "cached_anchor_bytes": 2048,
+  "cached_outputs_stay_on_gpu": true,
+  "cached_face_max_abs_error": 0.0,
+  "cached_anchor_max_abs_error": 0.0,
+  "source_sha256": {
+    "dual_gpu_mic_realtime_ui_v8_playbuffer.py": "69b4ec0b869c6a509b634861cc2e8f78fc9f2692ff1093835401509e2afc6d7b",
+    "tools/visualization_0416/utils/model_0506/model/head_animation/LIA_3d/face_encoder.py": "6c1bdea2743b8256a44ee65c845fce7baa1ce995fc26212d192708e393aa19d5",
+    "tools/visualization_0416/utils/model_0506/model/head_animation/LIA_3d/motion_encoder.py": "dc82a006e3bb8f9e450d49bf1950a34124fd27f7c3c024d9e0e90a5c701d609d",
+    "tools/visualization_0416/utils/model_0506/model/head_animation/LIA_3d/util.py": "90fefd49104dfd72dc8937c3df61e129155aa203362a7f0503fac00052c29f20",
+    "tools/visualization_0416/utils/model_0506/model/head_animation/LIA/modules.py": "c80ab6077ccc4632e9ae974e460496d70d5ad213861775035eddc905f1bea400",
+    "tools/visualization_0416/configs/head_animator_best_0506.yaml": "5338bff818747a8a8103f2bbc480db79e638994b89698823e5e8a8b90627fddf"
+  },
+  "checkout_commit": "5f19575152afd68d417ad51c0f0bd13769bf4110",
+  "working_tree_dirty": true,
+  "benchmark_source_sha256": "e344507cd3736271d2e147106edc117d41c850e729ceb0245fdb14c4a4c68283",
+  "candidate_identity": "Commit containing this report; full commit recorded in external offload artifact manifest",
+  "baseline_commit": "5f19575152afd68d417ad51c0f0bd13769bf4110",
+  "validation": {
+    "cpu": {
+      "discovered": 29,
+      "passed": 26,
+      "skipped": 3,
+      "failed": 0,
+      "scope": "Reference offload, renderer constants, render stride, audio history and face-detector checks on CPU build"
+    },
+    "cuda": {
+      "discovered": 7,
+      "passed": 7,
+      "skipped": 0,
+      "failed": 0,
+      "scope": "Reference offload with real production encoders, weight/device roundtrip, and render stride; synthetic avatar; no trained checkpoints"
+    },
+    "other_checks": [
+      "compileall of changed Python sources",
+      "git diff --check"
+    ],
+    "hosted_ci_run": false,
+    "full_pipeline_or_perceptual_acceptance": false
+  },
+  "package_provenance": {
+    "torch_wheel": "torch-2.8.0+cu126-cp312-cp312-win_amd64.whl",
+    "official_sha256": "f6c79eac0018f9d131479ee1b7a68edb030619a316bfbc69275043aa4f338e4c",
+    "driver": "566.24",
+    "environment": "Isolated venv; base CPU torch unchanged"
+  }
+}

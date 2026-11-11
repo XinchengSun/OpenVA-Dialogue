@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shlex
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -164,9 +165,10 @@ def main() -> None:
     single_gpu = args.single_gpu is not None
     args.tts_backend = args.tts_backend or ("voxcpm2" if single_gpu else "fish_s2pro")
     if single_gpu:
-        if not args.single_gpu.isascii() or not args.single_gpu.isdecimal():
-            raise SystemExit("--single-gpu must be one physical numeric GPU id")
-        args.single_gpu = str(int(args.single_gpu))
+        if args.single_gpu.isascii() and args.single_gpu.isdecimal():
+            args.single_gpu = str(int(args.single_gpu))
+        elif not re.fullmatch(r"GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", args.single_gpu):
+            raise SystemExit("--single-gpu must be one physical GPU index or full NVIDIA GPU UUID")
         if args.tts_backend != "voxcpm2":
             raise SystemExit("--single-gpu requires voxcpm2; fish_s2pro requires its own two GPUs")
         if args.fish_gpus is not None:
@@ -214,7 +216,7 @@ def main() -> None:
     else:
         fish_gpu_items = []
         prompt_text = ""
-        if not args.tts_gpu.isdigit():
+        if not single_gpu and not args.tts_gpu.isdigit():
             raise SystemExit("--tts-gpu must be one physical numeric GPU id")
         if not single_gpu and args.tts_gpu in gpu_items:
             raise SystemExit("VoxCPM2 physical GPU must not overlap the two DyStream GPUs")

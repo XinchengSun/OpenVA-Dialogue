@@ -170,6 +170,7 @@ require_file() {
 }
 
 load_dialog_config() {
+  local assigned_gpu_mask="${CUDA_VISIBLE_DEVICES:-}"
   if [[ -f "$ENV_FILE" ]]; then
     set +u
     set +x
@@ -183,6 +184,9 @@ load_dialog_config() {
     set +x
     set +a
     set -u
+  fi
+  if [[ "$ACTION" =~ ^(start|restart) && "$assigned_gpu_mask" == GPU-* && "$assigned_gpu_mask" != *,* && "${CUDA_VISIBLE_DEVICES:-}" != "$assigned_gpu_mask" ]]; then
+    die "environment file overrides the assigned GPU UUID"
   fi
   DIALOG_MODE="${PIPECAT_MSE_DIALOG_MODE:-native_s2s}"
   [[ "$DIALOG_MODE" == "native_s2s" || "$DIALOG_MODE" == "custom_cascade" ]] \
@@ -447,6 +451,11 @@ preflight() {
     || die "at least $required_gpu_count NVIDIA GPU(s) are required"
   for selected_gpu in "${gpu_ids[@]}"; do
     selected_gpu="${selected_gpu//[[:space:]]/}"
+    if [[ -n "${DYSTREAM_SINGLE_GPU:-}" && "$selected_gpu" == GPU-* ]]; then
+      [[ "$(nvidia-smi -i "$selected_gpu" --query-gpu=uuid --format=csv,noheader)" == "$selected_gpu" ]] \
+        || die "assigned GPU UUID $selected_gpu does not exist"
+      continue
+    fi
     [[ "$selected_gpu" =~ ^[0-9]+$ ]] \
       || die "CUDA_VISIBLE_DEVICES must use numeric GPU ids, got: $selected_gpu"
     (( 10#$selected_gpu < gpu_count )) \

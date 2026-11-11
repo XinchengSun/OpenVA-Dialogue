@@ -103,11 +103,12 @@
     button.primary:hover { background: linear-gradient(135deg, #7b89ff, #9a78ff); }
     button.danger { color: #ffb6bd; border-color: rgba(255,107,120,.34); background: rgba(104,36,45,.35); }
     button:disabled { cursor: not-allowed; opacity: .5; transform: none; }
+    .startupError { color: var(--red); line-height: 1.6; }
     details { margin-top: 10px; border: 1px solid var(--line); border-radius: 13px; background: rgba(15,19,28,.72); }
     summary { padding: 12px 15px; color: #b8c1d1; cursor: pointer; user-select: none; font-size: 13px; }
     .settingsBody { padding: 0 15px 15px; }
     .settingsBody label { display: block; margin-bottom: 7px; color: var(--muted); font-size: 12px; }
-    input {
+    input, .settingsBody select {
       width: 100%; padding: 11px 12px; border-radius: 10px; border: 1px solid var(--line);
       background: #0a0d13; color: var(--text); font: inherit;
     }
@@ -135,7 +136,7 @@
       <p class="subtitle">点击开始，与定制数字人自然交谈</p>
     </div>
     <div class="topActions">
-      <div class="status" id="status">未连接</div>
+      <div class="status" id="status">页面正在加载…</div>
       <a class="customizeLink" href="/customize?new=1">更换数字人</a>
     </div>
   </header>
@@ -149,11 +150,22 @@
     <button id="stopBtn" title="结束采集，模型保持热加载">结束对话</button>
     <button id="interruptBtn" class="danger">打断回复</button>
   </div>
+  <p id="startupError" class="startupError" role="alert" hidden></p>
+  <p id="micInfo" class="subtitle" hidden>
+    <meter id="micLevel" min="0" max="1" value="0" aria-label="麦克风输入音量"></meter>
+    <span id="micLevelText">麦克风未连接</span>
+  </p>
+  <noscript><p class="startupError">浏览器未启用 JavaScript，无法启动对话。请在 Edge 或 Chrome 中打开测试链接。</p></noscript>
   <details>
     <summary>对话设置</summary>
     <div class="settingsBody">
+      <label for="micMode">收音方式（开始对话时生效）</label>
+      <select id="micMode" style="margin-bottom: 12px">
+        <option value="speaker">外放 · 消除回声</option>
+        <option value="headphones">耳机 · 保留插话开头</option>
+      </select>
       <label for="instruction">回答风格</label>
-      <input id="instruction" value="请用自然口语直接回答，默认一到三句；只有我明确要求时才详细展开。" />
+      <input id="instruction" value="简洁完整地回答；讲故事、解释和步骤等任务要给出完整内容，不要只说开场白。" />
     </div>
   </details>
   <details class="debugPanel">
@@ -171,11 +183,20 @@ const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 const interruptBtn = document.getElementById('interruptBtn');
 const instructionEl = document.getElementById('instruction');
+const micMode = document.getElementById('micMode');
+try {
+  if (localStorage.getItem('openva-mic-mode') === 'headphones') micMode.value = 'headphones';
+} catch {}
+micMode.addEventListener('change', () => {
+  try { localStorage.setItem('openva-mic-mode', micMode.value); } catch {}
+});
 const logEl = document.getElementById('log');
 const statusEl = document.getElementById('status');
+const startupErrorEl = document.getElementById('startupError');
 
 let mediaWs = null, logWs = null, micWs = null, currentMime = null;
 let audioCtx = null, processor = null, micStream = null, zeroGain = null;
+let micLevelUpdatedAt = 0;
 let appStarted = false, startInProgress = false, liveVisible = false;
 let micPending16 = new Float32Array(0);
 let micResampleSourceRate = 0;
@@ -185,6 +206,7 @@ let mseGeneration = 0;
 let mediaWsGeneration = 0;
 let logWsGeneration = 0;
 let micLifecycleGeneration = 0;
+let recoveringGeneration = null;
 let activeSlot = null;
 let ingestSlot = null;
 let liveAudioHeld = true;
@@ -201,22 +223,11 @@ let highestAssistantTurnId = -1;
 let lastBoundaryEventSeq = -1;
 const slotByVideo = new Map();
 
-// The encoder emits a fragment every ~240 ms (PIPE_GOP=3 at 12.5 fps).
-// Keep more than two complete fragments buffered so one late packet does not
-// immediately starve playback.
-const START_BUFFER_SEC = 0.60;
+// Initial reserve used by the measured 20786 dialogue profile.
+// Fragment duration depends on the configured frame rate and GOP.
+const START_BUFFER_SEC = 0.64;
 const HANDOFF_BUFFER_SEC = 0.16;
-// Keep two complete GOPs behind the live edge. Startup already waits for
-// 0.60 s, so this retains the reserve instead of seeking most of it away.
-const TARGET_LATENCY_SEC = 0.48;
-const HANDOFF_TARGET_LATENCY_SEC = 0.08;
-const LOW_BUFFER_ENTER_SEC = 0.32;
-const LOW_BUFFER_EXIT_SEC = 0.48;
-const LOW_BUFFER_PLAYBACK_RATE = 0.96;
-const SOFT_CATCHUP_SEC = 0.80;
-const FAST_CATCHUP_SEC = 1.30;
-const HARD_CATCHUP_SEC = 2.50;
-const LIVE_TAIL_SEEK_INTERVAL_MS = 5000;
+// Retain recently played data for safe MSE cleanup without growing indefinitely.
 const BUFFER_RETENTION_SEC = 12;
 const BUFFER_TRIM_INTERVAL_MS = 5000;
 // Qwen Audio Realtime recommends continuous 20-40 ms PCM chunks. Forty
@@ -226,19 +237,29 @@ const MIC_SEND_SAMPLES = 640;
 const LOG_MAX_LINES = 800;
 const LOG_TRIM_TO_LINES = 400;
 let logLineCount = 0;
+const queuedLogLines = [];
 
 function log(line) {
   const t = new Date().toLocaleTimeString();
-  logEl.append(document.createTextNode(`[${t}] ${line}\n`));
-  logLineCount += 1;
+  queuedLogLines.push(`[${t}] ${line}\n`);
+  if (queuedLogLines.length > LOG_MAX_LINES) queuedLogLines.shift();
+}
+
+function flushLog() {
+  if (!queuedLogLines.length) return;
+  logLineCount += queuedLogLines.length;
+  logEl.append(document.createTextNode(queuedLogLines.join('')));
+  queuedLogLines.length = 0;
   if (logLineCount > LOG_MAX_LINES) {
     const lines = logEl.textContent.split('\n');
     const kept = lines.slice(-LOG_TRIM_TO_LINES - 1);
     logEl.textContent = kept.join('\n');
     logLineCount = Math.max(0, kept.length - 1);
   }
-  logEl.scrollTop = logEl.scrollHeight;
+  // A closed diagnostics panel must not force layout for every server log line.
+  if (document.querySelector('.debugPanel')?.open) logEl.scrollTop = logEl.scrollHeight;
 }
+setInterval(flushLog, 250);
 
 function setStatus(s) {
   s = String(s || '');
@@ -261,8 +282,26 @@ function setStatus(s) {
   } else if (s.includes('error')) {
     label = '连接异常'; state = 'error';
   }
+  if (!startupErrorEl.hidden) {
+    label = '启动失败'; state = 'error';
+  }
   statusEl.dataset.state = state;
   statusEl.textContent = label;
+}
+
+function showStartupError(error) {
+  const name = error?.name || '';
+  let message = error?.message || String(error);
+  if (name === 'NotAllowedError') message = '未获得麦克风权限。请允许此页面使用麦克风，然后重新开始。';
+  else if (name === 'NotFoundError') message = '没有找到可用麦克风，请连接或启用麦克风后重试。';
+  else if (name === 'NotReadableError') message = '麦克风无法读取，可能被其他程序占用。';
+  else if (name === 'SecurityError') message = '浏览器阻止了音频或媒体连接，请在系统 Edge 或 Chrome 中打开测试链接。';
+  startupErrorEl.textContent = message;
+  startupErrorEl.hidden = false;
+  setStatus('error');
+  const panel = document.querySelector('.debugPanel');
+  if (panel) panel.open = true;
+  log(`start error: ${name} ${message}`);
 }
 
 function setLiveVisible(show, reason = '') {
@@ -278,9 +317,17 @@ function ensureIdlePlaying() {
   // liveActive DyStream slot remains visible through listen/speak transitions.
 }
 
+function requireServicePage() {
+  if (location.protocol !== 'http:' && location.protocol !== 'https:') {
+    throw new Error('当前打开的是本地页面文件，无法连接对话服务。请通过 OpenVA 的 http:// 或 https:// 服务网址打开，不要直接双击 HTML 文件。');
+  }
+}
+
 function wsUrl(path) {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${proto}//${location.host}${path}`;
+  requireServicePage();
+  const url = new URL(path.replace(/^\/+/, ''), new URL('.', location.href));
+  url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return url.href;
 }
 
 function isCurrentSlot(slot) {
@@ -441,6 +488,7 @@ function releaseLiveAudio(turn, reason = '') {
   activeSlot.video.muted = false;
   visibleAssistantTurn = { ...turn };
   setLiveVisible(true, 'assistant media started');
+  setStatus('assistant speaking');
   const changed = liveAudioHeld;
   liveAudioHeld = false;
   if (changed && reason) log(`live audio released: ${reason}`);
@@ -469,6 +517,7 @@ function maybeReleaseLiveAudioAtBoundary() {
     && boundary.generation < expectedStreamGeneration
   ) return;
   const safeTime = slot.timelineOrigin + boundary.safeMediaTimeSec;
+  if (slot.video.seeking) return;
   if (slot.video.currentTime + 0.005 < safeTime) return;
   const overshootMs = Math.max(0, (slot.video.currentTime - safeTime) * 1000);
   const releasedKey = assistantTurnKey(
@@ -526,6 +575,7 @@ function disposeSlot(slot) {
   if (!slot || slot.disposed) return;
   slot.disposed = true;
   slot.pendingSegments = [];
+  slot.pendingBytes = 0;
   if (slot.activationTimer) {
     clearTimeout(slot.activationTimer);
     slot.activationTimer = null;
@@ -612,14 +662,7 @@ function maybePlay(slot) {
   }
   if (!slot.playbackStarted) {
     slot.playbackStarted = true;
-    const targetLatencySec = slot.replacing
-      ? HANDOFF_TARGET_LATENCY_SEC
-      : TARGET_LATENCY_SEC;
-    const end = bufferedEnd(slot);
-    if (end > targetLatencySec) {
-      slot.video.currentTime = Math.max(0, end - targetLatencySec);
-    }
-    log(`playback start generation=${slot.generation} buffered=${ahead.toFixed(2)}s targetLatency=${targetLatencySec.toFixed(2)}s`);
+    log(`playback start generation=${slot.generation} buffered=${ahead.toFixed(2)}s`);
     armSlotActivation(slot);
   }
   slot.video.play().catch(e => log('video play blocked: ' + e));
@@ -634,31 +677,9 @@ function liveTail(slot) {
   const latency = end - video.currentTime;
   const now = Date.now();
 
-  if (slot.playbackStarted) {
-    let desiredRate = 1.0;
-    if (latency < LOW_BUFFER_ENTER_SEC) slot.lowBufferRecovery = true;
-    else if (latency >= LOW_BUFFER_EXIT_SEC) slot.lowBufferRecovery = false;
-
-    if (slot.lowBufferRecovery) desiredRate = LOW_BUFFER_PLAYBACK_RATE;
-    if (latency > FAST_CATCHUP_SEC) {
-      slot.lowBufferRecovery = false;
-      desiredRate = 1.10;
-    } else if (latency > SOFT_CATCHUP_SEC) {
-      slot.lowBufferRecovery = false;
-      desiredRate = 1.06;
-    }
-
-    if (latency > HARD_CATCHUP_SEC && now - slot.lastTailSeekAt > LIVE_TAIL_SEEK_INTERVAL_MS) {
-      video.currentTime = Math.max(0, end - TARGET_LATENCY_SEC);
-      video.playbackRate = 1.0;
-      slot.lowBufferRecovery = false;
-      slot.lastTailSeekAt = now;
-      log(`live-tail hard catch-up latency=${latency.toFixed(2)}s target=${video.currentTime.toFixed(2)}`);
-    } else if (Math.abs(video.playbackRate - desiredRate) > 0.001) {
-      video.playbackRate = desiredRate;
-      log(`live-tail playbackRate=${desiredRate.toFixed(2)} latency=${latency.toFixed(2)}s`);
-    }
-  }
+  // Keep Listener, thinking and speech on the same native A/V clock.
+  // Playback must not speed up, seek away buffered speech, or pause at a turn.
+  if (video.playbackRate !== 1.0) video.playbackRate = 1.0;
 
   if (
     !sourceBuffer.updating
@@ -724,13 +745,13 @@ function buildMSE(mime, replacing) {
     sourceBuffer: null,
     objectUrl: null,
     pendingSegments: [],
+    pendingBytes: 0,
+    quotaRetryAttempted: false,
     generation: mseGeneration,
     replacing: !!(replacing && oldActive),
     playbackStarted: false,
     lastPrebufferLogAt: 0,
-    lastTailSeekAt: 0,
     lastBufferTrimAt: 0,
-    lowBufferRecovery: false,
     mediaChunkCount: 0,
     activationArmed: false,
     activationTimer: null,
@@ -792,6 +813,7 @@ function buildMSE(mime, replacing) {
       nextSourceBuffer.addEventListener('error', () => {
         if (!isCurrentSlot(slot) || slot.sourceBuffer !== nextSourceBuffer) return;
         log('SOURCEBUFFER ERROR buffered=' + describeBuffered(slot));
+        failMediaStream(slot, 'media decoder rejected the stream');
       });
     } catch (e) {
       log('addSourceBuffer ERROR: ' + e);
@@ -816,6 +838,27 @@ function handoffMSE() {
   buildMSE(currentMime, true);
 }
 
+function failMediaStream(slot, reason) {
+  if (!isCurrentSlot(slot)) return;
+  log(`media playback stopped: ${reason}; press Start to reconnect`);
+  const failedWs = mediaWs;
+  mediaWs = null;
+  mediaWsGeneration += 1;
+  if (failedWs && failedWs.readyState < WebSocket.CLOSING) {
+    failedWs.close(4001, 'playback buffer unavailable');
+  }
+  resetAssistantAudioGate('media playback stopped');
+  stopMic();
+  setStatus('media stopped; press Start to reconnect');
+}
+
+function queueMediaSegment(slot, segment) {
+  if (!isCurrentSlot(slot)) return false;
+  slot.pendingSegments.push(segment);
+  slot.pendingBytes += segment.byteLength;
+  return true;
+}
+
 function appendNextSegment(slot) {
   if (!isCurrentSlot(slot)) return;
   const sourceBuffer = slot.sourceBuffer;
@@ -824,11 +867,32 @@ function appendNextSegment(slot) {
     || sourceBuffer.updating
     || slot.pendingSegments.length === 0
   ) return;
-  const seg = slot.pendingSegments.shift();
+  const seg = slot.pendingSegments[0];
   try {
     sourceBuffer.appendBuffer(seg);
+    slot.pendingSegments.shift();
+    slot.pendingBytes -= seg.byteLength;
+    slot.quotaRetryAttempted = false;
   } catch (e) {
     log('appendBuffer ERROR: ' + e + ' buffered=' + describeBuffered(slot));
+    if (e.name === 'QuotaExceededError' && !slot.quotaRetryAttempted) {
+      // MSE Prepare Append recommends removing old data before retrying quota
+      // failures. Reuse the existing retention boundary and keep this byte
+      // chunk at the queue head until appendBuffer actually accepts it.
+      const safeRemoveEnd = Math.max(0, slot.video.currentTime - BUFFER_RETENTION_SEC);
+      if (safeRemoveEnd > 1 && sourceBuffer.buffered.length > 0
+          && sourceBuffer.buffered.start(0) < safeRemoveEnd - 0.25) {
+        slot.quotaRetryAttempted = true;
+        try {
+          sourceBuffer.remove(0, safeRemoveEnd);
+          slot.lastBufferTrimAt = Date.now();
+          return; // updateend retries the unchanged head chunk once.
+        } catch (removeError) {
+          log('quota recovery remove failed: ' + removeError);
+        }
+      }
+    }
+    failMediaStream(slot, 'media append failed');
   }
 }
 
@@ -1053,6 +1117,7 @@ function connectMedia() {
   ws.onopen = () => {
     if (mediaWs !== ws || generation !== mediaWsGeneration) return;
     currentStreamEpoch = 0;
+    expectedStreamGeneration = -1;
     highestAssistantTurnId = -1;
     lastBoundaryEventSeq = -1;
     resetAssistantAudioGate('new media websocket');
@@ -1063,13 +1128,20 @@ function connectMedia() {
   ws.onclose = () => {
     if (mediaWs !== ws || generation !== mediaWsGeneration) return;
     mediaWs = null;
+    resetAssistantAudioGate('media websocket closed');
     log('media ws closed');
-    setStatus('media closed');
-    teardownMSE();
+    if (appStarted) {
+      teardownMSE();
+      restoreConversationConnection();
+    } else {
+      stopMic();
+      setStatus('media closed');
+    }
   };
   ws.onerror = () => {
     if (mediaWs !== ws || generation !== mediaWsGeneration) return;
     log('media ws error');
+    if (!appStarted) showStartupError(new Error('画面连接失败，请重新打开测试链接后重试。'));
   };
   ws.onmessage = ev => {
     if (mediaWs !== ws || generation !== mediaWsGeneration) return;
@@ -1105,12 +1177,21 @@ function connectMedia() {
     if (slot.mediaChunkCount % 20 === 1) {
       log(`media segment received generation=${slot.generation} #${slot.mediaChunkCount} bytes=${ev.data.byteLength} buffered=${describeBuffered(slot)}`);
     }
-    slot.pendingSegments.push(ev.data);
+    if (!queueMediaSegment(slot, ev.data)) return;
     appendNextSegment(slot);
     maybePlay(slot);
   };
   return ws;
 }
+
+// One tab owns one conversation across network reconnects and reloads.
+const conversationId = (() => {
+  try {
+    let id = sessionStorage.getItem('openva-conversation-id');
+    if (!id) { id = crypto.randomUUID(); sessionStorage.setItem('openva-conversation-id', id); }
+    return id;
+  } catch { return crypto.randomUUID(); }
+})();
 
 function connectMicWS(generation) {
   if (micWs && (micWs.readyState === WebSocket.OPEN || micWs.readyState === WebSocket.CONNECTING)) return micWs;
@@ -1120,14 +1201,30 @@ function connectMicWS(generation) {
   ws.onopen = () => {
     if (micWs !== ws || generation !== micLifecycleGeneration) return;
     log('mic ws connected');
-    ws.send(JSON.stringify({ type: 'config', instruction: instructionEl.value || '' }));
+    ws.send(JSON.stringify({ type: 'config', conversation_id: conversationId, instruction: instructionEl.value || '' }));
   };
-  ws.onclose = () => {
+  ws.onclose = event => {
     if (micWs !== ws) return;
     micWs = null;
     resetMicPending16();
     if (generation !== micLifecycleGeneration) return;
     log('mic ws closed');
+    if (!appStarted) return;
+    if (event.code === 4001) {
+      stopMic();
+      setStatus('另一页面已接管麦克风');
+    } else if (event.code !== 1000 || !mediaWs || recoveringGeneration === generation) {
+      restoreConversationConnection();
+    } else {
+      // A gateway can normalize an ownership close to 1000. Reclaim the
+      // microphone only when a simultaneous media disconnect confirms the outage.
+      setTimeout(() => {
+        if (generation === micLifecycleGeneration && appStarted && !micWs && recoveringGeneration !== generation) {
+          stopMic();
+          setStatus('麦克风连接已结束，可重新开始对话');
+        }
+      }, 1200);
+    }
   };
   ws.onerror = () => {
     if (micWs !== ws || generation !== micLifecycleGeneration) return;
@@ -1140,6 +1237,32 @@ function connectMicWS(generation) {
   return ws;
 }
 
+async function restoreConversationConnection() {
+  const generation = micLifecycleGeneration;
+  if (!appStarted || recoveringGeneration === generation) return;
+  recoveringGeneration = generation;
+  setStatus('连接中断，正在恢复…');
+  try {
+    for (let attempt = 0; attempt < 12; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, Math.min(250 * (attempt + 1), 1500)));
+      if (!appStarted || generation !== micLifecycleGeneration) return;
+      connectLogs();
+      const media = connectMedia();
+      if (media.readyState !== WebSocket.OPEN) continue;
+      const mic = connectMicWS(generation);
+      if (mic.readyState === WebSocket.OPEN && activeSlot?.activated) {
+        log('conversation reconnected');
+        if (!visibleAssistantTurn) setStatus('listening');
+        return;
+      }
+    }
+    stopMic();
+    showStartupError(new Error('连接恢复超时，请点击开始对话重试。'));
+  } finally {
+    if (recoveringGeneration === generation) recoveringGeneration = null;
+  }
+}
+
 function floatToPcm16LE(x) {
   const out = new ArrayBuffer(x.length * 2);
   const v = new DataView(out);
@@ -1150,7 +1273,43 @@ function floatToPcm16LE(x) {
   return out;
 }
 
+let lastVoicedPosition = null;
+let lastClockReportMs = -Infinity;
+let lastReportedCursor = null;
+function reportListenerPosition(samples) {
+  const slot = activeSlot;
+  if (!slot || slot.timelineOrigin === null || slot.video.paused || slot.video.seeking) {
+    lastVoicedPosition = null;
+    return;
+  }
+  const now = performance.now();
+  if (now - lastClockReportMs >= 160) {
+    let buffered = 0;
+    const cursor = slot.video.currentTime;
+    for (let i = 0; i < slot.video.buffered.length; ++i) {
+      if (slot.video.buffered.start(i) <= cursor && slot.video.buffered.end(i) >= cursor)
+        buffered = slot.video.buffered.end(i) - cursor;
+    }
+    micWs.send(JSON.stringify({type:'playout_clock', epoch:slot.streamEpoch,
+      pts:cursor - slot.timelineOrigin, buffered, advancing:lastReportedCursor !== null && cursor - lastReportedCursor > 0.04}));
+    lastReportedCursor = cursor;
+    lastClockReportMs = now;
+  }
+  for (let i = samples.length - 1; i >= 0; --i) {
+    if (Math.abs(samples[i]) >= 500 / 32768) {
+      const pts = slot.video.currentTime - slot.timelineOrigin - (samples.length - 1 - i) / 16000;
+      lastVoicedPosition = { type: 'listener_position', epoch: slot.streamEpoch, pts };
+      return;
+    }
+  }
+  if (lastVoicedPosition && lastVoicedPosition.epoch === slot.streamEpoch) {
+    micWs.send(JSON.stringify(lastVoicedPosition));
+  }
+  lastVoicedPosition = null;
+}
+
 function resetMicPending16() {
+  lastVoicedPosition = null;
   micPending16 = new Float32Array(0);
   micResampleSourceRate = 0;
   micResampleWeightedSum = 0;
@@ -1171,9 +1330,9 @@ function sendMic16k(x16) {
       resetMicPending16();
       return;
     }
-    micWs.send(
-      floatToPcm16LE(merged.subarray(offset, offset + MIC_SEND_SAMPLES))
-    );
+    const packet = merged.subarray(offset, offset + MIC_SEND_SAMPLES);
+    reportListenerPosition(packet);
+    micWs.send(floatToPcm16LE(packet));
     offset += MIC_SEND_SAMPLES;
   }
   micPending16 = merged.slice(offset);
@@ -1253,31 +1412,55 @@ async function startMic(generation) {
   let nextProcessor = null;
   let nextZeroGain = null;
   try {
-    await waitForMicOpen(ws, generation);
     nextAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    // Invoke resume within the button gesture, before awaiting the network.
+    const resumed = nextAudioCtx.resume();
+    setStatus('正在连接麦克风…');
+    await waitForMicOpen(ws, generation);
+    setStatus('请允许浏览器使用麦克风…');
     nextStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      audio: { channelCount: 1, echoCancellation: micMode.value !== 'headphones', noiseSuppression: true, autoGainControl: true },
       video: false,
     });
+    await resumed;
     if (generation !== micLifecycleGeneration || micWs !== ws) {
       throw new Error('mic start cancelled');
     }
     const src = nextAudioCtx.createMediaStreamSource(nextStream);
-    nextProcessor = nextAudioCtx.createScriptProcessor(2048, 1, 1);
+    await nextAudioCtx.audioWorklet.addModule(new URL('static/mic-capture.js?v=20261102', document.baseURI));
+    if (generation !== micLifecycleGeneration || micWs !== ws) {
+      throw new Error('mic start cancelled');
+    }
+    nextProcessor = new AudioWorkletNode(nextAudioCtx, 'openva-mic-capture');
     src.connect(nextProcessor);
     nextZeroGain = nextAudioCtx.createGain();
     nextZeroGain.gain.value = 0;
     nextProcessor.connect(nextZeroGain);
     nextZeroGain.connect(nextAudioCtx.destination);
-    nextProcessor.onaudioprocess = e => {
+    const trackName = nextStream.getAudioTracks()[0]?.label || '麦克风';
+    document.getElementById('micInfo').hidden = false;
+    nextProcessor.port.onmessage = e => {
       if (
         generation !== micLifecycleGeneration
-        || micWs !== ws
-        || ws.readyState !== WebSocket.OPEN
+        || micWs?.readyState !== WebSocket.OPEN
       ) return;
-      const input = e.inputBuffer.getChannelData(0);
+      const input = new Float32Array(e.data);
       const x16 = downsampleTo16k(input, nextAudioCtx.sampleRate);
       sendMic16k(x16);
+      const now = performance.now();
+      if (now - micLevelUpdatedAt >= 100) {
+        micLevelUpdatedAt = now;
+        let energy = 0;
+        for (const sample of input) energy += sample * sample;
+        const db = 20 * Math.log10(Math.max(1e-6, Math.sqrt(energy / input.length)));
+        document.getElementById('micLevel').value = Math.max(0, Math.min(1, (db + 60) / 60));
+        document.getElementById('micLevelText').textContent = `${trackName} · 输入 ${db.toFixed(0)} dB`;
+      }
+    };
+    nextProcessor.onprocessorerror = () => {
+      log('microphone audio processor failed');
+      stopMic();
+      showStartupError(new Error('麦克风采集已停止，请重新开始对话。'));
     };
     audioCtx = nextAudioCtx;
     micStream = nextStream;
@@ -1285,7 +1468,7 @@ async function startMic(generation) {
     zeroGain = nextZeroGain;
     setStatus('running: speak directly');
     ensureIdlePlaying();
-    log(`mic started continuous browser_sr=${audioCtx.sampleRate}`);
+    log(`mic started continuous browser_sr=${audioCtx.sampleRate} capture=AudioWorklet device=${trackName}`);
   } catch (e) {
     if (nextProcessor) nextProcessor.disconnect();
     if (nextZeroGain) nextZeroGain.disconnect();
@@ -1302,7 +1485,9 @@ function stopMic() {
   micLifecycleGeneration += 1;
   startInProgress = false;
   if (processor) {
-    processor.onaudioprocess = null;
+    processor.port.onmessage = null;
+    processor.port.close();
+    processor.onprocessorerror = null;
     processor.disconnect();
     processor = null;
   }
@@ -1317,10 +1502,19 @@ function stopMic() {
     oldAudioCtx.close().catch(() => {});
   }
   resetMicPending16();
+  document.getElementById('micLevel').value = 0;
+  document.getElementById('micLevelText').textContent = '麦克风未连接';
   const oldMicWs = micWs;
   micWs = null;
   if (oldMicWs && oldMicWs.readyState < WebSocket.CLOSING) oldMicWs.close();
   appStarted = false;
+  const oldMedia = mediaWs, oldLogs = logWs;
+  mediaWs = null;
+  logWs = null;
+  for (const socket of [oldMedia, oldLogs]) {
+    if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
+  }
+  teardownMSE();
   holdLiveAudio('mic stopped');
   startBtn.disabled = false;
   startBtn.textContent = '开始对话';
@@ -1342,14 +1536,20 @@ startBtn.onclick = async () => {
   const generation = ++micLifecycleGeneration;
   startInProgress = true;
   startBtn.disabled = true;
-  startBtn.textContent = '对话中';
+  startBtn.textContent = '正在启动…';
+  startupErrorEl.hidden = true;
+  setStatus('正在连接画面…');
   try {
+    requireServicePage();
+    if (!window.MediaSource) throw new Error('当前浏览器不支持视频流，请在系统 Edge 或 Chrome 中打开。');
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('当前页面无法使用麦克风，请在系统 Edge 或 Chrome 中打开 HTTPS 测试链接。');
     ensureIdlePlaying();
     connectLogs();
     connectMedia();
     await startMic(generation);
     if (generation !== micLifecycleGeneration) throw new Error('mic start cancelled');
     appStarted = true;
+    startBtn.textContent = '对话中';
     setLiveVisible(false, 'system ready; listener until assistant speaks');
     ensureIdlePlaying();
     if (activeSlot) {
@@ -1364,7 +1564,7 @@ startBtn.onclick = async () => {
     appStarted = false;
     startBtn.disabled = false;
     startBtn.textContent = '开始对话';
-    log('start error: ' + e);
+    showStartupError(e);
   } finally {
     if (generation === micLifecycleGeneration) startInProgress = false;
   }
@@ -1383,7 +1583,33 @@ setInterval(() => {
   maybeReleaseLiveAudioAtBoundary();
   maybeReturnToListenerAtBoundary();
 }, 20);
+// Numeric playback diagnostics make the actual user's browser measurable.
+// No microphone content, transcript, device name or credentials are sent here.
+setInterval(() => {
+  if (!appStarted || !activeSlot) return;
+  const v = activeSlot.video;
+  const q = v.getVideoPlaybackQuality?.();
+  const metrics = {
+    t: Math.round(v.currentTime * 1000),
+    ahead: Math.round(bufferedAhead(activeSlot) * 1000),
+    ready: v.readyState, paused: v.paused, muted: v.muted,
+    frames: q?.totalVideoFrames || 0, dropped: q?.droppedVideoFrames || 0,
+    turn: activeAssistantTurn?.turnId ?? visibleAssistantTurn?.turnId ?? -1,
+  };
+  const url = new URL('health', new URL('.', location.href));
+  url.searchParams.set('playback', JSON.stringify(metrics));
+  fetch(url, {cache: 'no-store'}).catch(() => {});
+}, 5000);
 ensureIdlePlaying();
+setStatus('等待开始');
+log('client boot: startup diagnostics 20261102');
+try {
+  requireServicePage();
+} catch (error) {
+  showStartupError(error);
+  startBtn.disabled = true;
+  startBtn.textContent = '请从服务网址打开';
+}
 </script>
 </body>
 </html>

@@ -24,13 +24,35 @@ class WSConv2d(nn.Conv2d):
 class WSConv3d(nn.Conv3d):
     def __init__(self, *args, **kwargs):
         super(WSConv3d, self).__init__(*args, **kwargs)
+        self._cached_standardized_weight = None
+        self._cached_weight_key = None
 
-    def forward(self, inp):
+    def _apply(self, fn, recurse=True):
+        self._cached_standardized_weight = None
+        self._cached_weight_key = None
+        return super()._apply(fn, recurse=recurse)
+
+    def _standardized_weight(self):
         weight = self.weight
         weight_mean = weight.mean(dim=1, keepdim=True).mean(dim=2, keepdim=True).mean(dim=3, keepdim=True).mean(dim=4, keepdim=True)
         weight = weight - weight_mean
         std = weight.view(weight.size(0), -1).std(dim=1).view(-1, 1, 1, 1, 1) + 1e-5
-        weight = weight / std.expand_as(weight)
+        return weight / std.expand_as(weight)
+
+    def forward(self, inp):
+        # Inference uses fixed convolution weights. Avoid repeating their
+        # standardization for each frame, retaining the original reductions.
+        if not self.training and not torch.is_grad_enabled() and not self.weight.is_inference():
+            key = (id(self.weight), self.weight._version, self.weight.device, self.weight.dtype)
+            if self._cached_standardized_weight is None or self._cached_weight_key != key:
+                with torch.inference_mode(False), torch.no_grad():
+                    self._cached_standardized_weight = self._standardized_weight()
+                self._cached_weight_key = key
+            weight = self._cached_standardized_weight
+        else:
+            self._cached_standardized_weight = None
+            self._cached_weight_key = None
+            weight = self._standardized_weight()
         return F.conv3d(inp, weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
 
 

@@ -269,8 +269,15 @@ class SPADE(nn.Module):
         normalized = self.param_free_norm(x)
         segmap = F.interpolate(segmap, size=x.size()[2:], mode='nearest')
         actv = self.mlp_shared(segmap)
+        del segmap
         gamma = self.mlp_gamma(actv)
         beta = self.mlp_beta(actv)
+        del actv
+        if not self.training and not torch.is_grad_enabled():
+            # These are private convolution/normalization outputs. Reuse their
+            # storage in inference while preserving add, multiply, add order.
+            gamma.add_(1)
+            return normalized.mul_(gamma).add_(beta)
         out = normalized * (1 + gamma) + beta
         return out
 

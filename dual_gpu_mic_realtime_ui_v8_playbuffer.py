@@ -48,6 +48,7 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
     import queue
     import numpy as np
     import torch
+    from collections import deque
     from contextlib import nullcontext
 
     # The launcher exposes the selected physical GPUs through
@@ -66,6 +67,11 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
 
     model = app._dystream_model
     noise_scheduler = app._noise_scheduler
+    from inference_memory import MemoryRecorder
+    memory = MemoryRecorder("motion", torch, device)
+    memory_frames = 0
+    if memory.enabled:
+        memory.record("loaded", {"motion": model})
 
     audio_sr = int(app.OmegaConf.select(app._dystream_cfg.config, "model.audio_sr", default=16000))
     pose_fps = int(app.OmegaConf.select(app._dystream_cfg.config, "model.pose_fps", default=25))
@@ -281,6 +287,11 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
     current_visible = False
     current_mode = "IDLE_NO_USER"
     current_turn_id = 0
+    # Output k describes input audio frame k, even though lookahead makes it
+    # arrive in a later hop. Keep this across reset/compaction: the retained
+    # audio history still contains those not-yet-generated frames.
+    output_metadata = deque()
+    metadata_samples = 0
 
     generated_idx = 0  # original global start_idx already generated
     step = 0
@@ -327,6 +338,33 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
         return True
 
     with ctx, torch.inference_mode():
+        # Read-only, per-model CPU cache. Nonzero conditioning, mismatched shapes
+        # or unprimed lengths always execute the original full-history encoder.
+        zero_features = {}
+        hop_frames = hop_samples // samples_per_frame
+        cached_width = window + hop_frames + int(args.feature_lag_frames) + 1
+        if (torch.cuda.is_available() and not getattr(model, "training", True)
+                and hop_frames and hop_samples % samples_per_frame == 0):
+            with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
+                for hop_number in range(1, 551):
+                    length = context_frames + hop_number * hop_frames
+                    silence = torch.zeros((1, length * samples_per_frame), device=device)
+                    encoded_other = model.get_audio2face_fea_other(silence, None, length)
+                    first = max(0, length - cached_width)
+                    tail = encoded_other[:, first:].contiguous().cpu()
+                    if hop_number in (1, 10, 75, 200, 350, 550):
+                        reference = model.get_audio2face_fea_other(silence, None, length)
+                        if not torch.equal(reference[:, first:].cpu(), tail):
+                            zero_features.clear()
+                            print("[POSE CACHE] unequal; original encoder retained", flush=True)
+                            break
+                    zero_features[length] = (first, tail)
+                    del encoded_other
+                    if hop_number % 32 == 0:
+                        torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
+        cache_hits = 0
+        print(f"[POSE CACHE] ready lengths={len(zero_features)}", flush=True)
         if not getattr(model, "cuda_graph_enabled", False):
             model.setup_cuda_graphs(num_inference_steps=args.denoising_steps)
 
@@ -399,6 +437,13 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
                 # Accumulate real audio after prefix silence.
                 real_audio = np.concatenate([real_audio, hop.astype(np.float32)], axis=0)
                 real_audio_other = np.concatenate([real_audio_other, hop_other.astype(np.float32)], axis=0)
+                metadata_samples += hop_samples
+                complete_metadata_frames, metadata_samples = divmod(metadata_samples, samples_per_frame)
+                output_metadata.extend(
+                    {"generation": current_generation, "visible": current_visible,
+                     "mode": current_mode, "turn_id": current_turn_id}
+                    for _ in range(complete_metadata_frames)
+                )
 
                 # Original app does:
                 # audio_self = zeros(prefix) + full_speaker_audio
@@ -447,7 +492,23 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
 
                 # Encode retained history (all audio unless compaction is enabled).
                 audio_feat = model.get_audio2face_fea(audio_tensor, None, total_len)
-                audio_other_feat = model.get_audio2face_fea_other(audio_other_tensor, None, total_len)
+                entry = zero_features.get(total_len)
+                feature_origin = 0
+                if entry and generated_idx >= entry[0] and not np.any(audio_other_full):
+                    feature_origin, tail = entry
+                    audio_other_feat = tail.to(device)
+                    cache_hits += 1
+                    # In-stream verification compares the actual overlapping model input
+                    # for this hop; a failure immediately falls back for future hops.
+                    if cache_hits in (1, 32, 128, 384):
+                        normal = model.get_audio2face_fea_other(audio_other_tensor, None, total_len)
+                        equal = torch.equal(normal[:, feature_origin:], audio_other_feat)
+                        print(f"[POSE CACHE] hit={cache_hits} actual_equal={equal}", flush=True)
+                        if not equal:
+                            zero_features.clear()
+                            feature_origin, audio_other_feat = 0, normal
+                else:
+                    audio_other_feat = model.get_audio2face_fea_other(audio_other_tensor, None, total_len)
 
                 out_frames = []
                 produced_start = generated_idx
@@ -464,7 +525,7 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
 
                     out1 = model.one_clip_only_inference_cuda_graph(
                         per_compute_audio_feature=audio_feat[:, start_idx:end_idx],
-                        per_compute_audio_other_feature=audio_other_feat[:, start_idx:end_idx],
+                        per_compute_audio_other_feature=audio_other_feat[:, start_idx-feature_origin:end_idx-feature_origin],
                         past_audio_self=past_audio,
                         audio_self=audio_slice,
                         past_audio_other=past_audio_other,
@@ -475,6 +536,18 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
                         noise_scheduler=noise_scheduler,
                         num_inference_steps=args.denoising_steps,
                     )
+                    memory_frames += 1
+                    if memory.enabled and memory_frames & (memory_frames - 1) == 0:
+                        gpt = getattr(model, "cuda_graph_gpt", None)
+                        diffusion = getattr(model, "cuda_graph_diffusion", None)
+                        memory.record(f"frames_{memory_frames}", {"motion": model}, {
+                            "gpt": vars(gpt) if gpt is not None else {},
+                            "diffusion": vars(diffusion) if diffusion is not None else {},
+                            "audio": audio_tensor, "other_audio": audio_other_tensor,
+                            "features": audio_feat, "other_features": audio_other_feat,
+                            "past_motion": past_motion, "anchor": anchor_motion, "output": out1,
+                            "ema": getattr(app._dystream_ema, "shadow_params", None),
+                        })
 
                     anchor_blend = 0.0
                     if current_mode == "IDLE_NO_USER":
@@ -514,6 +587,7 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
                     "produced_end": generated_idx,
                     "generation": current_generation,
                     "visible": current_visible,
+                    "frame_metadata": [output_metadata.popleft() for _ in out_frames],
                 }
 
                 motion_q.put(item)
@@ -851,6 +925,34 @@ class ListeningLatentFaceController:
         self.frame_i += int(out.shape[0])
         return out
 
+def offload_reference_encoders(torch, vis_ctx, names=("face_encoder", "motion_encoder")):
+    """Release startup-only encoder CUDA storage, keeping cached features intact."""
+    encoders = {name: vis_ctx[name] for name in names}
+    cuda_tensor_bytes = {
+        name: sum(t.numel() * t.element_size()
+                  for tensors in (module.parameters(), module.buffers())
+                  for t in tensors if t.is_cuda)
+        for name, module in encoders.items()
+    }
+    cuda_device = next((p.device for module in encoders.values()
+                        for p in module.parameters() if p.is_cuda), None)
+    before = {}
+    if cuda_device is not None:
+        torch.cuda.synchronize(cuda_device)
+        before = {"allocated": torch.cuda.memory_allocated(cuda_device),
+                  "reserved": torch.cuda.memory_reserved(cuda_device)}
+    for module in encoders.values():
+        module.cpu()
+    result = {"encoder_cuda_tensor_bytes": cuda_tensor_bytes}
+    if cuda_device is not None:
+        torch.cuda.synchronize(cuda_device)
+        with torch.cuda.device(cuda_device):
+            torch.cuda.empty_cache()
+        result["allocated_freed_bytes"] = before["allocated"] - torch.cuda.memory_allocated(cuda_device)
+        result["reserved_released_bytes"] = before["reserved"] - torch.cuda.memory_reserved(cuda_device)
+    return result
+
+
 def render_worker(args, anchor_q, motion_q, frame_q):
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["HF_HUB_OFFLINE"] = "1"
@@ -865,9 +967,15 @@ def render_worker(args, anchor_q, motion_q, frame_q):
     import app
 
     device = app.DEVICE
+    from inference_memory import MemoryRecorder
+    memory = MemoryRecorder("render", torch, device)
+    memory_chunks = 0
 
     print(f"[RENDER_GPU{args.render_gpu}] loading visualization...", flush=True)
     app.load_visualization_model()
+    if memory.enabled:
+        memory.record("loaded", {name: module for name, module in app._vis_ctx.items()
+                                 if isinstance(module, torch.nn.Module)})
 
     image_path = get_paths(app, args.sample)
 
@@ -876,6 +984,9 @@ def render_worker(args, anchor_q, motion_q, frame_q):
     resized_pil, masked_pil, motion_latent_cpu = app.process_image(image_pil)
 
     anchor_np = motion_latent_cpu.numpy()
+
+    motion_offload = offload_reference_encoders(torch, app._vis_ctx, ("motion_encoder",))
+    print(f"[RENDER_MEMORY] motion encoder offloaded to CPU: {motion_offload}", flush=True)
 
     transform = app._vis_ctx["transform"]
     face_encoder = app._vis_ctx["face_encoder"]
@@ -887,12 +998,19 @@ def render_worker(args, anchor_q, motion_q, frame_q):
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     fe0 = time.perf_counter()
-    face_feat = face_encoder(ref_img_tensor).detach()
+    with torch.no_grad():
+        face_feat = face_encoder(ref_img_tensor).detach()
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     fe1 = time.perf_counter()
 
     print(f"[RENDER_GPU{args.render_gpu}] cached face_feat={fe1 - fe0:.4f}s", flush=True)
+
+    # The avatar is fixed for this worker. Subsequent frames consume face_feat
+    # and anchor_np, never these encoders or the source image CUDA tensor.
+    del ref_img_tensor
+    offload_stats = offload_reference_encoders(torch, app._vis_ctx, ("face_encoder",))
+    print(f"[RENDER_MEMORY] face encoder offloaded to CPU: {offload_stats}", flush=True)
 
     warm_anchor = torch.from_numpy(anchor_np).float()
     if warm_anchor.dim() == 1:
@@ -923,6 +1041,10 @@ def render_worker(args, anchor_q, motion_q, frame_q):
             torch.cuda.synchronize()
         b = time.perf_counter()
         print(f"[RENDER_WARMUP] {k} render={b - a:.4f}s", flush=True)
+
+    if memory.enabled:
+        memory.record("warmed", {"generator": face_generator, "flow": flow_estimator},
+                      {"face_features": face_feat, "anchor": warm_anchor, "warm_chunk": warm_chunk})
 
     # 预热完成后再放行 motion。
     anchor_q.put(anchor_np)
@@ -1081,18 +1203,24 @@ def render_worker(args, anchor_q, motion_q, frame_q):
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         r1 = time.perf_counter()
+        memory_chunks += 1
+        if memory.enabled and memory_chunks & (memory_chunks - 1) == 0:
+            memory.record(f"chunks_{memory_chunks}", {"generator": face_generator, "flow": flow_estimator},
+                          {"face_features": face_feat, "anchor": warm_anchor, "warm_chunk": warm_chunk})
 
         # Keep turn metadata all the way to the MSE engine so stale idle/answer
         # frames can be discarded without guessing from queue order.
         for frame_offset, f in enumerate(video_np):
+            frame_metadata = item.get("frame_metadata")
+            meta = frame_metadata[frame_offset] if frame_metadata is not None else item
             put_drop_old(
                 frame_q,
                 {
                     "frame": f,
-                    "generation": generation,
-                    "visible": bool(item.get("visible", False)),
-                    "mode": mode,
-                    "turn_id": turn_id,
+                    "generation": int(meta.get("generation", generation)),
+                    "visible": bool(meta.get("visible", False)),
+                    "mode": str(meta.get("mode", mode)),
+                    "turn_id": int(meta.get("turn_id", turn_id)),
                     "frame_idx": produced_start + frame_offset,
                 },
             )

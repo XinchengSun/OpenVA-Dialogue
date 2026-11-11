@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure a running local server; does not launch models or read credentials.
+"""Measure a running local server; does not launch models or record credentials.
 
 Example (run ON the GPU server, in the server's PID namespace):
   python scripts/benchmark_single_gpu.py --base ws://127.0.0.1:7871 \
@@ -17,7 +17,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
+import re
 import shutil
 import statistics
 import struct
@@ -42,6 +44,11 @@ WORKER_FIELDS = {
     "render_exitcode", "motion_pid", "render_pid", "motion_device", "render_device",
 }
 EVENT_FIELDS = {"type", "turn_id", "generation", "epoch", "mime", "media_time"}
+TRANSPORT_FIELDS = {
+    "client_id", "running", "output_queue_depth", "output_queue_limit",
+    "pending_callbacks", "callback_limit", "dropped_best_effort", "rejected_controls",
+    "diagnostic_queue_depth", "diagnostic_queue_limit", "diagnostic_pending_callbacks", "diagnostic_callback_limit",
+}
 
 
 def run(command: list[str], timeout: float = 10) -> subprocess.CompletedProcess:
@@ -218,6 +225,14 @@ def health_snapshot(url: str) -> dict:
         result["dialog_session"] = {key: session[key] for key in
             ("ready", "closed", "task_done", "tts_active", "mode", "custom_cascade_ready")
             if key in session}
+    for name in ("media_transport", "log_transport"):
+        if isinstance(payload.get(name), list):
+            result[name] = [
+                {key: value for key, value in item.items()
+                 if key in TRANSPORT_FIELDS and isinstance(value, (int, float, bool))
+                 and math.isfinite(value)}
+                for item in payload[name] if isinstance(item, dict)
+            ]
     return result
 
 
@@ -580,6 +595,22 @@ def summarize(args, captured: dict, videos: list[dict]) -> dict:
         "off_target_service_process_observations": off_target,
         "decoded_frames_delivered_per_wall_second": decoded / duration if duration else None,
         "health_latest_frame_seq_delta": seq_delta, "model_generation_fps": None,
+        "frame_freshness": {
+            name: distribution([h[name] for h in health
+                                if isinstance(h.get(name), (int, float))
+                                and not isinstance(h[name], bool) and math.isfinite(h[name])])
+            for name in ("latest_frame_age_sec", "latest_visible_frame_age_sec")
+        },
+        "dialogue_latency_ms": {
+            event: distribution([
+                turn["voice_end_to_event_ms"][event]
+                for turn in captured.get("dialogue", {}).get("turns", [])
+                if turn.get("lifecycle_complete") is True
+                and isinstance(turn.get("voice_end_to_event_ms", {}).get(event), (int, float))
+                and math.isfinite(turn["voice_end_to_event_ms"][event])
+            ])
+            for event in ("assistant_turn_started", "assistant_media_boundary", "assistant_media_ended")
+        },
         "videos": videos, "capture": captured,
         "measurement_notes": [
             "Binary WebSocket message rate and completed fMP4 fragment rate are NOT video FPS.",
@@ -613,11 +644,19 @@ def main() -> int:
     parser.add_argument("--min-delivered-fps", type=float)
     parser.add_argument("--ffprobe", default="ffprobe")
     parser.add_argument("--ffmpeg", default="ffmpeg", help="optional exact decoded-frame repeat audit")
+    parser.add_argument("--profile", default="unspecified",
+                        choices=("unspecified", "single_gpu_voxcpm2", "multi_gpu_fish", "custom"))
+    parser.add_argument("--runtime-config", type=Path, action="append", default=[],
+                        help="repeat for runtime config files; only SHA-256 digests are saved")
+    parser.add_argument("--service-commit", help="operator-verified service Git SHA; recorded as a declaration, not automatic attestation")
     args = parser.parse_args()
+    if args.service_commit and not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", args.service_commit):
+        parser.error("--service-commit must be a full hexadecimal Git commit SHA")
     parsed = urlsplit(args.base)
     if parsed.scheme not in {"ws", "wss"} or not parsed.netloc or parsed.query or parsed.fragment or parsed.username:
         parser.error("--base must be ws(s)://host[:port] without credentials, query or fragment")
-    if min(args.duration_sec, args.sample_sec, args.turn_timeout_sec, args.turns) <= 0 or args.input_delay_sec < 0:
+    if (not all(math.isfinite(value) for value in (args.duration_sec, args.sample_sec, args.turn_timeout_sec, args.input_delay_sec))
+            or min(args.duration_sec, args.sample_sec, args.turn_timeout_sec, args.turns) <= 0 or args.input_delay_sec < 0):
         parser.error("durations and turns must be positive; input delay must be nonnegative")
     if any(pid <= 0 for pid in args.server_pid):
         parser.error("server PIDs must be positive")
@@ -635,7 +674,15 @@ def main() -> int:
         parser.error("nvidia-smi is required; run this benchmark on the GPU server")
     if args.input_wav and not args.input_wav.is_file():
         parser.error("--input-wav does not exist")
+    if any(not path.is_file() for path in args.runtime_config):
+        parser.error("each --runtime-config must name an existing file")
+    try:
+        from scripts.benchmark_provenance import collect_provenance
+    except ModuleNotFoundError:
+        from benchmark_provenance import collect_provenance
+    provenance = collect_provenance(Path(__file__).resolve().parents[1], args)
     output.mkdir(parents=True, exist_ok=False)
+    (output / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
     captured = asyncio.run(capture(args, output))
     videos = []
     for epoch in captured["epochs"]:
@@ -644,6 +691,7 @@ def main() -> int:
         except Exception as exc:
             captured["errors"].append({"component": "video_inspection", "error": type(exc).__name__})
     report = summarize(args, captured, videos)
+    report["provenance"] = provenance
     report_path = output / "report.json"
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"status": report["status"], "checks": report["checks"], "report": str(report_path)}, ensure_ascii=False))

@@ -205,11 +205,29 @@ or restart fails. See [README_CUSTOMIZATION.md](README_CUSTOMIZATION.md).
 
 ## Documentation
 
+The [2026-11-11 infra release](docs/infra_release_20261111.md) records the saved
+realtime dialogue version, its configuration, measured latency and memory, and
+remaining interruption and playback limitations.
+
+For the consolidated model architecture, inference flow, optimization status, evidence and TODOs, see [Model and optimization README (Chinese)](README_MODEL.md).
+
 | Guide | Contents |
 | --- | --- |
 | [Deployment](docs/deployment.md) | tested host, Fish runtime, ports, lifecycle, alternative backends |
 | [Single GPU](docs/single_gpu_4090.md) | 4090 setup, optimization switches, validation commands |
 | [Single-GPU measurements](docs/single_gpu_validation_20260921.md) | measured latency/memory/FPS, methodology, unverified scope |
+| [Infrastructure correctness review](docs/infra_correctness_review_20261026.md) | counterexamples, corrected lifecycle contracts, disabled experimental defaults, evidence limits (Chinese) |
+| [Inference performance changes](docs/inference_performance_20261026.md) | invariant renderer caches, device timestep handling, optional diffusion conditioning reuse, CPU measurements and GPU acceptance limits (Chinese) |
+| [Reference encoder offload](docs/reference_encoder_offload_20261028.md) | release startup-only encoder GPU storage while retaining cached avatar features; component measurements and 12 GiB limits (Chinese) |
+| [Inference memory audit](docs/inference_memory_audit_20261028.md) | selective motion loading, SPADE storage reuse, AudioVAE offload, measured CUDA components and pending full 12 GiB acceptance (Chinese) |
+| [RBA renderer optimization](docs/rba_renderer_optimization_20261028.md) | original spectral-weight reuse experiments and shorter temporary lifetimes; trained-checkpoint equivalence and measured memory gains (Chinese) |
+| [Memory round 4](docs/memory_round4_20261028.md) | renderer optimizations now enabled by default, optional CPU text lookup, weight/KV inventory and in-stream memory diagnostics (Chinese) |
+| [Reply latency audit](docs/reply_latency_audit_20261030.md) | pinned upstream design comparison and controlled turn/text/browser gate replays; no full-service latency claim (Chinese) |
+| [Stage timestamps](docs/latency_trace_20261101.md) | opt-in ASR/LLM/TTS traces; separate sentence buffering from whole-response waits (Chinese) |
+| [Server A/B and memory results](docs/server_ab_20261101.md) | nine measured stages, dynamic allocator replay, trained-output equality, long-sentence and browser waits (Chinese) |
+| [Speech playback investigation](docs/playback_stutter_20261101.md) | measured GPU scheduling improvement, transport jitter, speech-preserving playback, and remaining stalls |
+| [Listener and complete replies](docs/listener_story_20261102.md) | remove thinking-time pauses and playback acceleration; validate complete story audio without a three-sentence cutoff |
+| [Server bootstrap and proxy fixes](docs/server_bootstrap_20261101.md) | live baseline dialogue, small-sample Qwen selection, browser checks and remaining GPU ownership limits (Chinese) |
 | [Architecture](docs/architecture.md) | Listener/Speaker state, interruption, media boundaries, GPU placement |
 | [Customization](README_CUSTOMIZATION.md) | portrait and zero-shot voice-cloning workflow |
 | [Model weights](docs/weights.md) | pinned upstream assets and runtime paths |

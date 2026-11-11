@@ -14,13 +14,39 @@ class Direction(nn.Module):
         super(Direction, self).__init__()
 
         self.weight = nn.Parameter(torch.randn(latent_dim, num_direction))
+        self._cached_q = None
+        self._cached_weight_key = None
+
+    def _apply(self, fn, recurse=True):
+        # Module dtype/device conversions may replace .data without advancing
+        # the parameter version, including a half()->float() round trip.
+        self._cached_q = None
+        self._cached_weight_key = None
+        return super()._apply(fn, recurse=recurse)
 
     def forward(self, input):
-        weight = self.weight + 1e-8
-        Q, R = torch.qr(weight)  # get eignvector, orthogonal [n1, n2, n3, n4]
+        # The learned direction basis is identical for every inference frame.
+        # Keep the original QR and projection arithmetic; only reuse its result
+        # while the parameter is unchanged and autograd is disabled.
+        cacheable = (
+            not self.training and not torch.is_grad_enabled()
+            and not self.weight.is_inference()
+        )
+        if cacheable:
+            key = (id(self.weight), self.weight._version,
+                   self.weight.device, self.weight.dtype)
+            if self._cached_q is None or self._cached_weight_key != key:
+                with torch.inference_mode(False), torch.no_grad():
+                    self._cached_q, _ = torch.qr(self.weight + 1e-8)
+                self._cached_weight_key = key
+            Q = self._cached_q
+        else:
+            self._cached_q = None
+            self._cached_weight_key = None
+            Q, _ = torch.qr(self.weight + 1e-8)
 
         if input is None:
-            return Q
+            return Q.clone() if cacheable else Q
         else:
             input_diag = torch.diag_embed(input)  # alpha, diagonal matrix
             out = torch.matmul(input_diag, Q.T)

@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "record_status": "historical_candidate_superseded_by_correctness_review",
+  "candidate_commit": "958aee3eb3b8e7cd856aa486d050a3e3df53ca91",
+  "review": "infra_correctness_review_20261026.md",
+  "correction": "One old baseline assertion incorrectly required whole-turn context release on a single failed sentence; do not treat six failures as six verified fixes.",
+  "validation_date": "2026-10-26",
+  "baseline_commit": "73a2d4846172ad1e1ea1037b5294b922113e8de9",
+  "candidate_identity": "Git commit containing this record; local evidence manifest records the full resulting SHA",
+  "environment": {
+    "os": "Windows",
+    "python": "3.12.3",
+    "torch": "2.10.0+cpu",
+    "scope": "CPU fixtures and source/JavaScript checks; no model-weight load or paid API calls"
+  },
+  "python_unittest": {
+    "discovered": 174,
+    "passed": 156,
+    "skipped": 18,
+    "failed": 0,
+    "groups": {
+      "release": {"discovered": 56, "passed": 52, "skipped": 4},
+      "provenance_llm_media": {"discovered": 35, "passed": 35, "skipped": 0},
+      "tts_and_openai_speech": {"discovered": 71, "passed": 57, "skipped": 14},
+      "inference_contracts": {"discovered": 12, "passed": 12, "skipped": 0}
+    },
+    "skip_reasons": ["Four Linux-specific launcher/symlink checks on Windows", "Fourteen Pipecat adapter tests because Pipecat is not installed"]
+  },
+  "javascript": {
+    "media_buffer_scenarios_passed": 3,
+    "customization_tests_passed": 8,
+    "microphone_resampler": "passed at 44100 and 48000 Hz, 5 seconds, 80000 output samples"
+  },
+  "other_checks": {
+    "python_compileall": "pass",
+    "git_diff_check": "pass",
+    "release_cli_bash_syntax": "pass via Git Bash; Linux launcher behavior not executed"
+  },
+  "baseline_regression_replay": {
+    "selected_tests": 6,
+    "expected_assertion_failures_on_baseline": 6,
+    "import_or_runtime_errors": 0,
+    "same_tests_pass_on_candidate": true,
+    "scope": "Five TTS resource/backpressure regressions plus LLM provider read-ahead"
+  },
+  "media_overload": {
+    "command": "python tests/bench_media_backpressure.py",
+    "submitted_synthetic_logs": 10000,
+    "baseline_queued_logs": 64,
+    "candidate_queued_logs": 64,
+    "baseline_pending_async_tasks": 9936,
+    "candidate_pending_async_tasks": 0,
+    "candidate_counted_dropped_best_effort_logs": 9936,
+    "scope": "Diagnostic logs only; no audio or encoded video dropped in this experiment"
+  },
+  "not_validated": [
+    "Hosted GitHub Actions execution",
+    "Linux Python 3.11 service integration and shell lifecycle tests",
+    "Real GPU startup, throughput, TTFA, VRAM, or long-run stability",
+    "Browser decoder/playback, public network latency, perceptual quality, and lip sync"
+  ]
+}

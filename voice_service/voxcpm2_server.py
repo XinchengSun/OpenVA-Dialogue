@@ -11,9 +11,11 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 import signal
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -207,58 +209,59 @@ class NanoVoxCPM2Backend:
         )
         threshold = 10.0 ** (self._leading_trim_dbfs / 20.0)
 
-        async for waveform in pool.generate(**generation_kwargs):
-            samples = np.asarray(waveform, dtype=np.float32).reshape(-1)
-            if samples.size == 0:
-                continue
-            pcm16 = (np.clip(samples, -1.0, 1.0) * 32767.0).astype("<i2")
-            pcm_bytes = pcm16.tobytes()
-            if pass_through:
-                yield pcm_bytes
-                continue
+        async with aclosing(pool.generate(**generation_kwargs)) as stream:
+            async for waveform in stream:
+                samples = np.asarray(waveform, dtype=np.float32).reshape(-1)
+                if samples.size == 0:
+                    continue
+                pcm16 = (np.clip(samples, -1.0, 1.0) * 32767.0).astype("<i2")
+                pcm_bytes = pcm16.tobytes()
+                if pass_through:
+                    yield pcm_bytes
+                    continue
 
-            pending.append((samples, pcm_bytes))
-            scan_samples = np.concatenate((scan_samples, samples))
-            analysis = scan_samples[:max_scan_samples]
-            frame_count = analysis.size // frame_samples
-            onset_sample: int | None = None
-            if frame_count >= confirm_frames:
-                frames = analysis[: frame_count * frame_samples].reshape(
-                    frame_count,
-                    frame_samples,
-                )
-                rms = np.sqrt(np.mean(np.square(frames), axis=1, dtype=np.float64))
-                active = rms >= threshold
-                for index in range(frame_count - confirm_frames + 1):
-                    if bool(np.all(active[index : index + confirm_frames])):
-                        onset_sample = index * frame_samples
-                        break
-
-            if onset_sample is not None:
-                samples_to_drop = max(0, onset_sample - preroll_samples)
-                if samples_to_drop:
-                    logger.info(
-                        "trimmed %.1f ms of generated leading silence",
-                        samples_to_drop * 1000.0 / self.sample_rate,
+                pending.append((samples, pcm_bytes))
+                scan_samples = np.concatenate((scan_samples, samples))
+                analysis = scan_samples[:max_scan_samples]
+                frame_count = analysis.size // frame_samples
+                onset_sample: int | None = None
+                if frame_count >= confirm_frames:
+                    frames = analysis[: frame_count * frame_samples].reshape(
+                        frame_count,
+                        frame_samples,
                     )
-                remaining_drop = samples_to_drop
-                for pending_samples, pending_pcm in pending:
-                    if remaining_drop >= pending_samples.size:
-                        remaining_drop -= pending_samples.size
-                        continue
-                    if remaining_drop:
-                        yield pending_pcm[remaining_drop * 2 :]
-                        remaining_drop = 0
-                    else:
+                    rms = np.sqrt(np.mean(np.square(frames), axis=1, dtype=np.float64))
+                    active = rms >= threshold
+                    for index in range(frame_count - confirm_frames + 1):
+                        if bool(np.all(active[index : index + confirm_frames])):
+                            onset_sample = index * frame_samples
+                            break
+
+                if onset_sample is not None:
+                    samples_to_drop = max(0, onset_sample - preroll_samples)
+                    if samples_to_drop:
+                        logger.info(
+                            "trimmed %.1f ms of generated leading silence",
+                            samples_to_drop * 1000.0 / self.sample_rate,
+                        )
+                    remaining_drop = samples_to_drop
+                    for pending_samples, pending_pcm in pending:
+                        if remaining_drop >= pending_samples.size:
+                            remaining_drop -= pending_samples.size
+                            continue
+                        if remaining_drop:
+                            yield pending_pcm[remaining_drop * 2 :]
+                            remaining_drop = 0
+                        else:
+                            yield pending_pcm
+                    pending.clear()
+                    pass_through = True
+                elif scan_samples.size >= max_scan_samples:
+                    # No confident onset: preserve the original stream byte-for-byte.
+                    for _, pending_pcm in pending:
                         yield pending_pcm
-                pending.clear()
-                pass_through = True
-            elif scan_samples.size >= max_scan_samples:
-                # No confident onset: preserve the original stream byte-for-byte.
-                for _, pending_pcm in pending:
-                    yield pending_pcm
-                pending.clear()
-                pass_through = True
+                    pending.clear()
+                    pass_through = True
 
         # Short or silence-only generations never crossed the scan limit. Keep
         # their original chunks and samples rather than risking a clipped onset.
@@ -282,6 +285,9 @@ class VoxCPM2WebSocketBridge:
 
     def __init__(self, backend: PCMBackend) -> None:
         self._backend = backend
+        self._send_timeout = float(os.getenv("VOXCPM2_SEND_TIMEOUT_SEC", "0"))
+        if not math.isfinite(self._send_timeout) or self._send_timeout < 0:
+            raise ValueError("VOXCPM2_SEND_TIMEOUT_SEC must be non-negative and finite")
 
     async def handle_connection(self, websocket: Any) -> None:
         request_id = ""
@@ -300,7 +306,8 @@ class VoxCPM2WebSocketBridge:
                 health_check = getattr(self._backend, "health_check", None)
                 if callable(health_check):
                     await health_check()
-                await websocket.send(
+                await self._send(
+                    websocket,
                     json.dumps(
                         {
                             "type": "health",
@@ -315,7 +322,8 @@ class VoxCPM2WebSocketBridge:
                 if not context_id:
                     raise ValueError("release_context requires non-empty context_id")
                 await self._backend.release_context(context_id)
-                await websocket.send(
+                await self._send(
+                    websocket,
                     json.dumps(
                         {
                             "type": "released",
@@ -335,7 +343,8 @@ class VoxCPM2WebSocketBridge:
             if not request_id or not text:
                 raise ValueError("synthesize requires non-empty request_id and text")
 
-            await websocket.send(
+            await self._send(
+                websocket,
                 json.dumps(
                     {
                         "type": "start",
@@ -373,13 +382,6 @@ class VoxCPM2WebSocketBridge:
                         "status": status,
                     },
                 )
-                try:
-                    await self._backend.release_context(context_id)
-                except Exception:
-                    logger.exception(
-                        "failed to release cancelled VoxCPM2 context %s",
-                        context_id,
-                    )
             else:
                 await generation_task
                 await self._try_send_json(
@@ -414,6 +416,16 @@ class VoxCPM2WebSocketBridge:
             ]
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
+            # A Pipecat turn reuses one context across sentences. A transient
+            # request failure must not tombstone that turn and poison the next
+            # sentence; _stream_audio closes only this request's generator.
+            if generation_task is not None and cancelled.is_set():
+                try:
+                    await self._backend.release_context(context_id)
+                except Exception:
+                    logger.exception(
+                        "failed to release cancelled VoxCPM2 context %s", context_id
+                    )
 
     async def _stream_audio(
         self,
@@ -423,11 +435,15 @@ class VoxCPM2WebSocketBridge:
         text: str,
     ) -> int:
         pcm_bytes = 0
-        async for pcm16 in self._backend.generate_pcm16(text, context_id):
-            if not isinstance(pcm16, bytes) or not pcm16 or len(pcm16) % 2:
-                raise RuntimeError("backend returned invalid PCM16 chunk")
-            await websocket.send(pcm16)
-            pcm_bytes += len(pcm16)
+        # A disconnect can occur while send() awaits writable transport space,
+        # outside the generator itself. Close it here so GPU/HTTP work stops
+        # before the request task exits instead of relying on async-generator GC.
+        async with aclosing(self._backend.generate_pcm16(text, context_id)) as stream:
+            async for pcm16 in stream:
+                if not isinstance(pcm16, bytes) or not pcm16 or len(pcm16) % 2:
+                    raise RuntimeError("backend returned invalid PCM16 chunk")
+                await self._send(websocket, pcm16)
+                pcm_bytes += len(pcm16)
         if pcm_bytes == 0:
             raise RuntimeError("backend completed without PCM audio")
         return pcm_bytes
@@ -456,10 +472,24 @@ class VoxCPM2WebSocketBridge:
             raise ValueError("control message must be a JSON object")
         return value
 
-    @staticmethod
-    async def _try_send_json(websocket: Any, message: dict[str, Any]) -> None:
+    async def _send(self, websocket: Any, message: str | bytes) -> None:
+        if self._send_timeout == 0:
+            await websocket.send(message)
+        else:
+            try:
+                async with asyncio.timeout(self._send_timeout):
+                    await websocket.send(message)
+            except TimeoutError:
+                # A timed-out transport is retired, not reused for later
+                # control writes. The real WebSocket applies close_timeout.
+                close = getattr(websocket, "close", None)
+                if callable(close):
+                    await close(code=1011, reason="TTS send deadline exceeded")
+                raise
+
+    async def _try_send_json(self, websocket: Any, message: dict[str, Any]) -> None:
         try:
-            await websocket.send(json.dumps(message))
+            await self._send(websocket, json.dumps(message))
         except Exception:
             pass
 

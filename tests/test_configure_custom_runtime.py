@@ -232,11 +232,22 @@ class ConfigureCustomRuntimeTests(unittest.TestCase):
             self.assertNotIn("secret-test-key", result.stdout)
             self.assertFalse((config / "fish_s2pro.env").exists())
 
+    def test_single_gpu_uuid_is_preserved_in_both_configs(self):
+        uuid = "GPU-12345678-1234-1234-abcd-123456789abc"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = self._run(root, "--single-gpu", uuid)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            config = root / "runtime" / "config"
+            for filename in ["custom_cascade.env", "voxcpm2.env"]:
+                self.assertEqual(_env_value((config/filename).read_text(encoding="utf-8"), "CUDA_VISIBLE_DEVICES"), uuid)
+
     def test_single_gpu_rejects_invalid_ids_and_conflicting_options_before_writing(self):
         cases = [
             ("--single-gpu", "-1"),
             ("--single-gpu", "0,1"),
             ("--single-gpu", "cuda:0"),
+            ("--single-gpu", "GPU-12345678"),
             ("--single-gpu", "6", "--tts-backend", "fish_s2pro"),
             ("--single-gpu", "6", "--fish-gpus", "2,3"),
             ("--single-gpu", "6", "--dystream-gpus", "0,1"),
