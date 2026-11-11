@@ -108,7 +108,7 @@
     summary { padding: 12px 15px; color: #b8c1d1; cursor: pointer; user-select: none; font-size: 13px; }
     .settingsBody { padding: 0 15px 15px; }
     .settingsBody label { display: block; margin-bottom: 7px; color: var(--muted); font-size: 12px; }
-    input {
+    input, .settingsBody select {
       width: 100%; padding: 11px 12px; border-radius: 10px; border: 1px solid var(--line);
       background: #0a0d13; color: var(--text); font: inherit;
     }
@@ -159,6 +159,11 @@
   <details>
     <summary>对话设置</summary>
     <div class="settingsBody">
+      <label for="micMode">收音方式（开始对话时生效）</label>
+      <select id="micMode" style="margin-bottom: 12px">
+        <option value="speaker">外放 · 消除回声</option>
+        <option value="headphones">耳机 · 保留插话开头</option>
+      </select>
       <label for="instruction">回答风格</label>
       <input id="instruction" value="简洁完整地回答；讲故事、解释和步骤等任务要给出完整内容，不要只说开场白。" />
     </div>
@@ -178,6 +183,13 @@ const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 const interruptBtn = document.getElementById('interruptBtn');
 const instructionEl = document.getElementById('instruction');
+const micMode = document.getElementById('micMode');
+try {
+  if (localStorage.getItem('openva-mic-mode') === 'headphones') micMode.value = 'headphones';
+} catch {}
+micMode.addEventListener('change', () => {
+  try { localStorage.setItem('openva-mic-mode', micMode.value); } catch {}
+});
 const logEl = document.getElementById('log');
 const statusEl = document.getElementById('status');
 const startupErrorEl = document.getElementById('startupError');
@@ -211,9 +223,9 @@ let highestAssistantTurnId = -1;
 let lastBoundaryEventSeq = -1;
 const slotByVideo = new Map();
 
-// Retain two seconds of media so a late fragment does not immediately starve
-// playback. Fragment duration depends on the configured frame rate and GOP.
-const START_BUFFER_SEC = 2.00;
+// Initial reserve used by the measured 20786 dialogue profile.
+// Fragment duration depends on the configured frame rate and GOP.
+const START_BUFFER_SEC = 0.64;
 const HANDOFF_BUFFER_SEC = 0.16;
 // Retain recently played data for safe MSE cleanup without growing indefinitely.
 const BUFFER_RETENTION_SEC = 12;
@@ -505,7 +517,6 @@ function maybeReleaseLiveAudioAtBoundary() {
     && boundary.generation < expectedStreamGeneration
   ) return;
   const safeTime = slot.timelineOrigin + boundary.safeMediaTimeSec;
-  recoverSilentPrefix(slot, boundary, safeTime);
   if (slot.video.seeking) return;
   if (slot.video.currentTime + 0.005 < safeTime) return;
   const overshootMs = Math.max(0, (slot.video.currentTime - safeTime) * 1000);
@@ -523,30 +534,6 @@ function maybeReleaseLiveAudioAtBoundary() {
     `media boundary generation=${boundary.generation} turn=${boundary.turnId} ` +
     `overshoot_ms=${overshootMs.toFixed(1)}`
   );
-}
-
-function recoverSilentPrefix(slot, boundary, safeTime) {
-  // The server boundary identifies the FIRST sample of this reply. Only skip
-  // the muted prefix before it; never jump through an already visible reply.
-  const video = slot.video;
-  if (!liveAudioHeld || !video.muted || visibleAssistantTurn || video.seeking) return;
-  if (!Number.isFinite(safeTime) || safeTime - video.currentTime < 1.2) return;
-  const key = assistantTurnKey(boundary.streamEpoch, boundary.generation, boundary.turnId);
-  if (slot.silentPrefixRecoveredKey === key) return;
-  const target = safeTime - 0.16;
-  const ranges = slot.sourceBuffer?.buffered;
-  if (!ranges) return;
-  for (let i = 0; i < ranges.length; i++) {
-    // Retain the same two-second reserve as ordinary startup. Recovering a
-    // silent backlog must not leave speech with only a fragment of headroom.
-    if (target >= ranges.start(i) && safeTime + START_BUFFER_SEC <= ranges.end(i)) {
-      const skipped = target - video.currentTime;
-      slot.silentPrefixRecoveredKey = key;
-      video.currentTime = target;
-      log(`silent prefix recovered turn=${boundary.turnId} skipped=${skipped.toFixed(3)}s before_reply=${safeTime.toFixed(3)}s`);
-      return;
-    }
-  }
 }
 
 function maybeReturnToListenerAtBoundary() {
@@ -1286,7 +1273,43 @@ function floatToPcm16LE(x) {
   return out;
 }
 
+let lastVoicedPosition = null;
+let lastClockReportMs = -Infinity;
+let lastReportedCursor = null;
+function reportListenerPosition(samples) {
+  const slot = activeSlot;
+  if (!slot || slot.timelineOrigin === null || slot.video.paused || slot.video.seeking) {
+    lastVoicedPosition = null;
+    return;
+  }
+  const now = performance.now();
+  if (now - lastClockReportMs >= 160) {
+    let buffered = 0;
+    const cursor = slot.video.currentTime;
+    for (let i = 0; i < slot.video.buffered.length; ++i) {
+      if (slot.video.buffered.start(i) <= cursor && slot.video.buffered.end(i) >= cursor)
+        buffered = slot.video.buffered.end(i) - cursor;
+    }
+    micWs.send(JSON.stringify({type:'playout_clock', epoch:slot.streamEpoch,
+      pts:cursor - slot.timelineOrigin, buffered, advancing:lastReportedCursor !== null && cursor - lastReportedCursor > 0.04}));
+    lastReportedCursor = cursor;
+    lastClockReportMs = now;
+  }
+  for (let i = samples.length - 1; i >= 0; --i) {
+    if (Math.abs(samples[i]) >= 500 / 32768) {
+      const pts = slot.video.currentTime - slot.timelineOrigin - (samples.length - 1 - i) / 16000;
+      lastVoicedPosition = { type: 'listener_position', epoch: slot.streamEpoch, pts };
+      return;
+    }
+  }
+  if (lastVoicedPosition && lastVoicedPosition.epoch === slot.streamEpoch) {
+    micWs.send(JSON.stringify(lastVoicedPosition));
+  }
+  lastVoicedPosition = null;
+}
+
 function resetMicPending16() {
+  lastVoicedPosition = null;
   micPending16 = new Float32Array(0);
   micResampleSourceRate = 0;
   micResampleWeightedSum = 0;
@@ -1307,9 +1330,9 @@ function sendMic16k(x16) {
       resetMicPending16();
       return;
     }
-    micWs.send(
-      floatToPcm16LE(merged.subarray(offset, offset + MIC_SEND_SAMPLES))
-    );
+    const packet = merged.subarray(offset, offset + MIC_SEND_SAMPLES);
+    reportListenerPosition(packet);
+    micWs.send(floatToPcm16LE(packet));
     offset += MIC_SEND_SAMPLES;
   }
   micPending16 = merged.slice(offset);
@@ -1396,7 +1419,7 @@ async function startMic(generation) {
     await waitForMicOpen(ws, generation);
     setStatus('请允许浏览器使用麦克风…');
     nextStream = await navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      audio: { channelCount: 1, echoCancellation: micMode.value !== 'headphones', noiseSuppression: true, autoGainControl: true },
       video: false,
     });
     await resumed;

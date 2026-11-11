@@ -650,6 +650,8 @@ class MediaPipeClient:
         self.accepted_generation = 0
         self._next_av_unit_id = 0
         self._epoch_media_units = 0
+        self.offered_samples = 0
+        self.handoff_clock_valid = True
         self._generation_start_units: Dict[int, int] = {}
         self._assistant_boundaries_scheduled: Set[tuple[str, int, int]] = set()
         self._active_assistant_media_key: Optional[tuple[int, int]] = None
@@ -807,6 +809,10 @@ class MediaPipeClient:
         generation: Optional[int] = None,
         audio_frame_meta: Optional[list[Dict[str, Any]]] = None,
     ):
+        while self.segment_q.full():
+            if not self.running.is_set() or self._reset_requested.is_set():
+                return False
+            time.sleep(0.002)
         if not self.running.is_set():
             return False
         with self._generation_lock:
@@ -823,18 +829,10 @@ class MediaPipeClient:
             )
             try:
                 self.segment_q.put_nowait(item)
+                self.offered_samples += len(audio)
                 return True
             except queue.Full:
-                # Live stream: keep newest raw segment. Old segments are stale.
-                try:
-                    self.segment_q.get_nowait()
-                except Exception:
-                    pass
-            try:
-                self.segment_q.put_nowait(item)
-                self.engine.log(f"[PIPE WARN] client={self.client_id} raw segment queue full; dropped oldest")
-                return True
-            except Exception:
+                self.handoff_clock_valid = False
                 return False
 
     def clear_backlog(self):
@@ -994,6 +992,8 @@ class MediaPipeClient:
         io_stop = self._io_stop
         with self._generation_lock:
             self._epoch_media_units = 0
+            self.offered_samples = 0
+            self.handoff_clock_valid = True
             self._generation_start_units.clear()
             self._assistant_boundaries_scheduled.clear()
             self._active_assistant_media_key = None
@@ -1283,6 +1283,10 @@ class MediaPipeClient:
         audio_bytes: bytes,
         assistant_boundaries: Optional[list[Dict[str, Any]]] = None,
     ):
+        while self.av_pair_q.full():
+            if not self.running.is_set() or self._reset_requested.is_set():
+                return False
+            time.sleep(0.002)
         with self._generation_lock:
             if generation != self.accepted_generation:
                 return False
@@ -1473,6 +1477,8 @@ class MediaPipeClient:
                     self._reset_done.clear()
                     self._stream_epoch += 1
                     self._epoch_media_units = 0
+                    self.offered_samples = 0
+                    self.handoff_clock_valid = True
                     self._generation_start_units.clear()
                     self._assistant_boundaries_scheduled.clear()
                     self._active_assistant_media_key = None
@@ -1669,6 +1675,8 @@ class RealtimeMSEEngine:
         self._user_last_rms = 0.0
         self._state = self.WARMUP_IDLE
         self._turn_id = 0
+        self.listener_position = None
+        self.playout_clock = None
         self._stream_generation = 0
         self._last_tts_audio_ts = 0.0
         self._tail_samples_remaining = 0
@@ -2043,6 +2051,8 @@ class RealtimeMSEEngine:
 
     def interrupt_assistant(self) -> int:
         with self._assistant_lock:
+            if self._interrupt_grace_active:
+                return 0
             dropped = len(self._speaker_chunks)
             hop_samples = max(1, int(self.args.hop_ms * 16))
             grace_sec = max(
@@ -2056,6 +2066,8 @@ class RealtimeMSEEngine:
             )
             grace_samples = int(math.ceil(grace_sec * 16000 / hop_samples)) * hop_samples
             grace_source = self._speaker_prefix_locked(grace_samples)
+            # Fade only queued speech. Idle hops resume on the same pose timeline.
+            grace_samples = len(grace_source)
             grace_audio = (
                 self._half_cosine_fade_to_zero(
                     grace_source,
@@ -2633,6 +2645,14 @@ class RealtimeMSEEngine:
         frames_buf = []
         frames_meta_buf = []
         next_feed_time = time.time()
+        handoff_turn = None
+        reserve_turn = None
+        reserve_started = 0.0
+        last_lead = 0.0
+        lead_updated = time.monotonic()
+        reserved_voice = None
+        hold_started = 0.0
+        planned_listener_hops = 0
         seg_idx = 0
         idle_segments_sent = 0
         idle_segments_since_compact = 0
@@ -2679,25 +2699,53 @@ class RealtimeMSEEngine:
                     frames_buf,
                 )
                 next_feed_time = now
+                last_lead = 0.0
 
-            if now >= next_feed_time:
-                (
-                    state,
-                    turn_id,
-                    stream_generation,
-                    speaker_samples,
-                    tail_samples,
-                ) = self._state_snapshot()
+            state, turn_id, stream_generation, speaker_samples, tail_samples = self._state_snapshot()
+            # Render a bounded lead while PCM is available. Keep the real media clock
+            # and FIFO intact, including the original backpressure and interrupt path.
+            prepare_ahead = (state in (self.ASSISTANT_ACTIVE, self.ASSISTANT_TAIL)
+                             and speaker_samples >= hop_samples)
+            clock_now = time.monotonic()
+            # Abruptly removing a two-second speech lead pauses the producer for
+            # two seconds at barge-in. Drain it while continuing to feed listener.
+            render_lead = max(0.0, last_lead - 0.20 * (clock_now - lead_updated))
+            if not self.media_clients:
+                render_lead = 0.0
+            if prepare_ahead:
+                key = (stream_generation, turn_id)
+                if key != reserve_turn:
+                    reserve_turn, reserve_started = key, time.monotonic()
+                # The screen still runs at 25 Hz. Spend available GPU capacity on
+                # later speech as it arrives, without delaying the first audio frame.
+                render_lead = max(render_lead, min(2.0, 0.48 + 0.30 * (clock_now - reserve_started)))
+            last_lead, lead_updated = render_lead, clock_now
+            if now + render_lead >= next_feed_time:
                 chunk = None
                 media_chunk = None
                 chunk_other = None
                 idle_candidate = False
+                planned_listener = False
                 visible = False
                 mode = "IDLE_NO_USER"
                 assistant_feed_allowed = (
                     len(audio_buf) + hop_samples
                     <= self.audio_inflight_high_water_samples
                 )
+                # Once speech is established, avoid committing several seconds of
+                # obsolete words in front of a listener who may interrupt. Keep a
+                # playable reserve and let missing or stale feedback fail open.
+                clock = self.playout_clock
+                if (state == self.ASSISTANT_ACTIVE and clock and len(self.media_clients) == 1
+                        and clock_now - reserve_started > 3 and reserve_turn == (stream_generation, turn_id)):
+                    client, epoch, shown, observed, playable, advancing = clock
+                    age = clock_now - observed
+                    if (client in self.media_clients and client.handoff_clock_valid
+                            and client._stream_epoch == epoch and advancing and 0 <= age < 0.40
+                            and playable - age >= 0.90):
+                        frontier = (client.offered_samples + len(audio_buf)) / 16000
+                        if frontier - shown > 1.40:
+                            assistant_feed_allowed = False
                 idle_audio_q_depth = self._queue_size(self.audio_q)
                 idle_motion_q_depth = self._queue_size(
                     getattr(self.manager, "motion_q", None)
@@ -2751,6 +2799,28 @@ class RealtimeMSEEngine:
                         or idle_bootstrap_allowed
                         or idle_backlog_allowed
                     )
+                    # Bound how much unchangeable Listener media sits ahead of this screen.
+                    # Throttle production only. Every previously rendered frame still plays.
+                    clock = self.playout_clock
+                    position = self.listener_position
+                    if (clock and position and position[0] is clock[0] and position[1] == clock[1]
+                            and 0.18 < time.monotonic() - position[3] < 2.8 and would_be_visible
+                            and len(self.media_clients) == 1):
+                        client, epoch, shown, observed, playable, advancing = clock
+                        age = time.monotonic() - observed
+                        # The reported buffer is already aging. Keep two model hops
+                        # available for the next rendered fragment and bound the hold
+                        # by what this screen can actually play in the meantime.
+                        hold_budget = min(0.36, playable - age - 2 * hop_samples / 16000)
+                        if (client in self.media_clients and client.handoff_clock_valid and
+                                epoch == client._stream_epoch and 0 <= age < 0.40 and hold_budget > 0 and advancing):
+                            frontier = (client.offered_samples + len(audio_buf)) / 16000
+                            if frontier + hop_samples / 16000 > max(position[2] + 2.65, shown + min(age, 0.20) + 0.62):
+                                if reserved_voice != position:
+                                    reserved_voice = position
+                                    hold_started = time.monotonic()
+                                if time.monotonic() - hold_started < hold_budget:
+                                    idle_feed_allowed = False
                     should_feed_idle = (
                         idle_segments_sent < idle_warmup_segments
                         or (
@@ -2807,11 +2877,40 @@ class RealtimeMSEEngine:
                     # Do not turn websocket packet jitter into audible zero gaps.
                     # Wait until a complete model hop is available.
                     if speaker_samples >= hop_samples and assistant_feed_allowed:
-                        chunk = self._pop_speaker_samples(hop_samples, pad=False)
-                        if listener_audio:
-                            self._listener_other_source = "zero"
-                        visible = True
-                        mode = "ASSISTANT_ACTIVE"
+                        key = (stream_generation, turn_id)
+                        if handoff_turn != key:
+                            handoff_turn = key
+                            planned_listener_hops = 0
+                            position = self.listener_position
+                            if position:
+                                client, epoch, voice_pts, observed = position
+                                if (client in self.media_clients and client.handoff_clock_valid
+                                        and client._stream_epoch == epoch and time.monotonic() - observed < 5):
+                                    frontier = (client.offered_samples + len(audio_buf)) / 16000
+                                    # Target the speaking frames just before the first voiced syllable.
+                                    target = voice_pts + 2.80
+                                    gap = target - frontier
+                                    remaining = 3.0 - (time.monotonic() - observed)
+                                    # A deadline cannot create media. Leave measured time for motion,
+                                    # encoding, gateway delivery and the voice onset in the first PCM.
+                                    budget = max(0.0, min(0.8, remaining - 1.1))
+                                    if 0 < gap <= 2.0:
+                                        planned_listener_hops = round(min(gap, budget) * 16000 / hop_samples)
+                                    self.log(f"[HANDOFF PLAN] turn={turn_id} epoch={epoch} "
+                                             f"voice={voice_pts:.3f} target={target:.3f} "
+                                             f"frontier={frontier:.3f} listener_hops={planned_listener_hops}")
+                        if planned_listener_hops:
+                            planned_listener = True
+                            chunk = np.zeros(hop_samples, dtype=np.float32)
+                            if listener_audio:
+                                chunk_other, mode, _ = self._pop_listener_other_hop(hop_samples)
+                            visible = True
+                        else:
+                            chunk = self._pop_speaker_samples(hop_samples, pad=False)
+                            if listener_audio:
+                                self._listener_other_source = "zero"
+                            visible = True
+                            mode = "ASSISTANT_ACTIVE"
                 elif state == self.ASSISTANT_TAIL:
                     idle_segments_since_compact = 0
                     with self._assistant_lock:
@@ -2918,7 +3017,17 @@ class RealtimeMSEEngine:
                     queued = False
                     stale_idle = False
                     put_error = None
-                    if idle_candidate:
+                    if planned_listener:
+                        with self._assistant_lock:
+                            if (self._state == self.ASSISTANT_ACTIVE and self._turn_id == turn_id
+                                    and self._stream_generation == stream_generation):
+                                try:
+                                    self.audio_q.put_nowait(item)
+                                    queued = True
+                                    planned_listener_hops -= 1
+                                except queue.Full as exc:
+                                    put_error = exc
+                    elif idle_candidate:
                         # Serialize the final idle revalidation and enqueue
                         # with begin_assistant_turn(). This prevents a stale
                         # 200 ms Listener hop from landing ahead of first TTS.
@@ -3365,7 +3474,19 @@ async def mic_ws(request: web.Request):
                 except Exception:
                     obj = {}
                 typ = obj.get("type")
-                if typ == "config":
+                if typ in ("listener_position", "playout_clock"):
+                    clients = list(engine.media_clients)
+                    pts = obj.get("pts")
+                    if (len(clients) == 1 and type(pts) in (float, int) and math.isfinite(pts)
+                            and 0 <= pts and obj.get("epoch") == clients[0]._stream_epoch):
+                        observation = (clients[0], obj["epoch"], pts, time.monotonic())
+                        if typ == "listener_position":
+                            engine.listener_position = observation
+                        else:
+                            ahead = obj.get("buffered")
+                            if type(ahead) in (int,float) and math.isfinite(ahead) and 0 <= ahead <= 30:
+                                engine.playout_clock = (*observation, ahead, obj.get("advancing") is True)
+                elif typ == "config":
                     instruction = obj.get("instruction") or instruction
                     async with input_lock:
                         if request.app.get("active_mic_ws") is not ws:

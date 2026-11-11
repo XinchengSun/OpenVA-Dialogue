@@ -338,6 +338,33 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
         return True
 
     with ctx, torch.inference_mode():
+        # Read-only, per-model CPU cache. Nonzero conditioning, mismatched shapes
+        # or unprimed lengths always execute the original full-history encoder.
+        zero_features = {}
+        hop_frames = hop_samples // samples_per_frame
+        cached_width = window + hop_frames + int(args.feature_lag_frames) + 1
+        if (torch.cuda.is_available() and not getattr(model, "training", True)
+                and hop_frames and hop_samples % samples_per_frame == 0):
+            with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
+                for hop_number in range(1, 551):
+                    length = context_frames + hop_number * hop_frames
+                    silence = torch.zeros((1, length * samples_per_frame), device=device)
+                    encoded_other = model.get_audio2face_fea_other(silence, None, length)
+                    first = max(0, length - cached_width)
+                    tail = encoded_other[:, first:].contiguous().cpu()
+                    if hop_number in (1, 10, 75, 200, 350, 550):
+                        reference = model.get_audio2face_fea_other(silence, None, length)
+                        if not torch.equal(reference[:, first:].cpu(), tail):
+                            zero_features.clear()
+                            print("[POSE CACHE] unequal; original encoder retained", flush=True)
+                            break
+                    zero_features[length] = (first, tail)
+                    del encoded_other
+                    if hop_number % 32 == 0:
+                        torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
+        cache_hits = 0
+        print(f"[POSE CACHE] ready lengths={len(zero_features)}", flush=True)
         if not getattr(model, "cuda_graph_enabled", False):
             model.setup_cuda_graphs(num_inference_steps=args.denoising_steps)
 
@@ -465,7 +492,23 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
 
                 # Encode retained history (all audio unless compaction is enabled).
                 audio_feat = model.get_audio2face_fea(audio_tensor, None, total_len)
-                audio_other_feat = model.get_audio2face_fea_other(audio_other_tensor, None, total_len)
+                entry = zero_features.get(total_len)
+                feature_origin = 0
+                if entry and generated_idx >= entry[0] and not np.any(audio_other_full):
+                    feature_origin, tail = entry
+                    audio_other_feat = tail.to(device)
+                    cache_hits += 1
+                    # In-stream verification compares the actual overlapping model input
+                    # for this hop; a failure immediately falls back for future hops.
+                    if cache_hits in (1, 32, 128, 384):
+                        normal = model.get_audio2face_fea_other(audio_other_tensor, None, total_len)
+                        equal = torch.equal(normal[:, feature_origin:], audio_other_feat)
+                        print(f"[POSE CACHE] hit={cache_hits} actual_equal={equal}", flush=True)
+                        if not equal:
+                            zero_features.clear()
+                            feature_origin, audio_other_feat = 0, normal
+                else:
+                    audio_other_feat = model.get_audio2face_fea_other(audio_other_tensor, None, total_len)
 
                 out_frames = []
                 produced_start = generated_idx
@@ -482,7 +525,7 @@ def motion_worker(args, anchor_q, audio_q, motion_q):
 
                     out1 = model.one_clip_only_inference_cuda_graph(
                         per_compute_audio_feature=audio_feat[:, start_idx:end_idx],
-                        per_compute_audio_other_feature=audio_other_feat[:, start_idx:end_idx],
+                        per_compute_audio_other_feature=audio_other_feat[:, start_idx-feature_origin:end_idx-feature_origin],
                         past_audio_self=past_audio,
                         audio_self=audio_slice,
                         past_audio_other=past_audio_other,

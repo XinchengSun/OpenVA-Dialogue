@@ -205,6 +205,10 @@ or restart fails. See [README_CUSTOMIZATION.md](README_CUSTOMIZATION.md).
 
 ## Documentation
 
+The [2026-11-11 infra release](docs/infra_release_20261111.md) records the saved
+realtime dialogue version, its configuration, measured latency and memory, and
+remaining interruption and playback limitations.
+
 For the consolidated model architecture, inference flow, optimization status, evidence and TODOs, see [Model and optimization README (Chinese)](README_MODEL.md).
 
 | Guide | Contents |

@@ -11,6 +11,7 @@ import os
 import uuid
 from collections import defaultdict
 from collections.abc import AsyncGenerator, Callable
+from contextvars import ContextVar
 from typing import Any
 
 from pipecat.frames.frames import (
@@ -18,6 +19,7 @@ from pipecat.frames.frames import (
     Frame,
     StartFrame,
     TTSAudioRawFrame,
+    TTSTextFrame,
 )
 from pipecat.services.settings import TTSSettings
 from pipecat.services.tts_service import TextAggregationMode, TTSService
@@ -58,7 +60,9 @@ class LocalPCMTTSService(TTSService):
             # first character of the next sentence before it confirms the
             # current boundary, adding up to hundreds of milliseconds.
             text_aggregation_mode=TextAggregationMode.TOKEN,
-            push_text_frames=False,
+            # The PCM bridge has no word timestamps. Emit one transcript frame
+            # behind each synthesized chunk so a barge-in keeps completed chunks.
+            push_text_frames=True,
             # Pipecat owns one audio context for the entire LLM turn. Sentence
             # requests yield only PCM, avoiding a listener transition between
             # two sentences from the same reply.
@@ -72,6 +76,7 @@ class LocalPCMTTSService(TTSService):
             ),
             **kwargs,
         )
+        self._completed_synthesis = ContextVar("completed_synthesis", default=None)
         self._uri = (
             uri
             or generic_uri
@@ -195,12 +200,20 @@ class LocalPCMTTSService(TTSService):
         )
         return result
 
+    async def append_to_audio_context(self, context_id, frame):
+        # Pipecat also attempts to append text when a generator returns after
+        # an ErrorFrame or cancellation. Such chunks have no complete speech.
+        if isinstance(frame, TTSTextFrame) and self._completed_synthesis.get() != context_id:
+            return
+        return await super().append_to_audio_context(context_id, frame)
+
     async def run_tts(
         self,
         text: str,
         context_id: str,
     ) -> AsyncGenerator[Frame | None, None]:
         request_id = uuid.uuid4().hex
+        self._completed_synthesis.set(None)
         metadata_received = False
         audio_received = False
         trace("tts_request", context=context_id, request=request_id, **text_fields(text))
@@ -283,6 +296,8 @@ class LocalPCMTTSService(TTSService):
                             )
                         if status == "completed" and not audio_received:
                             raise RuntimeError("TTS completed without PCM audio")
+                        if status == "completed" and request_id not in self._cancelled_requests:
+                            self._completed_synthesis.set(context_id)
                         self._ready = True
                         trace("tts_done", context=context_id, request=request_id, status=status)
                         return

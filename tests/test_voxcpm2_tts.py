@@ -19,10 +19,12 @@ try:
     from pipecat.frames.frames import (
         EndFrame,
         ErrorFrame,
+        InterruptionFrame,
         LLMFullResponseEndFrame,
         LLMFullResponseStartFrame,
         StartFrame,
         TTSAudioRawFrame,
+        TTSTextFrame,
         TTSStartedFrame,
         TTSStoppedFrame,
         TextFrame,
@@ -944,6 +946,41 @@ class VoxCPM2PipecatAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(stops), 1)
         self.assertEqual(b"".join(frame.audio for frame in audio), b"\x01\x00\x02\x00")
         self.assertEqual(starts[0].context_id, stops[0].context_id)
+        self.assertEqual([f.text for f in pushed if isinstance(f, TTSTextFrame)
+                          and f.append_to_context is not False], ["第一句。", "第二句。"])
+
+    async def test_interrupted_turn_retains_only_completed_synthesis(self):
+        health = _FakeClientWebSocket([json.dumps({"type": "health", "status": "ok", "sample_rate": 24000})])
+        complete = _FakeClientWebSocket([
+            json.dumps({"type": "start", "sample_rate": 24000, "channels": 1, "sample_width": 2}),
+            b"\x01\x00", json.dumps({"type": "done", "status": "completed"}),
+        ])
+        failed = _FakeClientWebSocket([json.dumps({"type": "error", "error": "test failure"})])
+        service = VoxCPM2LocalTTSService(connector=_ConnectorQueue(health, complete, failed),
+                                          task_manager=TaskManager())
+        service._clock = SystemClock()
+        service._clock.start()
+        pushed = []
+        delivered = asyncio.Event()
+
+        async def record(frame, *args):
+            pushed.append(frame)
+            if isinstance(frame, TTSTextFrame) and frame.append_to_context is not False:
+                delivered.set()
+
+        service.push_frame = record
+        await service.start(StartFrame(audio_in_sample_rate=16000, audio_out_sample_rate=16000))
+        try:
+            await service.process_frame(LLMFullResponseStartFrame(), FrameDirection.DOWNSTREAM)
+            await service.process_frame(TextFrame("我是语音助手。"), FrameDirection.DOWNSTREAM)
+            await asyncio.wait_for(delivered.wait(), timeout=1)
+            await service.process_frame(TextFrame("这句合成失败。"), FrameDirection.DOWNSTREAM)
+            await service.process_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
+        finally:
+            await service.process_frame(LLMFullResponseEndFrame(), FrameDirection.DOWNSTREAM)
+            await service.stop(EndFrame())
+        self.assertEqual([f.text for f in pushed if isinstance(f, TTSTextFrame)
+                          and f.append_to_context is not False], ["我是语音助手。"])
 
 
 if __name__ == "__main__":

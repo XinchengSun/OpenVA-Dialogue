@@ -5,6 +5,7 @@ import __future__
 from pathlib import Path
 import queue
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -21,7 +22,7 @@ def load_client(source=None):
                 and n.name == "MediaPipeClient")
     methods = {"_write_to_ffmpeg", "_float_to_s16le", "push_segment"}
     node.body = [n for n in node.body if getattr(n, "name", None) in methods]
-    namespace = dict(np=np, queue=queue)
+    namespace = dict(np=np, queue=queue, time=time)
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(SOURCE), "exec",
                  flags=__future__.annotations.compiler_flag), namespace)
     return namespace["MediaPipeClient"]
@@ -40,6 +41,9 @@ def make_client(cls=Client, stride=2, record=True):
     client._generation_lock = threading.Lock()
     client._active_assistant_media_key = None
     client.accepted_generation = 0
+    client.offered_samples = 0
+    client.handoff_clock_valid = True
+    client._reset_requested = threading.Event()
     client.enqueued_frames = 0
     client.client_id = 0
     client.running = threading.Event()
@@ -59,6 +63,46 @@ def make_client(cls=Client, stride=2, record=True):
 
 
 class MediaCopyPerformanceTests(unittest.TestCase):
+    def test_full_input_queue_waits_and_preserves_order(self):
+        client = make_client()
+        client.segment_q = queue.Queue(maxsize=1)
+        first = np.ones(640, dtype=np.float32)
+        second = first * 2
+        frame = np.zeros((1, 8, 8, 3), dtype=np.uint8)
+        self.assertTrue(client.push_segment(frame, first))
+        entered = threading.Event()
+        completed = threading.Event()
+        result = []
+
+        def submit():
+            entered.set()
+            result.append(client.push_segment(frame, second))
+            completed.set()
+
+        thread = threading.Thread(target=submit)
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            self.assertFalse(completed.wait(0.02))
+            np.testing.assert_array_equal(client.segment_q.get_nowait()[2], first)
+            self.assertTrue(completed.wait(1))
+            self.assertEqual(result, [True])
+            np.testing.assert_array_equal(client.segment_q.get_nowait()[2], second)
+            self.assertEqual(client.offered_samples, 1280)
+        finally:
+            client.running.clear()
+            thread.join(1)
+
+    def test_reset_cancels_a_full_queue_wait(self):
+        client = make_client()
+        client.segment_q = queue.Queue(maxsize=1)
+        frame = np.zeros((1, 8, 8, 3), dtype=np.uint8)
+        audio = np.ones(640, dtype=np.float32)
+        client.push_segment(frame, audio)
+        client._reset_requested.set()
+        self.assertFalse(client.push_segment(frame, audio))
+        self.assertEqual(client.offered_samples, 640)
+
     def test_encoder_bytes_match_for_contiguous_strided_and_float_frames(self):
         base = np.random.default_rng(17).integers(0, 256, (4, 8, 8, 3), dtype=np.uint8)
         audio = np.linspace(-1.1, 1.1, 4 * 640, dtype=np.float32)

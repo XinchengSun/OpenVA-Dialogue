@@ -48,6 +48,7 @@ const startMic=async()=>{throw Object.assign(new Error('permission denied'),{nam
 const assert=require('node:assert/strict'),order=[];
 let processor=null,micStream=null,audioCtx=null,zeroGain=null,micLifecycleGeneration=1;
 const ws={readyState:1,close(){}},micWs=ws,WebSocket={OPEN:1,CLOSING:2};
+const micMode={value:'speaker'};
 const resetMicPending16=()=>{},connectMicWS=()=>ws,setStatus=()=>{},ensureIdlePlaying=()=>{},log=()=>{};
 const downsampleTo16k=()=>{},sendMic16k=()=>{};
 const waitForMicOpen=()=>{order.push('wait');return new Promise(r=>setTimeout(r,10));};
